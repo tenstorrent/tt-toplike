@@ -728,8 +728,10 @@ or `KernelCompiled` with `chip: None`) draw nothing, as in Die 3D. With an empty
 arcade draws the frames it drew before the bus; a test pins them by hash.
 
 When the TUI is attached to a headless host, the hero duel's serving stats come from the
-host's world (the first ready row of the rows the activity lanes use). Those rows carry no
-completion count, so the snake's lunge comes from the bus's `RequestsCompleted` events.
+host's world, from the rows the activity lanes use: the first ready model on one of the TUI's
+chips, or the first ready model when none runs on them (`arcade_bus::duel_serving`). Those rows
+carry no completion count, so the snake's lunge comes from the bus's `RequestsCompleted`
+events.
 
 A TUI that records (`--record`) or serves (`--bus-socket`) refuses a backend switch (the `b`
 key and `/remote`), because the log header names one backend and mode for the whole run. An

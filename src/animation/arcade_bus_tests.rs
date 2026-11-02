@@ -1171,6 +1171,49 @@ fn attached_the_duel_serves_the_hosts_stats_and_lunges_on_its_requests() {
     })
 }
 
+/// The duel's serving stats, as the arcade wiring in `ui::tui` picks them
+/// (`duel_serving`). Hosting its own bus, the TUI keeps the local monitor's.
+/// Attached, it takes the host's: a ready model on one of this TUI's chips
+/// first, then the first ready model, and never the local monitor's.
+#[test]
+fn the_duel_serves_the_hosts_model_on_a_local_chip_first() {
+    use crate::animation::arcade_bus::duel_serving;
+    use crate::bus::compat::world_to_service_states_with;
+    let t0 = 5 * SEC;
+    // `alpha` sorts first and runs on chip 5, which this TUI lacks;
+    // `beta` runs on chip 0.
+    let mut f = Bus::new();
+    f.ready("alpha", &[5], Some(10.0))
+        .ready("beta", &[0], Some(200.0));
+    let view = f.view(t0);
+    // The rows an attached TUI builds: chip keys turn into this TUI's
+    // device indexes, and a chip it lacks into none.
+    let index = |k: &EntityKey| (0..2).find(|i| chip(*i) == *k);
+    let rows = world_to_service_states_with(&view, &index);
+    assert_eq!(rows[0].chips, Vec::<usize>::new());
+    assert_eq!(rows[1].chips, vec![0]);
+    let local = crate::workload::inference_server::ServingStats {
+        generation_tps: 7.0,
+        ..crate::workload::inference_server::ServingStats::zeroed()
+    };
+
+    // Hosting: the local monitor's stats.
+    assert_eq!(duel_serving(Some(local), None), Some(local));
+    // Attached: the model on the local chip, although `alpha` sorts first.
+    let got = duel_serving(Some(local), Some(&rows)).expect("a ready row");
+    assert_eq!(got.generation_tps, 200.0);
+    // No ready model on a local chip: the first ready one.
+    let mut far = Bus::new();
+    far.ready("alpha", &[5], Some(10.0));
+    let far_rows = world_to_service_states_with(&far.view(t0), &index);
+    assert_eq!(
+        duel_serving(Some(local), Some(&far_rows)).map(|s| s.generation_tps),
+        Some(10.0)
+    );
+    // Attached with nothing ready: nothing, and not the local monitor's.
+    assert_eq!(duel_serving(Some(local), Some(&[])), None);
+}
+
 /// Prints an arcade frame with something from the bus on each chip: a model
 /// loading at 40% on chip 0, one ready on chip 1 with a hit just begun, a
 /// spark and a compile. For a person to look at; asserts nothing. Run with

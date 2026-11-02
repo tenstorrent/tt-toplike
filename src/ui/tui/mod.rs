@@ -1380,7 +1380,10 @@ fn run_app(
                     // Attached to a headless host: the host's models, as the
                     // `i` view draws them.
                     let world_rows = inference_bus::attached_rows(tui_bus, backend.as_ref());
-                    let attached = world_rows.is_some();
+                    // Attached: the hero duel's serving stats are the host's,
+                    // from the same rows as the lanes.
+                    let serving =
+                        crate::animation::arcade_bus::duel_serving(serving, world_rows.as_deref());
                     #[cfg(target_os = "linux")]
                     let service_rows = if let Some(r) = world_rows {
                         r
@@ -1397,13 +1400,6 @@ fn run_app(
                     let service_rows: Vec<
                         crate::workload::inference_server::ServiceState,
                     > = world_rows.unwrap_or_default();
-                    // Attached: the hero duel's serving stats are the host's,
-                    // from the same rows as the lanes.
-                    let serving = if attached {
-                        crate::animation::arcade_bus::attached_serving(&service_rows)
-                    } else {
-                        serving
-                    };
                     let activities = activity_tracker.update(
                         train_state.as_ref(),
                         &service_rows,

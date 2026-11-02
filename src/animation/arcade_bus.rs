@@ -863,14 +863,34 @@ pub fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The bus's hero serving stats when the TUI is attached to a host: the
-/// first ready row's, from the rows built from the host's world. The local
-/// monitor's stats belong to this machine and say nothing about the host.
+/// The hero duel's serving stats. `local` is the local monitor's choice;
+/// `attached_rows` are the rows built from an attached host's world
+/// (`inference_bus::attached_rows`), `None` when the TUI hosts its own bus.
+pub fn duel_serving(
+    local: Option<crate::workload::inference_server::ServingStats>,
+    attached_rows: Option<&[crate::workload::inference_server::ServiceState]>,
+) -> Option<crate::workload::inference_server::ServingStats> {
+    match attached_rows {
+        Some(rows) => attached_serving(rows),
+        None => local,
+    }
+}
+
+/// The bus's hero serving stats when the TUI is attached to a host, from
+/// the rows built from the host's world. The local monitor's stats belong
+/// to this machine and say nothing about the host.
+///
+/// The first ready row on one of this TUI's chips, so the duel shows the
+/// model whose requests make the snake lunge (the lunge counts only models
+/// on this TUI's chips). With none, the first ready row. An attached row's
+/// `chips` hold only this TUI's device indexes: a chip it lacks has none.
 pub fn attached_serving(
     rows: &[crate::workload::inference_server::ServiceState],
 ) -> Option<crate::workload::inference_server::ServingStats> {
     use crate::workload::inference_server::Phase;
-    rows.iter()
-        .find(|s| s.phase == Phase::Ready)
+    let ready = || rows.iter().filter(|s| s.phase == Phase::Ready);
+    ready()
+        .find(|s| !s.chips.is_empty())
+        .or_else(|| ready().next())
         .and_then(|s| s.serving)
 }
