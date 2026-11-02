@@ -4539,10 +4539,12 @@ fn overlay_row_target(kind: OverlayPanel) -> usize {
 /// The panel composites over whatever view is underneath — it does not consume
 /// any layout rows.  Width adapts to the widest content line (clamped to the
 /// terminal) so legend/help text is never clipped; height grows with content.
+#[cfg(test)]
 fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
     render_overlay_panel_with(f, kind, mode, default_backdrop_legend(mode));
 }
 
+#[cfg(test)]
 /// The legend's backdrop line for `mode` with no setting changed: its
 /// default backdrop, no estimate.
 fn default_backdrop_legend(mode: DisplayMode) -> (crate::animation::backdrop::Choice, bool) {
@@ -4652,6 +4654,7 @@ fn render_overlay_panel_with(
 ///
 /// Lines must fit within PANEL_W - 2 visible columns (no right border means content
 /// needs to respect the panel width itself).  Each line is prefixed with `║ ` (2 cols).
+#[cfg(test)]
 fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line<'static>> {
     overlay_lines_with(kind, mode, cols, default_backdrop_legend(mode))
 }

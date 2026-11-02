@@ -601,11 +601,18 @@ impl Backdrop {
 
     /// The backdrop for `w` by `h` cells. Empty when nothing is drawn.
     pub fn canvas(&self, w: usize, h: usize) -> Canvas {
-        let Some(kind) = self.kind.filter(|_| self.active()) else {
-            return vec![vec![None; w]; h];
-        };
+        self.with_canvas(w, h, |c| c.clone())
+            .unwrap_or_else(|| vec![vec![None; w]; h])
+    }
+
+    /// Run `f` on the backdrop for `w` by `h` cells; `None` when nothing is
+    /// drawn. The scene draws its canvas each time, as the Inference view
+    /// always has. The sky and the clouds draw theirs once per step and size
+    /// and lend the cached one, so a frame between steps allocates nothing.
+    fn with_canvas<R>(&self, w: usize, h: usize, f: impl FnOnce(&Canvas) -> R) -> Option<R> {
+        let kind = self.kind.filter(|_| self.active())?;
         if kind == BackdropKind::Scene {
-            return self.atmosphere.render_backdrop(w, h);
+            return Some(f(&self.atmosphere.render_backdrop(w, h)));
         }
         let key = CacheKey {
             kind,
@@ -618,17 +625,15 @@ impl Backdrop {
             b: self.cloud_clock.intensity().to_bits(),
             theme: crate::ui::colors::current_theme(),
         };
-        if let Some((k, c)) = self.cache.borrow().as_ref() {
-            if *k == key {
-                return c.clone();
-            }
+        let mut cache = self.cache.borrow_mut();
+        if cache.as_ref().is_none_or(|(k, _)| *k != key) {
+            let canvas = match kind {
+                BackdropKind::Sky => self.sky_canvas(w, h),
+                _ => self.cloud_canvas(w, h, key.theme),
+            };
+            *cache = Some((key, canvas));
         }
-        let canvas = match kind {
-            BackdropKind::Sky => self.sky_canvas(w, h),
-            _ => self.cloud_canvas(w, h, key.theme),
-        };
-        *self.cache.borrow_mut() = Some((key, canvas.clone()));
-        canvas
+        cache.as_ref().map(|(_, c)| f(c))
     }
 
     /// The sky over the whole area, as the Training view draws it while
@@ -662,7 +667,7 @@ impl Backdrop {
     }
 
     /// The clouds, one band per cell. A cell stands for the 2 x 4 pixels a
-    /// braille cell has in Die 3D, so the banks have the size they have
+    /// braille cell has in the Waffler, so the banks have the size they have
     /// there; it takes the band of its top-left pixel.
     fn cloud_canvas(&self, w: usize, h: usize, theme: crate::ui::colors::Theme) -> Canvas {
         let pal = super::die3d::palette::for_theme(theme);
@@ -697,7 +702,14 @@ impl Backdrop {
         if !self.active() {
             return lines;
         }
-        atmosphere::composite(&self.canvas(width, height), lines, width)
+        // `active` was checked, so a canvas is lent; the fallback keeps the
+        // lines as they are.
+        let mut lines = Some(lines);
+        self.with_canvas(width, height, |c| {
+            atmosphere::composite(c, lines.take().unwrap_or_default(), width)
+        })
+        .or(lines)
+        .unwrap_or_default()
     }
 
     /// Lay the backdrop into `area` of a drawn buffer, filling blank cells
@@ -710,19 +722,20 @@ impl Backdrop {
         if !self.active() || area.is_empty() {
             return;
         }
-        let canvas = self.canvas(area.width as usize, area.height as usize);
-        for (dy, row) in canvas.iter().enumerate() {
-            for (dx, cell) in row.iter().enumerate() {
-                let Some((ch, colour)) = *cell else {
-                    continue;
-                };
-                let c = &mut buf[(area.x + dx as u16, area.y + dy as u16)];
-                if is_blank(c) {
-                    c.set_char(ch);
-                    c.set_fg(colour);
+        self.with_canvas(area.width as usize, area.height as usize, |canvas| {
+            for (dy, row) in canvas.iter().enumerate() {
+                for (dx, cell) in row.iter().enumerate() {
+                    let Some((ch, colour)) = *cell else {
+                        continue;
+                    };
+                    let c = &mut buf[(area.x + dx as u16, area.y + dy as u16)];
+                    if is_blank(c) {
+                        c.set_char(ch);
+                        c.set_fg(colour);
+                    }
                 }
             }
-        }
+        });
     }
 }
 

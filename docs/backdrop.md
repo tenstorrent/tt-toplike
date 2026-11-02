@@ -136,6 +136,9 @@ backdrops cost.
 | clouds | idle | 2458 | 2.22 | 3.03 |
 | clouds | busy | 2485 | 3.15 | 10.78 |
 
+A second run gave means from 2.6 ms (off) to 5.5 ms (sky, idle) with the same cell counts:
+the frame times move with the box's load, and the cell counts do not.
+
 The backdrop alone, best of seven batches on the busy frame:
 
 | Backdrop | Drawing the canvas, ms | Laying it under the frame, ms |
