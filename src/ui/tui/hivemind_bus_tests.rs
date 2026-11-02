@@ -252,7 +252,14 @@ fn an_empty_world_draws_the_view_as_before_the_bus() {
         ),
     ];
     for (name, hive, w, h, unified, want) in cases {
-        let got = buffer_hash(&render(hive, &bus, w, h, unified, Severity::Trace));
+        // The hashes were taken in a truecolor terminal with the default
+        // theme. Pin both, so the test gives the same answer under CI's
+        // `TERM=dumb` and beside a test that flips the global theme.
+        let got = crate::ui::colors::with_truecolor(true, || {
+            crate::ui::colors::with_theme(crate::ui::colors::Theme::Default, || {
+                buffer_hash(&render(hive, &bus, w, h, unified, Severity::Trace))
+            })
+        });
         assert_eq!(got, want, "{name}: {got:#018x}");
     }
 }
