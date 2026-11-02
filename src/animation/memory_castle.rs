@@ -15,12 +15,15 @@
 //! Inspired by roguelike dungeons (NetHack, DCSS), where every character and color
 //! has meaning, and the dungeon is alive with activity.
 
+use crate::animation::arcade_bus::{ArcadeBusState, ArcadeFx, ChipFx};
+use crate::animation::castle_bus;
 use crate::animation::topology::BoardTopology;
 use crate::animation::{hsv_to_rgb, rgb_to_hsv, temp_to_hue, AdaptiveBaseline};
 use crate::backend::TelemetryBackend;
 use crate::ui::colors;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use tt_toplike_bus::{EntityKey, WorldRead};
 
 /// Particle type distinguishes different memory operations
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -227,6 +230,15 @@ pub struct MemoryCastle {
     /// Arcade sets this `false` so the composite view owns a single shared
     /// telemetry strip instead of each embedded section printing its own W/°C.
     chrome: bool,
+    // ── Signal bus (see `castle_bus`) ─────────────────────────────────────
+    /// What the bus puts on each chip's tower, from the last `set_bus`.
+    /// Empty until a world is given, and always empty when the castle is
+    /// embedded in the arcade (which reads the bus itself).
+    bus_fx: ArcadeFx,
+    /// What the bus reading remembers between updates.
+    bus_state: ArcadeBusState,
+    /// The bus time of the last `set_bus`, which the frame path draws at.
+    bus_now: u64,
 }
 
 /// Per-device column budget for the full castle rendering (existing look).
@@ -309,7 +321,41 @@ impl MemoryCastle {
             environment,
             board_topology: None,
             chrome: true,
+            bus_fx: ArcadeFx::default(),
+            bus_state: ArcadeBusState::default(),
+            bus_now: 0,
         }
+    }
+
+    /// Read the signal bus for this update (see `castle_bus`). `None` drops
+    /// what was read, and the next world is a first sight. Each device is
+    /// keyed by its PCI address and drawn in its position's tower.
+    pub fn set_bus(&mut self, world: Option<&dyn WorldRead>, backend: &dyn TelemetryBackend) {
+        match world {
+            Some(w) => {
+                let devices = backend.devices();
+                // The bus names a chip by its PCI address, never by position.
+                let chips: Vec<(usize, EntityKey)> = devices
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, d)| !d.bus_id.is_empty())
+                    .map(|(slot, d)| (slot, EntityKey::chip(&d.bus_id)))
+                    .collect();
+                let now = w.now_mono_ns();
+                self.bus_fx =
+                    ArcadeFx::from_world(w, &chips, devices.len(), now, &mut self.bus_state);
+                self.bus_now = now;
+            }
+            None => {
+                self.bus_fx = ArcadeFx::default();
+                self.bus_state = ArcadeBusState::default();
+            }
+        }
+    }
+
+    /// What the bus puts on the tower in position `slot`, if anything.
+    fn bus_chip(&self, slot: usize) -> Option<&ChipFx> {
+        self.bus_fx.chips.iter().find(|c| c.slot == slot)
     }
 
     /// Toggle per-device power/temp telemetry in the headers.  `true` = the
@@ -547,6 +593,18 @@ impl MemoryCastle {
                     ));
                 }
             }
+            // The bus on the one tower (the cells after the left padding).
+            if let Some(co) = self.bus_chip(0) {
+                castle_bus::draw_row(
+                    co,
+                    self.bus_now,
+                    row,
+                    canvas_width,
+                    canvas_height,
+                    &mut spans,
+                    1,
+                );
+            }
 
             lines.push(Line::from(spans));
         }
@@ -704,6 +762,7 @@ impl MemoryCastle {
                 let current_change = self.baseline.current_change(device.index, current);
 
                 // Render this device's column
+                let tower_start = spans.len();
                 for col in 0..col_width {
                     let global_col = x_offset + col;
 
@@ -811,6 +870,19 @@ impl MemoryCastle {
                             spans.push(bg_span);
                         }
                     }
+                }
+
+                // The bus on this device's tower.
+                if let Some(co) = self.bus_chip(dev_idx) {
+                    castle_bus::draw_row(
+                        co,
+                        self.bus_now,
+                        row,
+                        col_width,
+                        canvas_height,
+                        &mut spans,
+                        tower_start,
+                    );
                 }
 
                 // Column separator between adjacent chip columns.
@@ -1109,6 +1181,7 @@ impl MemoryCastle {
                 let current_change = self.baseline.current_change(device.index, current);
 
                 // Render this device's column
+                let tower_start = spans.len();
                 for col in 0..col_width {
                     let global_col = x_offset + col;
 
@@ -1224,6 +1297,19 @@ impl MemoryCastle {
                             spans.push(bg_span);
                         }
                     }
+                }
+
+                // The bus on this device's tower.
+                if let Some(co) = self.bus_chip(dev_idx) {
+                    castle_bus::draw_row(
+                        co,
+                        self.bus_now,
+                        row,
+                        col_width,
+                        canvas_height,
+                        &mut spans,
+                        tower_start,
+                    );
                 }
 
                 // Column separator between adjacent chip towers — single
@@ -1398,6 +1484,7 @@ impl MemoryCastle {
                 // "BH0  ████████░░░░ 16.1W 43.2°C" — fixed-width so the bar
                 // that follows lines up down the column regardless of index
                 // digit count.
+                let cell_start = spans.len();
                 spans.push(Span::styled(
                     format!("{:<5}", device.short_label()),
                     Style::default().bg(colors::canvas_bg()).fg(idx_color),
@@ -1420,6 +1507,13 @@ impl MemoryCastle {
                             .bg(colors::canvas_bg())
                             .fg(colors::rgb(180, 180, 180)),
                     ));
+                }
+                // The bus on this chip's cell: the 12-column bar follows the
+                // label (5 columns, or the label's width when longer).
+                if let Some(co) = self.bus_chip(chip_idx) {
+                    let label_w = spans[cell_start].width();
+                    let bar_cols = label_w..label_w + 12;
+                    castle_bus::draw_cell(co, self.bus_now, bar_cols, &mut spans, cell_start);
                 }
 
                 // Column separator (not after the last column in a row)

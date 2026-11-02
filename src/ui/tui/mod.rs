@@ -1292,6 +1292,9 @@ fn run_app(
                         memory_castle = Some(mc);
                     }
                     if let Some(ref mut tg) = memory_castle {
+                        // The bus: wings, banners, messengers, torches,
+                        // cracks and reset flashes (see `castle_bus`).
+                        tg.set_bus(Some(&tui_bus.read()), backend);
                         tg.update(backend);
                     }
                 }
@@ -4532,7 +4535,12 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
             // Per-view symbol legend — Arcade shows all four combined.
             match mode {
                 DisplayMode::Starfield => starfield_legend_lines(bar, bg, dim, key),
-                DisplayMode::MemoryCastle => castle_legend_lines(bar, bg, dim),
+                DisplayMode::MemoryCastle => {
+                    let mut v = castle_legend_lines(bar, bg, dim);
+                    v.push(sep!("◆ Signal bus"));
+                    v.extend(crate::animation::castle_bus::legend_lines(bar, bg, dim));
+                    v
+                }
                 DisplayMode::Defrag => defrag_legend_lines(bar, bg, dim, key),
                 DisplayMode::MemoryFlow => flow_legend_lines(bar, bg, dim),
                 DisplayMode::InferenceMonitor => inference_legend_lines(bar, bg, dim),
@@ -4639,7 +4647,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "The base shows one DDR gate per channel: ▪ is",
                     "healthy, · is harvested (fused off), ✗ failed",
                     "its BIST.",
-                ],
+                ]
+                .iter()
+                .chain(crate::animation::castle_bus::EXPLAIN_TEXT)
+                .copied()
+                .collect::<Vec<&str>>(),
                 cols,
             ),
             DisplayMode::Defrag => explain_lines(

@@ -158,7 +158,19 @@ pub struct Particle {
     pub rgb: [u8; 3],
 }
 
+/// An ECC tick on one GDDR channel of a chip.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Crack {
+    pub start_ns: u64,
+    pub channel: u8,
+}
+
 /// Everything the bus puts on one chip's slot.
+///
+/// The arcade draws the flag, label, gauge, particles and flash. Memory
+/// Castle and Defrag read the same world through [`ArcadeFx::from_world`]
+/// and also use `hits` (requests for a model on this chip) and `cracks`
+/// (ECC ticks), which the arcade does not draw.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ChipFx {
     /// The chip's position among the devices: its slot.
@@ -171,6 +183,11 @@ pub struct ChipFx {
     pub particles: Vec<Particle>,
     /// When the chip's last reset flash started.
     pub flash_ns: Option<u64>,
+    /// Request hits for the models on this chip, each alive for
+    /// [`PULSE_NS`]. A hit whose `start_ns` is this update's time is new.
+    pub hits: Vec<Hit>,
+    /// ECC ticks on this chip, each alive for [`SETTLE_NS`].
+    pub cracks: Vec<Crack>,
 }
 
 impl ChipFx {
@@ -179,6 +196,8 @@ impl ChipFx {
             && self.gauge.is_none()
             && self.particles.is_empty()
             && self.flash_ns.is_none()
+            && self.hits.is_empty()
+            && self.cracks.is_empty()
     }
 }
 
@@ -196,6 +215,11 @@ pub struct ArcadeFx {
     /// Smoothed tokens per second of the ready models on this arcade's
     /// chips. `None` with no fresh reading.
     pub tokens_per_s: Option<f64>,
+    /// Whether this update handled the events since the last one: false on
+    /// the first update, after the world's head went backwards, and after
+    /// the view was away. A view that acts on a change it sees between two
+    /// updates (Defrag's eviction) acts only when this is true.
+    pub fresh: bool,
 }
 
 /// The phase this arcade last saw a model in, and when it changed to it
@@ -227,6 +251,10 @@ pub struct ArcadeBusState {
     resets: HashMap<EntityKey, Option<u64>>,
     /// When each chip's reset flash started, by chip key.
     flashes: HashMap<EntityKey, u64>,
+    /// Request hits by chip key.
+    chip_hits: HashMap<EntityKey, Vec<Hit>>,
+    /// ECC ticks by chip key.
+    cracks: HashMap<EntityKey, Vec<Crack>>,
     /// The smoothed tokens per second.
     tps: Option<f64>,
 }
@@ -276,10 +304,31 @@ impl ArcadeFx {
                 match e {
                     Event::RequestsCompleted { model, n } => {
                         // A count of 0 completed nothing and draws nothing.
-                        if n > 0 && models.iter().any(|m| m.key == model && ours(m)) {
-                            new_requests = new_requests.saturating_add(n);
-                            add_hit(&mut prev.hits, now, n, q);
+                        if let Some(m) = models.iter().find(|m| m.key == model && ours(m)) {
+                            if n > 0 {
+                                new_requests = new_requests.saturating_add(n);
+                                add_hit(&mut prev.hits, now, n, q);
+                                for c in m.chips.iter().filter(|c| drawn(c)) {
+                                    add_hit(
+                                        prev.chip_hits.entry(c.clone()).or_default(),
+                                        now,
+                                        n,
+                                        q,
+                                    );
+                                }
+                            }
                         }
+                    }
+                    Event::EccTick { chip, channel } if drawn(&chip) => {
+                        let list = prev.cracks.entry(chip).or_default();
+                        list.retain(|k| now.saturating_sub(k.start_ns) < SETTLE_NS);
+                        if list.len() >= MAX_SPARKS {
+                            list.remove(0);
+                        }
+                        list.push(Crack {
+                            start_ns: now,
+                            channel,
+                        });
                     }
                     Event::Spark {
                         chip: Some(c),
@@ -352,6 +401,7 @@ impl ArcadeFx {
             slots,
             new_requests,
             tokens_per_s: prev.tps,
+            fresh: since.is_some(),
             ..ArcadeFx::default()
         };
         for (slot, key) in chips {
@@ -382,6 +432,14 @@ impl ArcadeFx {
                 .get(key)
                 .copied()
                 .filter(|t| now.saturating_sub(*t) < FLASH_NS);
+            if let Some(h) = prev.chip_hits.get_mut(key) {
+                h.retain(|h| now.saturating_sub(h.start_ns) < PULSE_NS);
+                co.hits = h.clone();
+            }
+            if let Some(k) = prev.cracks.get_mut(key) {
+                k.retain(|k| now.saturating_sub(k.start_ns) < SETTLE_NS);
+                co.cracks = k.clone();
+            }
             if !co.is_empty() {
                 out.chips.push(co);
             }
@@ -393,6 +451,8 @@ impl ArcadeFx {
         prev.particles.retain(|k, p| drawn(k) && !p.is_empty());
         prev.flashes
             .retain(|k, t| drawn(k) && now.saturating_sub(*t) < FLASH_NS);
+        prev.chip_hits.retain(|k, h| drawn(k) && !h.is_empty());
+        prev.cracks.retain(|k, c| drawn(k) && !c.is_empty());
         out
     }
 
@@ -464,14 +524,14 @@ fn gauge_of(m: &ModelView, memo: Option<&PhaseMemo>, now: u64) -> Option<Gauge> 
 
 /// Seconds since `start` at `now`, stepped to [`FX_STEPS_PER_S`] (Die 3D's
 /// stepping, so effects move in whole steps).
-fn stepped_secs(start: u64, now: u64) -> f32 {
+pub(crate) fn stepped_secs(start: u64, now: u64) -> f32 {
     let s = now.saturating_sub(start) as f64 / NS_PER_S as f64;
     ((s * FX_STEPS_PER_S).floor() / FX_STEPS_PER_S) as f32
 }
 
 /// What is left (1 down to 0) of an effect of `dur_ns` that started at
 /// `start`, on the stepped clock; 0 once `dur_ns` has passed.
-fn left(start: u64, now: u64, dur_ns: u64) -> f32 {
+pub(crate) fn left(start: u64, now: u64, dur_ns: u64) -> f32 {
     if now.saturating_sub(start) >= dur_ns {
         return 0.0;
     }
@@ -746,7 +806,13 @@ fn draw_hit(h: &Hit, now: u64, stage: &Stage, lines: &mut [Line<'static>]) {
 
 /// Blend the foreground of the cells `cols` of `row` toward `rgb` by
 /// `weight`, keeping the characters.
-fn tint(lines: &mut [Line<'static>], row: usize, cols: Range<usize>, rgb: [u8; 3], weight: f32) {
+pub(crate) fn tint(
+    lines: &mut [Line<'static>],
+    row: usize,
+    cols: Range<usize>,
+    rgb: [u8; 3],
+    weight: f32,
+) {
     restyle(lines, row, cols, |s| {
         let base = match s.fg {
             Some(Color::Rgb(r, g, b)) => [r, g, b],
@@ -759,7 +825,7 @@ fn tint(lines: &mut [Line<'static>], row: usize, cols: Range<usize>, rgb: [u8; 3
 
 /// Apply `f` to the style of each cell in `cols` of `row`, keeping the
 /// characters and the other cells' styles.
-fn restyle(
+pub(crate) fn restyle(
     lines: &mut [Line<'static>],
     row: usize,
     cols: Range<usize>,
