@@ -530,8 +530,10 @@ mod tests {
 
     #[test]
     fn test_health_color() {
-        assert_eq!(health_color(true), success());
-        assert_eq!(health_color(false), error());
+        with_theme(Theme::Default, || {
+            assert_eq!(health_color(true), success());
+            assert_eq!(health_color(false), error());
+        });
     }
 
     #[test]
@@ -558,10 +560,16 @@ mod tests {
 
     /// `with_theme` sets the theme for the call, a nested call sets its own
     /// without waiting on the lock it already holds, and each puts the
-    /// previous theme back.
+    /// previous theme back. No other test sets Grayskull, and this one does
+    /// so under the theme lock, so the tests that compare colours from
+    /// `rgb` (which take the same lock) never see it.
     #[test]
-    fn with_theme_sets_and_restores_the_theme() {
+    fn theme_state_roundtrips() {
         with_theme(Theme::Default, || {
+            set_theme(Theme::Grayskull);
+            assert_eq!(current_theme(), Theme::Grayskull);
+            set_theme(Theme::Default);
+            assert_eq!(current_theme(), Theme::Default);
             with_theme(Theme::Grayskull, || {
                 assert_eq!(current_theme(), Theme::Grayskull);
                 with_theme(Theme::Default, || {
@@ -572,18 +580,6 @@ mod tests {
             assert_eq!(current_theme(), Theme::Default);
         });
         assert!(!theme_is_pinned_to_default(), "the lock is let go");
-    }
-
-    #[test]
-    fn theme_state_roundtrips() {
-        // Under the theme lock: the arcade's colour tests hash frames
-        // through `rgb` and must not see the Grayskull moment.
-        with_theme(Theme::Default, || {
-            set_theme(Theme::Grayskull);
-            assert_eq!(current_theme(), Theme::Grayskull);
-            set_theme(Theme::Default);
-            assert_eq!(current_theme(), Theme::Default);
-        });
     }
 
     #[test]
@@ -649,6 +645,11 @@ mod tests {
     /// away afterwards, including when the closure panics.
     #[test]
     fn with_truecolor_pins_the_mode_for_the_closure_only() {
+        // Under the default theme: Grayskull would turn (1, 2, 3) grey.
+        with_theme(Theme::Default, with_truecolor_check);
+    }
+
+    fn with_truecolor_check() {
         let outside = supports_true_color();
         assert_eq!(with_truecolor(true, || rgb(1, 2, 3)), Color::Rgb(1, 2, 3));
         // Without truecolor a colour is a 256-colour index and black is the
