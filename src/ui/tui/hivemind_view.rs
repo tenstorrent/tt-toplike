@@ -276,7 +276,7 @@ fn feed_line(
         Span::raw(display_text)
     };
     let label = if row.from_bus && unicode_width::UnicodeWidthStr::width(row.label) > label_w {
-        truncate_to_width(row.label, label_w.saturating_sub(1))
+        truncate_to_width(row.label, label_w)
     } else {
         row.label.to_string()
     };
@@ -903,7 +903,7 @@ pub fn render_hivemind(
     }
     // ── KITT scanner bar: one dedicated row, just above the bottom border ──
     // Driven by total board activity (`FeedAgg::total_rate`) or the bus's
-    // requests and tokens/s, whichever is larger (`HivemindBus::kitt_activity`)
+    // requests and tokens/s, whichever is larger (`HivemindBus::kitt_activity`).
     // An idle beam is dim, wide and brisk; a busy one is bright, tight and
     // slow.
     if beam_reserved {
@@ -978,7 +978,7 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
         ln!(vec![
             Span::styled("bus:   ", Style::default().fg(colors::rgb(200, 230, 255))),
             Span::styled(
-                "= a feed row from the signal bus; dim rows came before you opened ~",
+                "= a feed row from the signal bus; model rows show with f; dim rows came before you opened ~",
                 Style::default().fg(dim)
             ),
         ]),
@@ -1092,9 +1092,11 @@ pub(crate) const EXPLAIN_TEXT: &[&str] = &[
     "",
     "Feed rows that start with \"bus:\" come from the signal",
     "bus: models loading, ready or gone, completed requests,",
-    "and, when attached to a headless host, that host's",
-    "sparks, kernel compiles and resets. Rows from before",
-    "you opened this view are dimmed.",
+    "resets published by other tools such as gozer, and,",
+    "when attached to a headless host, that host's sparks,",
+    "kernel compiles and resets. Model rows belong to no",
+    "cell, so they show in the unified feed (f). Rows from",
+    "before you opened this view are dimmed.",
     "",
     "A tt-smi -r run in another terminal appears as a magenta",
     "⚡ row and warms the cell of each chip it targets (the",
@@ -1127,6 +1129,28 @@ pub(crate) const EXPLAIN_TEXT: &[&str] = &[
 mod tests {
     use super::*;
     use crate::workload::hivemind::{event::*, grid::Column, Hivemind};
+
+    /// A bus row's source label wider than the column is cut to the
+    /// column's width, `…` included: "Workload" in 6 columns is "Workl…".
+    #[test]
+    fn a_bus_rows_label_is_cut_to_the_full_column_width() {
+        let row = FeedItem {
+            severity: Severity::Info,
+            label: "Workload",
+            label_fg: Color::Reset,
+            device: None,
+            display: "x".into(),
+            count: 1,
+            rate: 0.0,
+            spark: Vec::new(),
+            is_reset: false,
+            history: false,
+            from_bus: true,
+        };
+        let line = feed_line(&row, 6, 80, Color::Reset, Color::Reset);
+        let texts: Vec<&str> = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(texts.contains(&"Workl…"), "{texts:?}");
+    }
 
     /// The sweeper's job is answering "what is touching my hardware right
     /// now". If that answer needs arrow keys, the screen says nothing to
