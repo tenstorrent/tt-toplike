@@ -406,9 +406,9 @@ impl DefragVis {
     /// it acts on every update but the first sight of a device, also after
     /// a gap (a return from another view, a stalled update) or a reconnect,
     /// as the inference monitor's unload signal did while Defrag existed.
-    /// Completed requests on a running device throw a scatter burst, only on
-    /// a fresh update (not the first, not after the view was away), since
-    /// they are events. With `unplaced_evicts_all` (a local bus), a model
+    /// Completed requests on a running device throw a scatter burst. They
+    /// are events, so they act only on a fresh update: neither the first
+    /// nor one after the view was away. With `unplaced_evicts_all` (a local bus), a model
     /// that names no chip and has been ready evicts every device when it
     /// goes down or is gone, as the local monitor's unload signal did; an
     /// attached TUI passes `false`, since there a model with no chips is one

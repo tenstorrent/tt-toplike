@@ -420,10 +420,10 @@ impl TrainView {
         // (`draw_tapestry` sets them). A frame with no tapestry leaves none.
         self.pulse_rows.set((0, 0));
         // The bus run's effects (pulses, sky pace, chip marks, SAME CHIPS)
-        // describe the bus run. They are drawn when that run is the one on
-        // screen: with no local trainer, or when the bus run is the local
-        // trainer itself (the same pid and start time). A local trainer next
-        // to a different run on an attached host draws none of them.
+        // describe the bus run. They are drawn when that run is on screen:
+        // with no local trainer, or when the bus run is the local trainer
+        // itself (the same pid and start time). A local trainer next to a
+        // different run on an attached host draws none of them.
         let no_fx = TrainFx::default();
         let fx = match st.proc.as_ref() {
             Some(p) if !self.bus_state.is_run_of(p) => &no_fx,

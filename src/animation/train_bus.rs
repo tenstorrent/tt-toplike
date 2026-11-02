@@ -274,8 +274,8 @@ pub fn proc_of_key(run: &EntityKey) -> TrainProcess {
     }
 }
 
-/// The run the view shows: the one whose `toplike.train.step` reading is the
-/// newest, as long as that reading is at most [`RUN_STALE_MS`] old at
+/// The run the view shows: the run whose `toplike.train.step` reading is
+/// the newest, as long as that reading is at most [`RUN_STALE_MS`] old at
 /// `now_mono_ns`. Gives the run's key and its step.
 fn newest_run(world: &dyn WorldRead, now_mono_ns: u64) -> Option<(EntityKey, u64)> {
     world
