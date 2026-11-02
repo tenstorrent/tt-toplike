@@ -5563,9 +5563,18 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "toml",
+ "tt-toplike-bus",
  "unicode-width 0.1.14",
  "vte",
  "which",
+]
+
+[[package]]
+name = "tt-toplike-bus"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

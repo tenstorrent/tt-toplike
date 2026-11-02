@@ -31,6 +31,12 @@ jobs:
       - name: Run library tests
         run: cargo test --locked --lib --features tui
 
+      - name: Clippy (signal bus crate, zero warnings)
+        run: cargo clippy --locked -p tt-toplike-bus -- -D warnings
+
+      - name: Test signal bus crate
+        run: cargo test --locked -p tt-toplike-bus
+
       - name: Build TUI binary (zero warnings)
         run: cargo build --locked --bin tt-toplike-tui --features tui
         env:

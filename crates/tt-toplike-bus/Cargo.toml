@@ -1,0 +1,13 @@
+[package]
+name = "tt-toplike-bus"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.93"
+authors = ["Tenstorrent <software@tenstorrent.com>"]
+license = "Apache-2.0"
+description = "Signal bus record types for tt-toplike"
+repository = "https://github.com/tenstorrent/tt-toplike"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
