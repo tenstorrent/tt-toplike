@@ -1,3 +1,28 @@
+tt-toplike (0.15.1) noble; urgency=medium
+
+  * Arcade reads the signal bus. A model coming up fills a gauge on the chip's
+    side of the screen as it loads, and settles when it is ready. Each
+    completed request makes a hit, and the hero's pace follows tokens per
+    second. Kernel compiles and sparks give small particles, a reset flashes
+    the chip, and the duel shows an attached host's serving stats. A value
+    from the mock backend carries the ~ mark.
+  * The ~ hivemind view reads the signal bus. A strip above the board shows a
+    model flag and a bring-up bar for each local chip. Model, request,
+    kernel-compile, spark and reset events join the feed. The scanner at the
+    bottom surges on each completed request and runs faster with tokens per
+    second. Events that were already in the bus when the view opened are
+    dimmed. On a bus this TUI hosts, the view hides only the sparks and
+    compiles the sweeper itself published.
+  * The cut rows in the ~ feed are one column shorter than before, so a
+    cut row no longer runs a column past its pane.
+  * Fix: after a late log lock moved the head forward, a socket subscriber
+    could stall or skip records. The in-memory window is now cleared at the
+    jump and a read behind it is refused with a Dropped error.
+  * The `i` view, Die 3D, arcade and ~ now draw the same signals. Arcade and
+    ~ have not been run on real hardware or an attached headless host.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 15:00:00 -0800
+
 tt-toplike (0.15.0) noble; urgency=medium
 
   * New: the signal bus. Every source writes its readings to one ordered,

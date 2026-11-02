@@ -89,6 +89,11 @@ impl Raw {
 /// published: the snapshot holds exactly the records up to `seq`, and the
 /// subscription yields every later record exactly once. Sixteen clients
 /// take their snapshot at staggered moments during the publishing.
+///
+/// The publisher parks at record `N / 2` until a client has taken a snapshot
+/// there, so a handshake overlaps the publishing on any machine. Before
+/// this, the overlap relied on timing and failed about one run in sixty when
+/// the box was loaded and every client connected after the publishing ended.
 #[test]
 fn snapshot_then_subscribe_sees_every_record_exactly_once() {
     const N: u64 = 1000;
@@ -98,15 +103,27 @@ fn snapshot_then_subscribe_sees_every_record_exactly_once() {
     // Publisher and clients start together; the publishing takes about
     // 50 ms and the clients connect about 3 ms apart across it.
     let start = Arc::new(std::sync::Barrier::new(17));
+    // Set by a client whose snapshot was taken with the publisher parked.
+    let overlapped = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let publisher = {
         let bus = bus.clone();
         let start = start.clone();
+        let overlapped = overlapped.clone();
         thread::spawn(move || {
             start.wait();
             for i in 1..=N {
                 bus.publish("t", sample(&chip((i % 50) as u32), "n", Value::U64(i)));
                 if i % 5 == 0 {
                     thread::sleep(Duration::from_micros(250));
+                }
+                if i == N / 2 {
+                    // A client sees this seq or the park times out below.
+                    let t0 = std::time::Instant::now();
+                    while !overlapped.load(std::sync::atomic::Ordering::SeqCst)
+                        && t0.elapsed() < Duration::from_secs(10)
+                    {
+                        thread::sleep(Duration::from_millis(1));
+                    }
                 }
             }
         })
@@ -115,15 +132,22 @@ fn snapshot_then_subscribe_sees_every_record_exactly_once() {
         .map(|k| {
             let path = path.clone();
             let start = start.clone();
+            let overlapped = overlapped.clone();
             thread::spawn(move || {
                 start.wait();
                 thread::sleep(Duration::from_millis(3 * k));
                 let mut c = SocketClient::connect(&path).unwrap();
                 // Twenty snapshots per client, so a race between taking the
-                // seq and taking the world has many chances to show.
+                // seq and taking the world has many chances to show. A client
+                // keeps taking them until one has seen the parked publisher.
                 let mut snap = c.snapshot().unwrap();
-                for _ in 0..20 {
+                let mut taken = 0;
+                while taken < 20 || !overlapped.load(std::sync::atomic::Ordering::SeqCst) {
+                    taken += 1;
                     snap = c.snapshot().unwrap();
+                    if snap.seq >= N / 2 && snap.seq < N {
+                        overlapped.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
                     // Every record is a sample, so the newest reading in the
                     // snapshot is the record at `seq` exactly.
                     let newest = snap.world.readings.iter().map(|r| r.seq).max();
@@ -149,9 +173,10 @@ fn snapshot_then_subscribe_sees_every_record_exactly_once() {
         .collect();
     publisher.join().unwrap();
     let seqs: Vec<u64> = clients.into_iter().map(|c| c.join().unwrap()).collect();
-    // At least one handshake landed while records were being published.
+    // At least one handshake landed while records were being published: a
+    // snapshot at or past the park and before the last record.
     assert!(
-        seqs.iter().any(|&s| s > 0 && s < N),
+        overlapped.load(std::sync::atomic::Ordering::SeqCst),
         "no handshake overlapped the publishing: {seqs:?}"
     );
 }

@@ -17,6 +17,21 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.15.1
+- Arcade reads the signal bus: a bring-up gauge that follows load progress, a hit for each completed
+  request, a hero pace that follows tokens per second, particles for sparks and kernel compiles, a
+  flash on a chip reset, and the duel using an attached host's serving stats. The mock backend's
+  values carry the `~` mark. With no bus signal the arcade draws what it drew before.
+- The `~` hivemind view reads the signal bus: a strip with a model flag and bring-up bar per local
+  chip, bus events in the feed (history dimmed), and a scanner that surges on each completed request
+  and follows tokens per second. On a bus this TUI hosts, it hides only the sparks and compiles the
+  sweeper itself published. The collectors still run only while `~` is open.
+- Cut rows in the `~` feed are one column shorter, so they no longer run a column past the pane.
+- Fix: after a late log lock moved the head forward, a socket subscriber could stall or skip
+  records. The in-memory window is cleared at the jump and a read behind it gets a Dropped error.
+- Limits: arcade and `~` have not run on real hardware or against an attached headless host. The
+  Die 3D, `i` and `~` frame-hash tests still read the global colour theme without the shared lock.
+
 ### 0.15.0
 - The signal bus. Every source writes to one ordered log and every view reads it. The log keeps
   samples, events, gaps and the provenance of each value (measured, derived, estimated or

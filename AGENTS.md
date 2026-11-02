@@ -1454,6 +1454,15 @@ Copilot's review, each claim checked against the code before acting:
 - Docs: the PR title said 0.14.2 while the code said 0.14.3 (release metadata is the version).
 - Tests that used 0 W as a chip's idle now use 37 W: no powered chip reads under a watt.
 
+### Version history: 0.15.1 (Nov 2 2026)
+
+0.15.1 puts arcade (`src/animation/arcade_bus.rs`) and the `~` view (`src/ui/tui/hivemind_bus.rs`) on
+the signal bus, in the two-step shape Die 3D uses (a data-rate reader, then frame-rate arithmetic).
+It also fixes the in-memory window after a late log lock (`crates/tt-toplike-bus/src/log.rs`: the
+window is cleared at the jump and reads behind it are refused). Tests that compare colours read a
+global theme; the arcade ones take `colors::with_theme` under a shared lock, the Die 3D, `i` and `~`
+hash tests do not yet.
+
 ### Version history: 0.15.0 (Nov 2 2026)
 
 0.15.0 adds the signal bus (`crates/tt-toplike-bus`, `src/bus/`, `docs/bus.md`). The root package
