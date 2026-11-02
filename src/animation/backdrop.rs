@@ -325,15 +325,68 @@ pub struct BackdropSignals {
     /// PCIe traffic of the local chips, in and out summed, bytes a second.
     /// `None` without a reading.
     pub pcie_bps: Option<f64>,
-    /// Load of the busiest local chip, power over its TDP, 0 to 1. `None`
-    /// without a reading.
+    /// Load of the busiest local chip, 0 to 1. `gather` gives power over
+    /// TDP; [`LoadScales::apply`] then puts each chip's draw against its own
+    /// idle, as the Waffler's clouds do, once that chip has enough samples.
+    /// `None` without a reading.
     pub load: Option<f32>,
+    /// Each local chip's draw: its PCI address, its power in watts and its
+    /// power-over-TDP load, for [`LoadScales::apply`].
+    pub chips: Vec<ChipDraw>,
     /// The training step time, in milliseconds, of the newest run seen in
     /// the world. `None` without a fresh one.
     pub step_ms: Option<f32>,
     /// Whether any value above is an estimate (the mock backend). The
     /// legend line then carries the `~` marker.
     pub estimated: bool,
+}
+
+/// One chip's draw as `gather` read it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChipDraw {
+    /// The chip's PCI address, or its index when it has none.
+    pub key: String,
+    /// Its power in watts, `None` without a reading.
+    pub power_w: Option<f32>,
+    /// Its power over TDP, the load used until its scale is ready.
+    pub fallback: Option<f32>,
+}
+
+/// The Waffler's load scale (`die3d::load::LoadScale`) for each chip, kept
+/// by the owner of a backdrop across view switches, so the shared clouds
+/// brighten with the same rule as the Waffler's: load is where the draw
+/// sits between the chip's own idle and its recent peak. Until a chip has
+/// `MIN_SAMPLES` samples (one a second) its power-over-TDP load is used, as
+/// the Waffler does.
+#[derive(Debug, Clone, Default)]
+pub struct LoadScales {
+    scales: std::collections::HashMap<String, super::die3d::load::LoadScale>,
+}
+
+impl LoadScales {
+    /// Set `s.load` from each chip's scale, sampled at `s.now_s`. Scales of
+    /// chips no longer present are dropped.
+    pub fn apply(&mut self, s: &mut BackdropSignals) {
+        if s.chips.is_empty() {
+            return;
+        }
+        self.scales
+            .retain(|k, _| s.chips.iter().any(|c| c.key == *k));
+        let mut load: Option<f32> = None;
+        for c in &s.chips {
+            let scale = self.scales.entry(c.key.clone()).or_default();
+            let relative = scale.observe(s.now_s, c.power_w);
+            let l = if scale.ready() && c.power_w.is_some() {
+                Some(relative)
+            } else {
+                c.fallback
+            };
+            if let Some(l) = l.filter(|l| !l.is_nan()) {
+                load = Some(load.map_or(l, |m: f32| m.max(l)));
+            }
+        }
+        s.load = load;
+    }
 }
 
 /// A reading's number when it is fresh at `now`.
@@ -373,6 +426,7 @@ impl BackdropSignals {
         let mut estimated = false;
         let mut pcie: Option<f64> = None;
         let mut load: Option<f32> = None;
+        let mut chips: Vec<ChipDraw> = Vec::new();
         let mut add_pcie = |b: f64| pcie = Some(pcie.unwrap_or(0.0) + b.max(0.0));
         let now = world.map(|w| w.now_mono_ns()).unwrap_or(0);
         for d in backend.devices() {
@@ -404,7 +458,8 @@ impl BackdropSignals {
             // Load: the world's power over the chip's TDP, else the
             // backend's (`chip_inputs` makes the same division).
             let tdp = super::die3d::scene::chip_tdp(backend, d);
-            let l = match (read(sig::TDP_W), tdp) {
+            let world_w = read(sig::TDP_W);
+            let l = match (world_w, tdp) {
                 (Some((p, prov)), Some(t)) => {
                     estimated |= prov == Provenance::Estimated;
                     Some((p as f32 / t).clamp(0.0, 1.0))
@@ -417,6 +472,18 @@ impl BackdropSignals {
             if let Some(l) = l.filter(|l| !l.is_nan()) {
                 load = Some(load.map_or(l, |m: f32| m.max(l)));
             }
+            chips.push(ChipDraw {
+                key: if d.bus_id.is_empty() {
+                    d.index.to_string()
+                } else {
+                    d.bus_id.clone()
+                },
+                power_w: world_w
+                    .map(|(p, _)| p as f32)
+                    .or(local.power_w)
+                    .filter(|p| p.is_finite()),
+                fallback: l,
+            });
         }
         // The step time of the newest fresh training run.
         let step_ms = world.and_then(|w| {
@@ -447,6 +514,7 @@ impl BackdropSignals {
             services,
             pcie_bps: pcie,
             load,
+            chips,
             step_ms: step_ms.map(|(_, v, _)| v),
             estimated,
         }
@@ -655,6 +723,12 @@ impl Backdrop {
     /// Whether the last signals held an estimate.
     pub fn estimated(&self) -> bool {
         self.estimated
+    }
+
+    /// The clouds' brightness now, for tests.
+    #[cfg(test)]
+    pub(crate) fn cloud_intensity(&self) -> f32 {
+        self.cloud_clock.intensity()
     }
 
     /// Forget the cached canvas, so the cost measurement draws it afresh.

@@ -103,6 +103,8 @@ pub struct ArcadeVisualization {
     /// The chip and training signals the backdrop follows, read from the
     /// world in `set_bus`; `None` until then (the backend's are used).
     backdrop_signals: Option<crate::animation::backdrop::BackdropSignals>,
+    /// Each chip's load scale for the backdrop's clouds (the Waffler's rule).
+    load_scales: crate::animation::backdrop::LoadScales,
     /// The inference service rows of this tick, for the inference panel and
     /// the backdrop.
     services: Vec<crate::workload::inference_server::ServiceState>,
@@ -241,6 +243,7 @@ impl ArcadeVisualization {
                     .then_some(crate::animation::backdrop::BackdropKind::Scene),
             ),
             backdrop_signals: None,
+            load_scales: Default::default(),
             services: Vec::new(),
             train_state: None,
             idle_train: crate::workload::train::TrainState::default(),
@@ -338,6 +341,7 @@ impl ArcadeVisualization {
         // signals it last read, so a switch does not restart it.
         next.backdrop = self.backdrop;
         next.backdrop_signals = self.backdrop_signals;
+        next.load_scales = self.load_scales;
         next.frame = self.frame;
         next.clock_s = self.clock_s;
         next.baseline = self.baseline;
@@ -1122,6 +1126,7 @@ impl ArcadeVisualization {
         signals.services = std::mem::take(&mut self.services);
         // The rows arrive after `gather`, so their `~` is added here.
         signals.estimated |= crate::animation::backdrop::services_are_estimated(&signals.services);
+        self.load_scales.apply(&mut signals);
         self.backdrop.observe(&signals);
         self.services = std::mem::take(&mut signals.services);
         if let (Some(snake), Some(p)) = (self.snake.as_mut(), self.layout.find(View::Inference)) {

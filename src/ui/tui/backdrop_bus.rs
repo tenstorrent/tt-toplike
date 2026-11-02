@@ -47,6 +47,9 @@ pub(crate) struct SharedBackdrop {
     fed: Option<&'static str>,
     /// Whether the last signals of the view on screen held an estimate.
     estimated: bool,
+    /// Each chip's load scale, kept across view switches (the backdrop
+    /// itself starts fresh in each view).
+    scales: crate::animation::backdrop::LoadScales,
 }
 
 impl Default for SharedBackdrop {
@@ -55,6 +58,7 @@ impl Default for SharedBackdrop {
             backdrop: Backdrop::new(None),
             fed: None,
             estimated: false,
+            scales: Default::default(),
         }
     }
 }
@@ -79,7 +83,8 @@ impl SharedBackdrop {
             self.estimated &= choice.is_some();
             return;
         }
-        let signals = gather(choice == Some(BackdropKind::Scene));
+        let mut signals = gather(choice == Some(BackdropKind::Scene));
+        self.scales.apply(&mut signals);
         self.estimated = signals.estimated;
         if kind.is_none() {
             // The view draws its own (or the arcade lays its own).
@@ -156,6 +161,37 @@ mod tests {
         s.set("training", None).unwrap();
         assert_eq!(layer_kind(&s, "training"), None);
         assert!(!own_painter(&s, "training"), "off is off");
+    }
+
+    /// The shared layer measures load as the Waffler does, and keeps each
+    /// chip's scale across a view switch: an idle chip at 40 W of 125 W
+    /// shows the dimmest clouds, which power over TDP (0.32) would not.
+    #[test]
+    fn the_shared_clouds_use_the_waffler_load_scale_across_views() {
+        use crate::animation::backdrop::ChipDraw;
+        use crate::animation::die3d::clouds::Clouds;
+        let mut s = BackdropSettings::new(BackdropConfig::default());
+        s.set("grid", CLOUDS).unwrap();
+        s.set("castle", CLOUDS).unwrap();
+        let mut b = SharedBackdrop::default();
+        let idle = |t: f64| BackdropSignals {
+            now_s: t,
+            load: Some(40.0 / 125.0),
+            chips: vec![ChipDraw {
+                key: "0000:01:00.0".into(),
+                power_w: Some(40.0),
+                fallback: Some(40.0 / 125.0),
+            }],
+            ..Default::default()
+        };
+        for i in 0..30 {
+            b.update(&s, "grid", false, |_| idle(i as f64));
+        }
+        assert_eq!(b.backdrop().cloud_intensity(), Clouds::intensity(0.0));
+        // The castle starts a fresh backdrop, and its first update already
+        // has the chip's idle.
+        b.update(&s, "castle", false, |_| idle(30.0));
+        assert_eq!(b.backdrop().cloud_intensity(), Clouds::intensity(0.0));
     }
 
     #[test]

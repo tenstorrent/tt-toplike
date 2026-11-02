@@ -162,6 +162,7 @@ fn busy(kind: Choice, n: u64) -> Backdrop {
             pcie_bps: Some(2e9),
             load: Some(0.8),
             step_ms: Some(200.0),
+            chips: Vec::new(),
             estimated: false,
         });
     }
@@ -604,4 +605,54 @@ fn the_training_view_leaves_the_sky_blank_when_told_to() {
             assert!(blanked > 0);
         }
     })
+}
+
+// ---- The clouds' load is the Waffler's -----------------------------------
+
+/// The shared clouds take each chip's load as the Waffler does: power over
+/// TDP for the first samples, then the draw against the chip's own idle
+/// (`die3d::load::LoadScale`). An idle box reads dim and a burst reads
+/// full (review S4).
+#[test]
+fn the_clouds_load_is_measured_against_each_chips_own_idle() {
+    use crate::animation::die3d::load::{LoadScale, MIN_SAMPLES};
+    let tdp = 125.0f32;
+    let sig = |t: f64, w: f32| BackdropSignals {
+        now_s: t,
+        chips: vec![ChipDraw {
+            key: "0000:01:00.0".into(),
+            power_w: Some(w),
+            fallback: Some(w / tdp),
+        }],
+        ..Default::default()
+    };
+    let mut scales = LoadScales::default();
+    let mut waffler = LoadScale::new();
+    for i in 0..20 {
+        let t = i as f64;
+        let mut s = sig(t, 40.0);
+        scales.apply(&mut s);
+        let want = waffler.observe(t, Some(40.0));
+        if i + 1 < MIN_SAMPLES {
+            assert_eq!(s.load, Some(40.0 / tdp), "power over TDP at first");
+        } else {
+            assert_eq!(s.load, Some(want), "the Waffler's value at {i}");
+            assert!(want < 0.05, "an idle chip is near 0, got {want}");
+        }
+    }
+    let mut s = sig(20.0, 70.0);
+    scales.apply(&mut s);
+    assert!(s.load.unwrap() > 0.9, "a burst over the idle: {:?}", s.load);
+    // A chip that goes away takes its scale with it.
+    let mut none = BackdropSignals {
+        now_s: 21.0,
+        chips: vec![ChipDraw {
+            key: "other".into(),
+            power_w: Some(40.0),
+            fallback: Some(0.32),
+        }],
+        ..Default::default()
+    };
+    scales.apply(&mut none);
+    assert_eq!(none.load, Some(0.32));
 }
