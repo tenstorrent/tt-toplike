@@ -16,27 +16,41 @@
 //! {"op":"snapshot"}                         {"seq":N,"world":{...}}   (one line)
 //! {"op":"raw","source":"tt-smi"}            {"seq":N,"source":"tt-smi","body":"..."}
 //!                                           (body is null when that source has no raw frame)
-//! {"op":"subscribe","from":N}               record lines N+1, N+2, ... until the client
-//! {"op":"subscribe","from":"head"}          closes or an error line ends the stream
+//! {"op":"subscribe","from":N}               {"subscribed":{"from":N,"instance":I}}, then
+//! {"op":"subscribe","from":"head"}          record lines N+1, N+2, ... until the client
+//!                                           closes or an error line ends the stream
 //! {"op":"replay","from_ts_ms":T,"speed":S,  {"header":{"schema":1,"kind":"Replay",...}},
 //!  "entities":[...],"signals":[...]}        then record lines paced by speed, then
 //!                                           {"done":COUNT}, then the server closes
 //! ```
 //!
-//! * `snapshot`: `world` is a [`WorldSummary`]; its fields are documented in
+//! * `snapshot`: the reply is `{"seq":N,"instance":I,"world":{...}}`.
+//!   `world` is a [`WorldSummary`]; its fields are documented in
 //!   [`crate::summary`]. `seq` and `world` are taken under one lock, so the
-//!   world holds every record up to `seq` and none after it.
+//!   world holds every record up to `seq` and none after it. `instance` is
+//!   the bus's random id ([`Bus::instance`]). A bus reopened on the same
+//!   log directory continues the sequence numbers with an empty world, so a
+//!   client compares `instance` to tell that the bus changed.
 //! * `subscribe`: `from` is the sequence number the client is current to
 //!   (a snapshot's `seq`), and the stream starts at the record after it, so
 //!   a snapshot plus a subscription from its `seq` misses nothing and sees
-//!   nothing twice. `"head"` means the newest record now. Each record line
-//!   is the log's own line format ([`Record::to_line`]).
+//!   nothing twice. `"head"` means the newest record now. The first line is
+//!   the `subscribed` header with the start and the bus instance; it is
+//!   sent only when the subscription starts, so `dropped` and `future`
+//!   come in its place. Each record line is the log's own line format
+//!   ([`Record::to_line`]).
 //! * `replay`: replays RECORDED data from the bus's own segment files, to
 //!   this client only. Nothing is published back into the bus, and records
 //!   keep their recorded sequence numbers and timestamps. Records whose
 //!   `t_wall_ms` is below `from_ts_ms` are skipped. The pause before a
 //!   record is its `t_mono_ns` minus the first sent record's, divided by
-//!   `speed`. `entities` and `signals` filter as `bus inspect` does: an
+//!   `speed`, except that a pause of more than 60 s of recorded time is
+//!   replayed as a 1 s wait, so a log with an overnight hole does not stall
+//!   the stream. `speed` must be between 0.01 and 1000; anything else
+//!   (including 0, negative numbers and values too large or too small to
+//!   pace) gets `bad_request "bad speed"`. A client that closes during a
+//!   pause is noticed within 100 ms and its slot is freed.
+//!   `entities` and `signals` filter as `bus inspect` does: an
 //!   entity filter keeps samples and sweeps of those entities and events
 //!   that name one; a signal filter keeps samples of those signals, trims
 //!   sweeps to them, and drops events. With either filter set, raw frames
@@ -81,8 +95,8 @@
 //!
 //! # Threads
 //!
-//! One accept thread. One thread per client; a subscriber has a second,
-//! small thread that watches for the client closing its end. Every thread
+//! One accept thread. One thread per client; a subscriber or a replay has
+//! a second, small thread that watches for the client closing its end. Every thread
 //! wakes at least every 100 ms to check for shutdown. Dropping the
 //! [`SocketServer`] closes the listener, shuts down every client socket and
 //! joins the threads, waiting at most about one second in all. It also
@@ -95,17 +109,22 @@
 //!
 //! # The socket file
 //!
-//! The parent directory is created with mode 0700 when it does not exist;
-//! an existing directory is left as it is. The socket file gets mode 0600
-//! right after `bind`. A path where a server is listening is refused with
-//! `AddrInUse`. A socket file nobody listens on (connecting is refused) is
-//! stale and replaced. A path holding something that is not a socket is
-//! refused with `AlreadyExists` and never deleted.
+//! The parent directory is created with mode 0700 when it does not exist.
+//! An existing parent must be a directory owned by this user and not
+//! writable by group or others, or the server refuses with
+//! `PermissionDenied`. In such a directory nobody else can create, swap or
+//! rename the socket file, so the chmod to 0600 right after `bind` acts on
+//! the socket this server bound, whatever the umask made it for that
+//! moment. A symlink at the socket path is refused with `InvalidInput`. A
+//! path where a server is listening is refused with `AddrInUse`. A socket
+//! file nobody listens on (connecting is refused) is stale and replaced.
+//! A path holding something that is not a socket is refused with
+//! `AlreadyExists` and never deleted.
 
 use crate::inspect::event_entities;
 use crate::log::{Bus, ReadError};
 use crate::record::{Header, HeaderKind, Payload, Record, SCHEMA_VERSION};
-use crate::replay::{check_speed, PlayClock, RealClock, Replay};
+use crate::replay::{PlayClock, RealClock, Replay};
 use crate::segment;
 use crate::summary::{RemoteSnapshot, WorldSummary};
 use crate::world::World;
@@ -127,6 +146,17 @@ const TICK: Duration = Duration::from_millis(100);
 
 /// How often the accept thread polls the non-blocking listener.
 const ACCEPT_POLL: Duration = Duration::from_millis(25);
+
+/// Slowest and fastest `replay` speed the socket accepts.
+const MIN_SPEED: f64 = 0.01;
+const MAX_SPEED: f64 = 1000.0;
+
+/// A pause of more than this much recorded time (ns) between two replayed
+/// records is replayed as [`LONG_GAP_WAIT_NS`].
+const LONG_GAP_NS: u64 = 60 * 1_000_000_000;
+
+/// The real wait (ns) a long recorded gap is compressed to.
+const LONG_GAP_WAIT_NS: u64 = 1_000_000_000;
 
 /// How long `Drop` waits for client threads before detaching them.
 const DROP_WAIT: Duration = Duration::from_millis(900);
@@ -382,22 +412,45 @@ impl Drop for SocketServer {
     }
 }
 
-/// Create the parent directory if needed and clear a stale socket file.
+/// Create the parent directory if needed, check it is private, and clear
+/// a stale socket file.
 fn prepare_path(path: &Path) -> io::Result<()> {
-    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-        if !parent.exists() {
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(parent)?;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-        }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if !parent.exists() {
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
+    // Nobody else may create, swap or rename entries here, so the socket
+    // cannot be replaced between `bind` and the chmod after it.
+    let dir = fs::metadata(parent)?;
+    // SAFETY: `geteuid` takes no arguments, cannot fail and touches no memory.
+    let me = unsafe { libc::geteuid() };
+    if !dir.is_dir() || dir.uid() != me || dir.mode() & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "the socket directory {} must be owned by this user and not writable by group or others",
+                parent.display()
+            ),
+        ));
     }
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
+    if meta.file_type().is_symlink() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is a symlink", path.display()),
+        ));
+    }
     if !meta.file_type().is_socket() {
         return Err(io::Error::new(
             io::ErrorKind::AlreadyExists,
@@ -655,7 +708,7 @@ fn serve(shared: &Shared, stream: UnixStream) {
                 entities,
                 signals,
             } => {
-                if check_speed(speed).is_err() {
+                if !(speed.is_finite() && (MIN_SPEED..=MAX_SPEED).contains(&speed)) {
                     return c.fail(&ErrorLine::bad_request("bad speed"));
                 }
                 let filter = ReplayFilter { entities, signals };
@@ -675,6 +728,7 @@ fn snapshot_line(bus: &Bus) -> Option<String> {
     let snap = bus.snapshot()?;
     let reply = RemoteSnapshot {
         seq: snap.seq,
+        instance: bus.instance(),
         world: WorldSummary::from_world(&snap.world, bus.now_mono_ns()),
     };
     Some(serde_json::to_string(&reply).expect("snapshot encodes"))
@@ -695,32 +749,66 @@ fn read_error_line(e: &ReadError) -> ErrorLine {
     }
 }
 
-/// Watch the read side of a streaming connection: set `done` when the
-/// client closes, the socket fails, or the server stops. Bytes the client
-/// sends while streaming are read and ignored.
-fn spawn_watcher(
-    shared_stop: Arc<AtomicBool>,
-    stream: UnixStream,
+/// Watches the read side of a streaming connection (subscribe or
+/// replay) on a small thread, and says when the client has closed it or
+/// the socket failed. Bytes the client sends while streaming are read and
+/// ignored.
+struct Watch {
+    /// Set when the client has gone, or when the stream ends.
     done: Arc<AtomicBool>,
-) -> Option<JoinHandle<()>> {
-    thread::Builder::new()
-        .name("tt-toplike-bus-watch".into())
-        .spawn(move || {
-            let mut chunk = [0u8; 1024];
-            loop {
-                if done.load(Ordering::SeqCst) || shared_stop.load(Ordering::SeqCst) {
-                    break;
-                }
-                match (&stream).read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(_) => {}
-                    Err(e) if is_timeout(&e) || e.kind() == io::ErrorKind::Interrupted => {}
-                    Err(_) => break,
-                }
-            }
-            done.store(true, Ordering::SeqCst);
-        })
-        .ok()
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Watch {
+    fn start(c: &Conn<'_>) -> Watch {
+        let done = Arc::new(AtomicBool::new(false));
+        let d = done.clone();
+        let thread = c.stream.try_clone().ok().and_then(|stream| {
+            thread::Builder::new()
+                .name("tt-toplike-bus-watch".into())
+                .spawn(move || {
+                    let mut chunk = [0u8; 1024];
+                    // The socket's read timeout (TICK) wakes this loop.
+                    while !d.load(Ordering::SeqCst) {
+                        match (&stream).read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(_) => {}
+                            Err(e) if is_timeout(&e) || e.kind() == io::ErrorKind::Interrupted => {}
+                            Err(_) => break,
+                        }
+                    }
+                    d.store(true, Ordering::SeqCst);
+                })
+                .ok()
+        });
+        Watch { done, thread }
+    }
+
+    /// True once the client has closed its end.
+    fn gone(&self) -> bool {
+        self.done.load(Ordering::SeqCst)
+    }
+
+    /// End the stream: close the socket and join the watcher.
+    fn finish(mut self, c: &Conn<'_>) {
+        self.done.store(true, Ordering::SeqCst);
+        c.close();
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
+}
+
+/// The line that starts a subscription: where it starts and which bus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SubscribedLine {
+    pub(crate) subscribed: Subscribed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Subscribed {
+    pub(crate) from: u64,
+    pub(crate) instance: u64,
 }
 
 /// Stream live records after `from` until the client closes, an error
@@ -731,17 +819,21 @@ fn stream_live(c: &Conn<'_>, from: u64) {
         Ok(s) => s,
         Err(e) => return c.fail(&read_error_line(&e)),
     };
-    let done = Arc::new(AtomicBool::new(false));
-    // The watcher needs a `'static` stop flag; mirror the server's.
-    let stop = Arc::new(AtomicBool::new(false));
-    let watcher = c
-        .stream
-        .try_clone()
-        .ok()
-        .and_then(|s| spawn_watcher(stop.clone(), s, done.clone()));
+    let header = SubscribedLine {
+        subscribed: Subscribed {
+            from,
+            instance: bus.instance(),
+        },
+    };
+    if c.reply(&serde_json::to_string(&header).expect("header encodes"))
+        .is_err()
+    {
+        return c.close();
+    }
+    let watch = Watch::start(c);
     let limit = c.shared.opts.queue_lines as u64;
     loop {
-        if done.load(Ordering::SeqCst) || c.shared.stopping() {
+        if watch.gone() || c.shared.stopping() {
             break;
         }
         match sub.next(TICK) {
@@ -771,12 +863,7 @@ fn stream_live(c: &Conn<'_>, from: u64) {
             }
         }
     }
-    done.store(true, Ordering::SeqCst);
-    stop.store(true, Ordering::SeqCst);
-    c.close();
-    if let Some(w) = watcher {
-        let _ = w.join();
-    }
+    watch.finish(c);
 }
 
 /// The `replay` op's entity and signal filter. Empty lists keep everything.
@@ -863,9 +950,14 @@ fn replay(c: &Conn<'_>, from_ts_ms: u64, speed: f64, filter: &ReplayFilter) {
     {
         return c.close();
     }
+    let watch = Watch::start(c);
     let clock = &*c.shared.opts.play_clock;
     let tick = u64::try_from(TICK.as_nanos()).unwrap_or(u64::MAX);
-    let mut start: Option<(u64, u64)> = None;
+    // Play-clock time of the first sent record, and how far after it (ns
+    // of play time) the next record is due.
+    let mut play0: Option<u64> = None;
+    let mut due = 0u64;
+    let mut prev_t: Option<u64> = None;
     let mut sent = 0u64;
     for rec in log.records() {
         if rec.t_wall_ms < from_ts_ms {
@@ -874,13 +966,23 @@ fn replay(c: &Conn<'_>, from_ts_ms: u64, speed: f64, filter: &ReplayFilter) {
         let Some(rec) = filter.apply(rec) else {
             continue;
         };
-        let (play0, t0) = *start.get_or_insert((clock.now_ns(), rec.t_mono_ns));
-        let offset = rec.t_mono_ns.saturating_sub(t0);
-        let target = play0.saturating_add((offset as f64 / speed) as u64);
-        // Sleep in ticks so a stopping server is noticed.
+        if let Some(p) = prev_t {
+            let gap = rec.t_mono_ns.saturating_sub(p);
+            due = due.saturating_add(if gap > LONG_GAP_NS {
+                LONG_GAP_WAIT_NS
+            } else {
+                (gap as f64 / speed) as u64
+            });
+        }
+        prev_t = Some(rec.t_mono_ns);
+        let target = play0
+            .get_or_insert_with(|| clock.now_ns())
+            .saturating_add(due);
+        // Sleep in slices of one tick, so a stopping server or a client
+        // that has closed is noticed within a tick.
         loop {
-            if c.shared.stopping() {
-                return c.close();
+            if c.shared.stopping() || watch.gone() {
+                return watch.finish(c);
             }
             let wait = target.saturating_sub(clock.now_ns());
             if wait == 0 {
@@ -889,12 +991,12 @@ fn replay(c: &Conn<'_>, from_ts_ms: u64, speed: f64, filter: &ReplayFilter) {
             clock.sleep_ns(wait.min(tick));
         }
         if c.reply(&rec.to_line()).is_err() {
-            return c.close();
+            return watch.finish(c);
         }
         sent += 1;
     }
     let _ = c.reply(&serde_json::to_string(&DoneLine { done: sent }).expect("done encodes"));
-    c.close();
+    watch.finish(c);
 }
 
 #[cfg(test)]

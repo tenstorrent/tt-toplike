@@ -229,6 +229,8 @@ struct Inner {
     clock: Arc<dyn Clock>,
     disk: Option<Arc<Disk>>,
     header_kind: HeaderKind,
+    /// Random id chosen when the bus was opened. See [`Bus::instance`].
+    instance: u64,
 }
 
 /// How long dropping the last `Bus` handle waits for the writer to finish.
@@ -385,6 +387,7 @@ impl Bus {
             clock: cfg.clock,
             disk,
             header_kind: cfg.header_kind,
+            instance: new_instance(),
         });
         let bus = Bus {
             _writer: Arc::new(WriterGuard {
@@ -437,6 +440,16 @@ impl Bus {
             kind: self.inner.header_kind,
             tool_versions: segment::tool_versions(),
         }
+    }
+
+    /// A random id chosen when this bus was opened, shared by its clones.
+    ///
+    /// A bus reopened on the same directory continues the sequence numbers
+    /// but starts with an empty world, so a sequence number alone does not
+    /// say which bus it came from. Socket clients compare this id to notice
+    /// that the server's bus changed.
+    pub fn instance(&self) -> u64 {
+        self.inner.instance
     }
 
     /// The log directory, or `None` for a memory-only bus.
@@ -647,6 +660,21 @@ impl Inner {
         }
         st.head
     }
+}
+
+/// A random 64-bit id: std's per-process random hash keys, mixed with the
+/// time, the process id and a counter so two buses in one process differ.
+fn new_instance() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    h.write_u64(now);
+    h.write_u32(std::process::id());
+    h.write_u64(COUNT.fetch_add(1, Ordering::SeqCst));
+    h.finish()
 }
 
 /// Copy up to `max` records from the window starting at `seq`.

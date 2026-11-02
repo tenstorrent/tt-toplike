@@ -7,25 +7,33 @@
 //! * [`RemoteWorld`] keeps a [`RemoteView`] of a server's world current on a
 //!   background thread: it takes a snapshot, subscribes from the snapshot's
 //!   sequence number, and folds every record in with
-//!   [`WorldSummary::apply`]. When the connection drops it reconnects with
-//!   a backoff of 1 s, 2 s, 4 s, 8 s, then every 10 s, and subscribes from
-//!   the last sequence number it applied, so no record is applied twice.
-//!   When the server answers `dropped`, `future` or `too_slow`, it takes a
-//!   fresh snapshot at once.
+//!   [`WorldSummary::apply`].
+//!
+//! # Reconnecting
+//!
+//! Every reconnect takes a fresh snapshot, which replaces the view, and
+//! subscribes from it. A server restarted on the same log directory
+//! continues the sequence numbers with an empty world, and one restarted
+//! after a crash can reuse numbers, so the old connection's sequence
+//! number says nothing about the new bus.
+//!
+//! * When the connection is lost, the first retry waits 1 s, then 2 s, 4 s,
+//!   8 s, then every 10 s.
+//! * When the server still answers but the position is lost, a new
+//!   snapshot is taken at once. That covers `dropped`, `future`, `too_slow`,
+//!   a record that does not follow the view's sequence number by exactly
+//!   one (a gap or a repeat), and a `subscribed` header whose bus instance
+//!   differs from the snapshot's.
+//! * A line from the server longer than 16 MiB is a decode error and ends
+//!   the connection.
 //!
 //! # Limits
 //!
-//! * A server restarted with a fresh bus numbers its records from 1 again.
-//!   When its head is below the last applied sequence number the server
-//!   answers `future` and the view starts over from a snapshot. When the
-//!   new bus has already passed that number, the view cannot tell and
-//!   follows the new log from there, so it can keep values the new bus
-//!   never published until they are overwritten.
 //! * The view does not prune quiet churning entities the way `World` does
 //!   (see [`crate::summary`]); a reconnect with a snapshot does.
 
 use crate::record::Record;
-use crate::socket::{ErrorLine, RawReply};
+use crate::socket::{ErrorLine, RawReply, SubscribedLine};
 use crate::summary::{EventSummary, ReadingSummary, RemoteSnapshot, WorldSummary};
 use crate::world::ModelView;
 use crate::EntityKey;
@@ -40,6 +48,10 @@ use std::time::{Duration, Instant};
 
 /// How long a request waits for its reply.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Longest line the client accepts from a server (16 MiB). A longer one is
+/// a [`ClientError::Decode`] and ends the connection.
+const MAX_LINE: usize = 16 << 20;
 
 /// How often the [`RemoteWorld`] thread checks whether it should stop.
 const TICK: Duration = Duration::from_millis(100);
@@ -145,6 +157,11 @@ impl Lines {
                 return Ok(Some(line));
             }
             self.scanned = self.buf.len();
+            if self.buf.len() > MAX_LINE {
+                return Err(ClientError::Decode(format!(
+                    "a line from the server is longer than {MAX_LINE} bytes"
+                )));
+            }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Ok(None);
@@ -255,13 +272,18 @@ impl SocketClient {
     pub fn subscribe_from(&mut self, from: u64) -> io::Result<RemoteSubscription> {
         self.send(&serde_json::json!({"op": "subscribe", "from": from}))?;
         let lines = self.lines.take().expect("checked by send");
-        Ok(RemoteSubscription { lines })
+        Ok(RemoteSubscription {
+            lines,
+            instance: None,
+        })
     }
 }
 
 /// Records from a server's log, in order.
 pub struct RemoteSubscription {
     lines: Lines,
+    /// The bus instance from the `subscribed` header, once it has arrived.
+    instance: Option<u64>,
 }
 
 impl fmt::Debug for RemoteSubscription {
@@ -273,20 +295,36 @@ impl fmt::Debug for RemoteSubscription {
 impl RemoteSubscription {
     /// The next record, waiting up to `timeout`. `Ok(None)` when none
     /// arrived in time. An error ends the subscription.
+    ///
+    /// The `subscribed` header line is read here and not returned; its bus
+    /// instance is then available from [`RemoteSubscription::instance`].
     pub fn next(&mut self, timeout: Duration) -> Result<Option<Record>, ClientError> {
-        match self.lines.next_line(timeout)? {
-            None => Ok(None),
-            Some(line) => match std::str::from_utf8(&line)
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let Some(line) = self.lines.next_line(left)? else {
+                return Ok(None);
+            };
+            if let Some(r) = std::str::from_utf8(&line)
                 .ok()
                 .and_then(|s| Record::from_line(s).ok())
             {
-                Some(r) => Ok(Some(r)),
-                None => match serde_json::from_slice::<ErrorLine>(&line) {
-                    Ok(e) => Err(e.into()),
-                    Err(e) => Err(ClientError::Decode(e.to_string())),
-                },
-            },
+                return Ok(Some(r));
+            }
+            if let Ok(h) = serde_json::from_slice::<SubscribedLine>(&line) {
+                self.instance = Some(h.subscribed.instance);
+                continue;
+            }
+            return match serde_json::from_slice::<ErrorLine>(&line) {
+                Ok(e) => Err(e.into()),
+                Err(e) => Err(ClientError::Decode(e.to_string())),
+            };
         }
+    }
+
+    /// The server bus's instance id, once the `subscribed` header arrived.
+    pub fn instance(&self) -> Option<u64> {
+        self.instance
     }
 }
 
@@ -295,6 +333,8 @@ impl RemoteSubscription {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RemoteView {
     pub seq: u64,
+    /// The server bus's instance id (see [`crate::Bus::instance`]).
+    pub instance: u64,
     pub world: WorldSummary,
 }
 
@@ -385,6 +425,7 @@ impl RemoteWorld {
             state: Mutex::new(ViewState {
                 view: RemoteView {
                     seq: snap.seq,
+                    instance: snap.instance,
                     world: snap.world,
                 },
                 learned: Instant::now(),
@@ -430,47 +471,28 @@ impl Drop for RemoteWorld {
     }
 }
 
-/// The background loop: apply records; on a drop, reconnect.
+/// The background loop: apply records; when the subscription ends, take
+/// a fresh snapshot.
+///
+/// Every reconnect starts from a snapshot. A server restarted on the same
+/// log directory continues the sequence numbers with an empty world, and
+/// one restarted after a crash can reuse numbers, so a sequence number
+/// from the old connection says nothing about the new bus.
 fn follow(shared: &RemoteShared, first: RemoteSubscription) {
     let mut sub = Some(first);
-    let mut need_snapshot = false;
     let mut backoff = BACKOFF_FIRST;
     loop {
         if let Some(mut s) = sub.take() {
             shared.connected.store(true, Ordering::SeqCst);
-            loop {
-                if shared.stopping() {
-                    return;
-                }
-                match s.next(TICK) {
-                    Ok(Some(rec)) => {
-                        let mut st = shared.state();
-                        let before = st.view.world.now_mono_ns;
-                        st.view.world.apply(&rec);
-                        st.view.seq = rec.seq;
-                        if st.view.world.now_mono_ns != before {
-                            st.learned = Instant::now();
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        shared.connected.store(false, Ordering::SeqCst);
-                        // The server still answers but this position is
-                        // lost: start over from a snapshot without waiting.
-                        need_snapshot = matches!(
-                            e,
-                            ClientError::Dropped { .. }
-                                | ClientError::Future { .. }
-                                | ClientError::TooSlow
-                        );
-                        break;
-                    }
-                }
-            }
-            // The first retry after a drop waits BACKOFF_FIRST; each
-            // failed attempt below doubles the wait up to BACKOFF_MAX.
+            let at_once = match drain(shared, &mut s) {
+                None => return,
+                Some(at_once) => at_once,
+            };
+            shared.connected.store(false, Ordering::SeqCst);
+            // The first retry after a lost connection waits BACKOFF_FIRST;
+            // each failed attempt below doubles the wait up to BACKOFF_MAX.
             backoff = BACKOFF_FIRST;
-            if !need_snapshot {
+            if !at_once {
                 if !shared.pause(backoff) {
                     return;
                 }
@@ -480,10 +502,9 @@ fn follow(shared: &RemoteShared, first: RemoteSubscription) {
         if shared.stopping() {
             return;
         }
-        match reconnect(shared, need_snapshot) {
+        match resnapshot(shared) {
             Ok(s) => {
                 sub = Some(s);
-                need_snapshot = false;
                 backoff = BACKOFF_FIRST;
             }
             Err(_) => {
@@ -496,19 +517,57 @@ fn follow(shared: &RemoteShared, first: RemoteSubscription) {
     }
 }
 
-/// Open a new subscription: from the last applied record, or from a fresh
-/// snapshot that replaces the view.
-fn reconnect(shared: &RemoteShared, need_snapshot: bool) -> io::Result<RemoteSubscription> {
-    if need_snapshot {
-        let (snap, sub) = open(&shared.path)?;
+/// Apply records from `s` until it can no longer be followed. `None` when
+/// the `RemoteWorld` is stopping. `Some(true)` when the server still
+/// answers but this position is lost (`dropped`, `future`, `too_slow`, a
+/// gap or repeat in the sequence, a different bus instance), so a new
+/// snapshot should be taken at once; `Some(false)` when the connection was
+/// lost and the retry waits.
+fn drain(shared: &RemoteShared, s: &mut RemoteSubscription) -> Option<bool> {
+    loop {
+        if shared.stopping() {
+            return None;
+        }
+        let got = s.next(TICK);
         let mut st = shared.state();
-        st.view = RemoteView {
-            seq: snap.seq,
-            world: snap.world,
-        };
-        st.learned = Instant::now();
-        return Ok(sub);
+        if s.instance().is_some_and(|i| i != st.view.instance) {
+            return Some(true);
+        }
+        match got {
+            Ok(Some(rec)) => {
+                // Records follow the view's seq one by one. Anything else
+                // would skip or double-apply a record.
+                if rec.seq != st.view.seq + 1 {
+                    return Some(true);
+                }
+                let before = st.view.world.now_mono_ns;
+                st.view.world.apply(&rec);
+                st.view.seq = rec.seq;
+                if st.view.world.now_mono_ns != before {
+                    st.learned = Instant::now();
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Some(matches!(
+                    e,
+                    ClientError::Dropped { .. } | ClientError::Future { .. } | ClientError::TooSlow
+                ));
+            }
+        }
     }
-    let seq = shared.state().view.seq;
-    SocketClient::connect(&shared.path)?.subscribe_from(seq)
+}
+
+/// Connect, take a fresh snapshot that replaces the view, and subscribe
+/// from it.
+fn resnapshot(shared: &RemoteShared) -> io::Result<RemoteSubscription> {
+    let (snap, sub) = open(&shared.path)?;
+    let mut st = shared.state();
+    st.view = RemoteView {
+        seq: snap.seq,
+        instance: snap.instance,
+        world: snap.world,
+    };
+    st.learned = Instant::now();
+    Ok(sub)
 }

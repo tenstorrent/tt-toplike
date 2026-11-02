@@ -15,6 +15,7 @@
 //!
 //! ```text
 //! {"seq":N,                         // the snapshot is current to record N
+//!  "instance":I,                    // the server bus's random id (Bus::instance)
 //!  "world":{
 //!    "now_mono_ns":T,               // server monotonic time the ages are taken at
 //!    "entities":["chip:0000:03:00.0", ...],        // every entity seen, key order
@@ -108,6 +109,8 @@ pub struct WorldSummary {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RemoteSnapshot {
     pub seq: u64,
+    /// The server bus's [`crate::Bus::instance`].
+    pub instance: u64,
     pub world: WorldSummary,
 }
 
@@ -434,6 +437,7 @@ mod tests {
         let snap = bus.snapshot().unwrap();
         let s = RemoteSnapshot {
             seq: snap.seq,
+            instance: bus.instance(),
             world: WorldSummary::from_world(&snap.world, bus.now_mono_ns()),
         };
         let line = serde_json::to_string(&s).unwrap();
