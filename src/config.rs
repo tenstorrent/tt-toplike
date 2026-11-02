@@ -109,9 +109,9 @@ pub struct AnimConfigOverrides {
     pub tt_smi_reset_behavior: Option<String>,
 }
 
-/// Load config overrides from `~/.config/tt-toplike/config.toml` and
-/// `./.toplikerc` (see [`load_config`]). Every problem in the files is
-/// logged; a file with a syntax error contributes nothing.
+/// Load config overrides from `~/.config/tt-toplike/config.toml` (see
+/// [`load_config`]). Every problem in the file is logged; a file with a
+/// syntax error contributes nothing.
 pub fn load_config_overrides() -> AnimConfigOverrides {
     let loaded = load_config();
     for p in &loaded.problems {
@@ -145,9 +145,10 @@ pub struct LoadedConfig {
     /// The arcade's settings. The default layout when no file sets one, and
     /// also when any `[arcade]` setting has a problem.
     pub arcade: crate::animation::arcade_layout::ArcadeConfig,
-    /// Every problem in every file, in file order.
+    /// Every problem, in line order. A file that cannot be read gives one
+    /// problem with no line.
     pub problems: Vec<ConfigProblem>,
-    /// The files that exist and were read, in the order they apply.
+    /// The files that were read (none, or the shared config file).
     pub files: Vec<PathBuf>,
 }
 
@@ -169,7 +170,9 @@ pub fn problem_summary(problems: &[ConfigProblem]) -> Option<String> {
 /// read, the arcade layout in use, and every problem as `file:line: message`.
 pub fn write_check_report(loaded: &LoadedConfig, out: &mut dyn std::io::Write) -> i32 {
     let _ = (|| -> std::io::Result<()> {
-        if loaded.files.is_empty() {
+        // A file that exists but cannot be read is a problem, printed
+        // below; only no file at all is "no config file found".
+        if loaded.files.is_empty() && loaded.problems.is_empty() {
             writeln!(out, "no config file found (looked for: {})", {
                 config_files()
                     .iter()
@@ -221,37 +224,151 @@ pub fn write_check_report(loaded: &LoadedConfig, out: &mut dyn std::io::Write) -
     i32::from(!loaded.problems.is_empty())
 }
 
-/// The name of the per-directory override file.
-pub const LOCAL_CONFIG: &str = ".toplikerc";
+/// The largest config file read, in bytes. A larger file is a problem.
+pub const MAX_CONFIG_BYTES: u64 = 256 * 1024;
 
-/// The config files, in the order they apply: the shared
-/// `~/.config/tt-toplike/config.toml`, then `./.toplikerc` in the working
-/// directory. A key set in both takes the value from `.toplikerc`.
+/// The config files: the shared `~/.config/tt-toplike/config.toml`, or
+/// nothing when the platform has no config directory. There is no
+/// per-directory file, so a repo you check out cannot change tt-toplike.
 pub fn config_files() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = config_path().into_iter().collect();
-    out.push(PathBuf::from(LOCAL_CONFIG));
-    out
+    config_path().into_iter().collect()
 }
 
-/// Read the config files that exist (see [`config_files`]).
+/// Read the shared config file (see [`config_files`]).
+///
+/// The TUI calls this once, in `run_tui`, before the terminal enters raw
+/// mode, so a problem here never leaves a blank raw-mode screen.
 pub fn load_config() -> LoadedConfig {
-    let mut sources = Vec::new();
-    let mut problems = Vec::new();
-    for path in config_files() {
-        match std::fs::read_to_string(&path) {
-            Ok(text) => sources.push((path, text)),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => problems.push(ConfigProblem {
-                file: path,
+    load_config_file(config_path().as_deref())
+}
+
+/// Read the config file at `path` (none with `None`) and check it. A file
+/// that cannot be read, or that [`read_config_file`] refuses, is one
+/// problem, and every setting keeps its default.
+pub fn load_config_file(path: Option<&std::path::Path>) -> LoadedConfig {
+    let Some(path) = path else {
+        return load_from(&[]);
+    };
+    match read_config_file(path) {
+        Ok(Some(text)) => load_from(&[(path.to_path_buf(), text)]),
+        Ok(None) => load_from(&[]),
+        Err(message) => {
+            let mut loaded = load_from(&[]);
+            loaded.problems.push(ConfigProblem {
+                file: path.to_path_buf(),
                 line: None,
-                message: format!("cannot be read: {e}"),
-            }),
+                message,
+            });
+            loaded
         }
     }
-    let mut loaded = load_from(&sources);
-    problems.append(&mut loaded.problems);
-    loaded.problems = problems;
-    loaded
+}
+
+/// The text of the config file at `path`. `Ok(None)` when there is no file.
+/// `Err` holds the problem's message.
+///
+/// Only a regular file of at most [`MAX_CONFIG_BYTES`] is read. A symlink is
+/// followed and the file it points to is checked, so a symlink to a regular
+/// file works. A directory, FIFO, socket or device is never opened: a FIFO
+/// or a terminal would block the read, and `/dev/zero` would never end it.
+/// The type is checked again on the open file, in case the path changed in
+/// between, and the read stops one byte past the cap.
+pub fn read_config_file(path: &std::path::Path) -> Result<Option<String>, String> {
+    use std::io::Read;
+    let unreadable = |e: std::io::Error| format!("cannot be read: {e}");
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // A symlink whose target is missing is still a file someone
+            // put there.
+            return match std::fs::symlink_metadata(path) {
+                Ok(_) => Err("is a symlink to a file that does not exist".into()),
+                Err(_) => Ok(None),
+            };
+        }
+        Err(e) => return Err(unreadable(e)),
+    };
+    check_config_meta(&meta)?;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    // Should a FIFO take the file's place after the check above, opening it
+    // without O_NONBLOCK would wait for a writer.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = opts.open(path).map_err(unreadable)?;
+    check_config_meta(&file.metadata().map_err(unreadable)?)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(unreadable)?;
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(too_large(bytes.len() as u64));
+    }
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| "is not UTF-8 text".into())
+}
+
+/// The problem with a config file's metadata: not a regular file, or over
+/// the size cap.
+fn check_config_meta(meta: &std::fs::Metadata) -> Result<(), String> {
+    let t = meta.file_type();
+    if !t.is_file() {
+        let kind = if t.is_dir() {
+            "a directory"
+        } else {
+            special_file_kind(&t)
+        };
+        return Err(format!("is {kind}; the config must be a regular file"));
+    }
+    if meta.len() > MAX_CONFIG_BYTES {
+        return Err(too_large(meta.len()));
+    }
+    Ok(())
+}
+
+/// What kind of file `t` is, for a file that is neither a regular file nor
+/// a directory.
+#[cfg(unix)]
+fn special_file_kind(t: &std::fs::FileType) -> &'static str {
+    use std::os::unix::fs::FileTypeExt;
+    if t.is_fifo() {
+        "a FIFO"
+    } else if t.is_char_device() {
+        "a character device"
+    } else if t.is_block_device() {
+        "a block device"
+    } else if t.is_socket() {
+        "a socket"
+    } else {
+        "a special file"
+    }
+}
+
+#[cfg(not(unix))]
+fn special_file_kind(_: &std::fs::FileType) -> &'static str {
+    "a special file"
+}
+
+/// The message for a config file of `len` bytes, over the cap.
+fn too_large(len: u64) -> String {
+    format!(
+        "is larger than {} KiB ({len} bytes); it was not read",
+        MAX_CONFIG_BYTES / 1024
+    )
+}
+
+/// A parser message on one line: toml_edit's messages can span several.
+fn one_line(message: &str) -> String {
+    message
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// The keys allowed at the top of a config file.
@@ -263,7 +380,8 @@ const TOP_KEYS: [&str; 4] = [
 ];
 
 /// Merge config `sources` (each a path and its text), later ones winning per
-/// key, and collect every problem. Pure: no file is read. See
+/// key, and collect every problem. Pure: no file is read. The TUI passes
+/// one source at most, the shared config file. See
 /// `docs/arcade-layout.md` for the `[arcade]` schema and the messages.
 pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
     use crate::animation::arcade_layout::ArcadeConfig;
@@ -286,7 +404,7 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
             Err(e) => {
                 report(
                     e.span(),
-                    format!("TOML syntax error: {}", e.message().trim()),
+                    format!("TOML syntax error: {}", one_line(e.message())),
                 );
                 continue;
             }
@@ -307,11 +425,24 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
                 if o.max_particles_scale.is_some() {
                     out.overrides.max_particles_scale = o.max_particles_scale;
                 }
-                if o.tt_smi_reset_behavior.is_some() {
-                    out.overrides.tt_smi_reset_behavior = o.tt_smi_reset_behavior;
+                if let Some(v) = o.tt_smi_reset_behavior {
+                    // An unknown value is a problem here, so --check-config
+                    // reports it, and the TUI uses the default.
+                    use clap::ValueEnum;
+                    if crate::cli::ResetBehavior::from_str(v.trim(), true).is_ok() {
+                        out.overrides.tt_smi_reset_behavior = Some(v);
+                    } else {
+                        let span = top.get("tt_smi_reset_behavior").and_then(|i| i.span());
+                        report(
+                            span,
+                            format!(
+                                "unknown tt_smi_reset_behavior {v:?} (expected ignore, inform, dazzle or demo); the TUI uses inform"
+                            ),
+                        );
+                    }
                 }
             }
-            Err(e) => report(e.span(), e.message().trim().to_string()),
+            Err(e) => report(e.span(), one_line(e.message())),
         }
         if let Some(item) = top.get("arcade") {
             let before = out.problems.len();
@@ -586,7 +717,9 @@ pub fn parse_reset_behavior(text: &str) -> Option<crate::cli::ResetBehavior> {
     parsed
 }
 
-fn config_path() -> Option<PathBuf> {
+/// The shared config file, `~/.config/tt-toplike/config.toml` (the
+/// platform's config directory).
+pub fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("tt-toplike").join("config.toml"))
 }
 
@@ -910,30 +1043,6 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
     }
 
     #[test]
-    fn toplikerc_wins_per_key_over_the_shared_file() {
-        let shared = "sensitivity = 2.0\nmax_particles_scale = 3.0\n[arcade]\ncloudfield = true\n";
-        let local = "sensitivity = 0.5\n[[arcade.row]]\npanels = [{ view = \"die3d\" }]\n";
-        let l = load(&[("config.toml", shared), (".toplikerc", local)]);
-        assert!(l.problems.is_empty(), "{:?}", l.problems);
-        assert_eq!(l.overrides.sensitivity, Some(0.5), "the local file wins");
-        assert_eq!(
-            l.overrides.max_particles_scale,
-            Some(3.0),
-            "a key only shared stays"
-        );
-        assert!(
-            l.arcade.cloudfield,
-            "cloudfield set only in the shared file stays"
-        );
-        assert_eq!(
-            l.arcade.rows.len(),
-            1,
-            "the local rows replace the shared rows"
-        );
-        assert_eq!(l.files.len(), 2);
-    }
-
-    #[test]
     fn check_config_prints_every_problem_and_exits_non_zero() {
         let text = "[[arcade.row]]\nheight = 0\npanels = [{ view = \"nope\" }]\n";
         let l = load(&[("c.toml", text)]);
@@ -965,13 +1074,280 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
 
     #[test]
     fn a_problem_names_the_file_it_is_in() {
-        let p = problems(&[
-            ("config.toml", "[arcade]\ncloudfield = true\n"),
-            (".toplikerc", "[arcade]\nnope = 1\n"),
-        ]);
+        let p = problems(&[("/x/config.toml", "[arcade]\nnope = 1\n")]);
         assert_eq!(
             p,
-            vec![".toplikerc:2: unknown key `arcade.nope` (expected cloudfield or row)"]
+            vec!["/x/config.toml:2: unknown key `arcade.nope` (expected cloudfield or row)"]
+        );
+    }
+
+    #[test]
+    fn a_bad_tt_smi_reset_behavior_is_a_problem() {
+        let text = "sensitivity = 2.0\ntt_smi_reset_behavior = \"bogus\"\n";
+        let l = load(&[("c.toml", text)]);
+        let p: Vec<String> = l.problems.iter().map(|p| p.to_string()).collect();
+        assert_eq!(
+            p,
+            vec![
+                "c.toml:2: unknown tt_smi_reset_behavior \"bogus\" (expected ignore, inform, dazzle or demo); the TUI uses inform"
+            ]
+        );
+        assert_eq!(
+            l.overrides.tt_smi_reset_behavior, None,
+            "the default is used"
+        );
+        assert_eq!(l.overrides.sensitivity, Some(2.0), "the other keys stay");
+        let mut out = Vec::new();
+        assert_eq!(write_check_report(&l, &mut out), 1, "--check-config fails");
+        let l = load(&[("c.toml", "tt_smi_reset_behavior = \"Dazzle\"\n")]);
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(l.overrides.tt_smi_reset_behavior.as_deref(), Some("Dazzle"));
+    }
+
+    #[test]
+    fn a_syntax_error_is_one_line() {
+        // toml_edit's message for a bad table header spans two lines.
+        let l = load(&[("c.toml", "[arcade\n")]);
+        let m = &l.problems[0].message;
+        assert!(!m.contains('\n'), "{m:?}");
+        assert!(m.starts_with("TOML syntax error: "), "{m:?}");
+        assert!(m.contains("; "), "the lines are joined: {m:?}");
+    }
+
+    // ---- Reading the file ------------------------------------------------
+
+    /// A fresh directory under the system temp directory, removed on drop.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> TempDir {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static N: AtomicUsize = AtomicUsize::new(0);
+            let p = std::env::temp_dir().join(format!(
+                "tt-toplike-config-{tag}-{}-{}",
+                std::process::id(),
+                N.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            TempDir(p)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// [`read_config_file`] on a thread. Panics if it has not returned
+    /// within ten seconds, so a read that blocks fails the test and never
+    /// hangs it. The bound only catches a hang; nothing about speed is
+    /// checked.
+    fn read_or_hang(path: PathBuf) -> Result<Option<String>, String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read_config_file(&path));
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("reading the config file blocked")
+    }
+
+    #[test]
+    fn a_missing_file_is_no_file_and_a_regular_file_is_read() {
+        let d = TempDir::new("plain");
+        assert_eq!(read_or_hang(d.0.join("config.toml")), Ok(None));
+        std::fs::write(d.0.join("config.toml"), "sensitivity = 2.0\n").unwrap();
+        assert_eq!(
+            read_or_hang(d.0.join("config.toml")),
+            Ok(Some("sensitivity = 2.0\n".into()))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_a_regular_file_is_read() {
+        let d = TempDir::new("link");
+        std::fs::write(d.0.join("real.toml"), "sensitivity = 2.0\n").unwrap();
+        std::os::unix::fs::symlink(d.0.join("real.toml"), d.0.join("config.toml")).unwrap();
+        let l = load_config_file(Some(&d.0.join("config.toml")));
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(l.overrides.sensitivity, Some(2.0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_to_dev_zero_is_a_problem_and_is_not_read() {
+        let d = TempDir::new("zero");
+        let path = d.0.join("config.toml");
+        std::os::unix::fs::symlink("/dev/zero", &path).unwrap();
+        let e = read_or_hang(path.clone()).unwrap_err();
+        assert_eq!(
+            e,
+            "is a character device; the config must be a regular file"
+        );
+        let l = load_config_file(Some(&path));
+        assert_eq!(l.problems.len(), 1);
+        assert!(l.files.is_empty());
+        assert_eq!(
+            l.arcade,
+            crate::animation::arcade_layout::ArcadeConfig::default()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_a_problem_and_is_never_opened() {
+        let d = TempDir::new("fifo");
+        let path = d.0.join("config.toml");
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        // SAFETY: `c` is a valid NUL-terminated path for the call's duration.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+        // Opening a FIFO for reading blocks until a writer comes, so a
+        // reader that opens it hangs here (and `read_or_hang` fails).
+        let e = read_or_hang(path).unwrap_err();
+        assert_eq!(e, "is a FIFO; the config must be a regular file");
+    }
+
+    #[test]
+    fn a_directory_is_a_problem() {
+        let d = TempDir::new("dir");
+        std::fs::create_dir(d.0.join("config.toml")).unwrap();
+        let e = read_or_hang(d.0.join("config.toml")).unwrap_err();
+        assert_eq!(e, "is a directory; the config must be a regular file");
+    }
+
+    #[test]
+    fn a_file_over_the_size_cap_is_a_problem() {
+        let d = TempDir::new("big");
+        let path = d.0.join("config.toml");
+        let cap = MAX_CONFIG_BYTES as usize;
+        std::fs::write(&path, "#".repeat(cap)).unwrap();
+        assert!(
+            read_or_hang(path.clone()).unwrap().is_some(),
+            "the cap itself is read"
+        );
+        std::fs::write(&path, "#".repeat(cap + 1)).unwrap();
+        let e = read_or_hang(path).unwrap_err();
+        assert_eq!(
+            e,
+            format!(
+                "is larger than 256 KiB ({} bytes); it was not read",
+                cap + 1
+            )
+        );
+    }
+
+    #[test]
+    fn a_file_that_is_not_utf8_is_a_problem() {
+        let d = TempDir::new("utf8");
+        std::fs::write(d.0.join("config.toml"), [0xff, 0xfe, b'\n']).unwrap();
+        assert_eq!(
+            read_or_hang(d.0.join("config.toml")).unwrap_err(),
+            "is not UTF-8 text"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_is_reported_as_unreadable() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = TempDir::new("mode000");
+        let path = d.0.join("config.toml");
+        std::fs::write(&path, "sensitivity = 2.0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&path).is_ok() {
+            // Running as root: mode 000 does not stop a read.
+            return;
+        }
+        let l = load_config_file(Some(&path));
+        assert_eq!(l.problems.len(), 1, "{:?}", l.problems);
+        assert!(
+            l.problems[0].message.starts_with("cannot be read: "),
+            "{:?}",
+            l.problems
+        );
+        let mut out = Vec::new();
+        assert_eq!(write_check_report(&l, &mut out), 1);
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("no config file found"), "{out}");
+        assert!(out.contains("cannot be read"), "{out}");
+    }
+
+    #[test]
+    fn check_config_says_no_file_only_when_there_is_none() {
+        let d = TempDir::new("none");
+        let l = load_config_file(Some(&d.0.join("config.toml")));
+        let mut out = Vec::new();
+        assert_eq!(write_check_report(&l, &mut out), 0);
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.starts_with("no config file found (looked for: "),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn only_the_shared_file_is_a_config_file() {
+        let files = config_files();
+        assert!(files.len() <= 1, "{files:?}");
+        for f in &files {
+            assert!(f.ends_with("tt-toplike/config.toml"), "{f:?}");
+        }
+    }
+
+    /// The child half of [`a_toplikerc_in_the_working_directory_is_ignored`]:
+    /// run by that test in a directory holding a `.toplikerc`, with `HOME`
+    /// and `XDG_CONFIG_HOME` in an empty directory. Does nothing otherwise.
+    #[test]
+    #[ignore = "run by a_toplikerc_in_the_working_directory_is_ignored"]
+    fn toplikerc_probe() {
+        if std::env::var_os("TT_TOPLIKE_TOPLIKERC_PROBE").is_none() {
+            return;
+        }
+        assert!(
+            std::path::Path::new(".toplikerc").exists(),
+            "set up by the parent"
+        );
+        let l = load_config();
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert!(l.files.is_empty(), "{:?}", l.files);
+        assert_eq!(l.overrides.sensitivity, None);
+        assert_eq!(
+            l.arcade,
+            crate::animation::arcade_layout::ArcadeConfig::default()
+        );
+    }
+
+    /// A `.toplikerc` in the working directory changes nothing: a repo you
+    /// check out must not change tt-toplike. The working directory is
+    /// process-wide, so this runs [`toplikerc_probe`] in a child process of
+    /// this test binary, started in a directory with a `.toplikerc` that
+    /// has a problem and a setting.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_toplikerc_in_the_working_directory_is_ignored() {
+        let d = TempDir::new("cwd");
+        let home = d.0.join("home");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::write(
+            d.0.join(".toplikerc"),
+            "sensitivity = 9.0\nnope = 1\n[[arcade.row]]\npanels = [{ view = \"flow\" }]\n",
+        )
+        .unwrap();
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "config::tests::toplikerc_probe", "--ignored"])
+            .current_dir(&d.0)
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("TT_TOPLIKE_TOPLIKERC_PROBE", "1")
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && text.contains("1 passed"),
+            "{text}{}",
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 }

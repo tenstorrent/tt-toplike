@@ -240,13 +240,15 @@ pub struct Cli {
     #[arg(long)]
     pub bench: bool,
 
-    /// Check the config files and exit: print every problem with its file and
-    /// line, and exit non-zero when there is one.
+    /// Check the config file and exit: print every problem with its line, and
+    /// exit non-zero when there is one.
     ///
-    /// Reads `~/.config/tt-toplike/config.toml`, then `./.toplikerc`, which
-    /// overrides it key by key. The `[arcade]` section sets the arcade's
-    /// layout and its cloudfield; see docs/arcade-layout.md. Does not enter
-    /// the TUI and opens no device.
+    /// Reads `~/.config/tt-toplike/config.toml`, the only config file. The
+    /// `[arcade]` section sets the arcade's layout and its cloudfield; see
+    /// docs/arcade-layout.md. In the arcade, `c` or `/arcade cloudfield
+    /// on|off` switches the cloudfield, which shows only while an inference
+    /// service is loading or serving. Does not enter the TUI and opens no
+    /// device.
     #[arg(long)]
     pub check_config: bool,
 
