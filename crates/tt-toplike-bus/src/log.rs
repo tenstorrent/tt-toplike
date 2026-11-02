@@ -614,6 +614,22 @@ impl Bus {
         self.ask_writer(Msg::Maintain, timeout)
     }
 
+    /// Ask the writer to apply retention and flush, without waiting. For a
+    /// host's tick, which must not block on the disk. Returns false when the
+    /// request could not be queued (the writer queue is full or the writer
+    /// has stopped); the next request tries again. With no log directory it
+    /// returns true at once.
+    pub fn request_maintenance(&self) -> bool {
+        let st = lock(&self.inner.state);
+        let Some(tx) = &st.tx else {
+            return true;
+        };
+        // Nobody waits on the acknowledgement; the writer's send fails
+        // quietly when it finds the receiver gone.
+        let (ack_tx, _) = mpsc::sync_channel(1);
+        tx.try_send(Msg::Maintain(ack_tx)).is_ok()
+    }
+
     /// Send the writer a message that carries an acknowledgement channel and
     /// wait for the acknowledgement.
     fn ask_writer(&self, make: fn(SyncSender<()>) -> Msg, timeout: Duration) -> bool {
@@ -1876,6 +1892,27 @@ mod tests {
         assert!(bus.maintain(Duration::from_secs(10)));
         assert!(!exists(dir.path(), 1, true), "maintain deleted it");
         assert!(exists(dir.path(), 2, false), "the open segment is kept");
+    }
+
+    #[test]
+    fn request_maintenance_applies_retention_without_waiting() {
+        let dir = TempDir::new("reqmaint");
+        let clock = ManualClock::new(T0);
+        let bus = Bus::open(BusConfig {
+            window_records: 1,
+            segment_secs: 10,
+            retain_secs: 60,
+            ..disk_cfg(dir.path(), &clock)
+        })
+        .unwrap();
+        bus.publish("t", sample(0));
+        clock.advance_secs(10);
+        bus.publish("t", sample(1));
+        clock.advance_secs(120);
+        assert!(bus.request_maintenance());
+        // Messages are handled in order, so after this flush it has run.
+        flush(&bus);
+        assert!(!exists(dir.path(), 1, true));
     }
 
     #[test]

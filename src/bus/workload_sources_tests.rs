@@ -984,3 +984,57 @@ mod remote_tests {
         assert!(sample(&out, &m, bsig::MODEL_PHASE).is_none());
     }
 }
+
+// ---- Resend (Task 10a) -------------------------------------------------------
+
+/// After `resend_all`, the next identical feed sends the process text again
+/// (name, command line, chips), so log retention cannot lose it.
+#[test]
+fn resend_all_re_emits_process_text_on_the_next_feed() {
+    let map = map_with(&[(0, A)]);
+    let mut src = ProcessSource::new(map);
+    let procs = secret_procs();
+    src.feed(&procs);
+    poll(&mut src);
+    src.feed(&procs);
+    assert!(poll(&mut src)
+        .iter()
+        .all(|p| matches!(p, Payload::Sweep(_))));
+    src.resend_all();
+    src.feed(&procs);
+    let out = poll(&mut src);
+    let e = EntityKey::process(100, 555);
+    assert!(sample(&out, &e, sig::PROC_NAME).is_some(), "{out:?}");
+    assert_eq!(
+        sample(&out, &e, sig::PROC_CMDLINE).unwrap().value,
+        Value::Text("python serve.py --api-key <redacted> HF_TOKEN=<redacted> --port 8000".into())
+    );
+    assert_eq!(
+        sample(&out, &e, sig::PROC_DEVICE).unwrap().value,
+        Value::Text(format!("chip:{A}"))
+    );
+    // Once only: the feed after that is numbers again.
+    src.feed(&procs);
+    assert!(poll(&mut src)
+        .iter()
+        .all(|p| matches!(p, Payload::Sweep(_))));
+}
+
+/// After `resend_all`, a model that is still ready is announced again, so a
+/// log trimmed by retention still holds the event that creates its view.
+#[test]
+fn resend_all_re_announces_a_steady_model() {
+    let map = map_with(&[(0, A)]);
+    let mut src = InferenceSource::new(map);
+    let snap = vec![state("svc", Phase::Ready, &[0])];
+    src.feed(&snap);
+    assert!(kinds(&poll(&mut src)).contains(&"ready".to_string()));
+    src.feed(&snap);
+    assert!(!kinds(&poll(&mut src)).contains(&"ready".to_string()));
+    src.resend_all();
+    src.feed(&snap);
+    let out = poll(&mut src);
+    assert_eq!(kinds(&out).first().map(String::as_str), Some("ready"));
+    src.feed(&snap);
+    assert!(!kinds(&poll(&mut src)).contains(&"ready".to_string()));
+}

@@ -36,6 +36,16 @@ pub trait Source {
     /// Emit whatever is new. Return early to run slower than the host's tick.
     /// Sources that own their input ignore `ctx`.
     fn poll(&mut self, ctx: &PollCtx<'_>, now: Instant, out: &mut dyn FnMut(Payload));
+    /// Forget what was already sent, so the next poll sends the current
+    /// value of everything this source otherwise sends only on change (text
+    /// samples, slow-lane values, model announcements).
+    ///
+    /// The host calls it every few minutes. Log retention deletes whole
+    /// segments, and a value sent once at start would be lost with the
+    /// segment that held it, leaving a replay of what is left without it.
+    /// The default does nothing: a source that sends everything on every
+    /// poll has nothing to resend.
+    fn resend_all(&mut self) {}
 }
 
 /// Reads a backend's cached telemetry and emits chip, DRAM and link records.
@@ -266,6 +276,13 @@ impl Source for BackendSource {
     }
     fn poll(&mut self, ctx: &PollCtx<'_>, _now: Instant, out: &mut dyn FnMut(Payload)) {
         self.poll_backend(ctx.backend, out);
+    }
+    /// The next poll sends every slow-lane value and the raw frame again.
+    /// The Ethernet mask is then a first sight, so it gives no
+    /// `LinkChanged`.
+    fn resend_all(&mut self) {
+        self.last.clear();
+        self.last_raw = None;
     }
 }
 

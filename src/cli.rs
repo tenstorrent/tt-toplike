@@ -247,18 +247,21 @@ pub struct Cli {
     /// Record everything the signal bus sees into segment files in DIR.
     ///
     /// The log is a directory of `bus-<n>.jsonl[.gz]` files, kept for 24 hours
-    /// or 5 GB. Read it back with `--replay DIR` or `--bus-inspect DIR`.
-    /// (Parsed and validated here; the live loops start recording in the
-    /// bus wiring task.)
+    /// or 5 GB (see `--bus-retain`). Read it back with `--replay DIR` or
+    /// `--bus-inspect DIR`. The same as `--bus-dir DIR`. In this build only
+    /// `--headless` records; the TUI does not host the bus yet.
     #[arg(long, value_name = "DIR")]
     pub record: Option<PathBuf>,
 
-    /// Play a recorded log. No hardware is read.
+    /// Play a recorded log into a headless bus host. No hardware is read.
     ///
     /// PATH is a segment file (plain or `.gz`) or a directory of segments.
     /// The records are republished on the bus with their original spacing
-    /// divided by `--speed`, and the bus is marked as a replay. Cannot be
-    /// combined with the live-only flags `--serve` and `--remote`.
+    /// divided by `--speed`, and the bus is marked as a replay. Needs
+    /// `--headless` in this release: run
+    /// `tt-toplike-tui --headless --replay PATH` and read it on its socket
+    /// (`--bus-socket`). Cannot be combined with a backend or live flag
+    /// (`--mock`, `--json`, `--host`, `--backend`, `--serve`, `--remote`).
     #[arg(long, value_name = "PATH")]
     pub replay: Option<PathBuf>,
 
@@ -280,6 +283,38 @@ pub struct Cli {
     #[arg(long, value_name = "PATH")]
     pub bus_inspect: Option<PathBuf>,
 
+    /// Run with no screen: host the signal bus, record it, and serve it on a
+    /// Unix socket, until SIGTERM or SIGINT.
+    ///
+    /// The log goes to `--bus-dir` (default `~/.local/state/tt-toplike/bus`,
+    /// or `$XDG_STATE_HOME/tt-toplike/bus`). The socket is `--bus-socket`
+    /// (default `$XDG_RUNTIME_DIR/tt-toplike/bus.sock`, else
+    /// `/tmp/tt-toplike-<uid>/bus.sock`). With `--serve`, also broadcasts
+    /// `/telemetry` frames as the no-TTY `--serve` mode does. With `--replay`,
+    /// plays a recorded log and reads no backend. For running under
+    /// systemd.
+    #[arg(long, conflicts_with_all = ["print", "bench", "bus_inspect"])]
+    pub headless: bool,
+
+    /// Directory for the signal-bus log. Default with `--headless`:
+    /// `~/.local/state/tt-toplike/bus`. One process at a time may write a
+    /// directory; a second is refused.
+    #[arg(long, value_name = "DIR")]
+    pub bus_dir: Option<PathBuf>,
+
+    /// Path of the signal-bus Unix socket. Default:
+    /// `$XDG_RUNTIME_DIR/tt-toplike/bus.sock`, else
+    /// `/tmp/tt-toplike-<uid>/bus.sock`. Its directory must belong to you
+    /// and not be writable by group or others, so a path directly in `/tmp`
+    /// is refused.
+    #[arg(long, value_name = "PATH")]
+    pub bus_socket: Option<PathBuf>,
+
+    /// How long to keep the signal-bus log: HOURS, or HOURS,GB for a size
+    /// limit too (whichever is reached first). Default 24,5.
+    #[arg(long, value_name = "HOURS[,GB]", value_parser = parse_bus_retain)]
+    pub bus_retain: Option<BusRetain>,
+
     /// With `--bus-inspect`: show only this entity, for example `chip:0000:01:00.0`.
     #[arg(long, value_name = "KEY", requires = "bus_inspect")]
     pub entity: Option<String>,
@@ -287,6 +322,82 @@ pub struct Cli {
     /// With `--bus-inspect`: show only this signal, for example `chip.temp_c`.
     #[arg(long, value_name = "NAME", requires = "bus_inspect")]
     pub signal: Option<String>,
+}
+
+/// `--bus-retain HOURS[,GB]`: the log's age limit and optional size limit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BusRetain {
+    /// Closed segments older than this are deleted.
+    pub secs: u64,
+    /// While the log is larger than this, the oldest segment is deleted.
+    /// `None` keeps the default (5 GB).
+    pub bytes: Option<u64>,
+}
+
+/// Parse `HOURS` or `HOURS,GB`. Both are numbers above zero; fractions are
+/// allowed (`0.5` hours is 30 minutes). A GB is 10^9 bytes.
+pub fn parse_bus_retain(s: &str) -> Result<BusRetain, String> {
+    let (h, gb) = match s.split_once(',') {
+        Some((h, gb)) => (h, Some(gb)),
+        None => (s, None),
+    };
+    let num = |what: &str, v: &str| -> Result<f64, String> {
+        match v.trim().parse::<f64>() {
+            Ok(x) if x.is_finite() && x > 0.0 => Ok(x),
+            _ => Err(format!(
+                "--bus-retain wants HOURS or HOURS,GB with numbers above zero; \
+                 the {what} part was '{v}'"
+            )),
+        }
+    };
+    let hours = num("HOURS", h)?;
+    let bytes = gb.map(|g| num("GB", g)).transpose()?;
+    Ok(BusRetain {
+        secs: (hours * 3600.0).round().max(1.0) as u64,
+        bytes: bytes.map(|g| (g * 1e9).round().max(1.0) as u64),
+    })
+}
+
+/// Where a headless host keeps its log when `--bus-dir` is not given:
+/// `$XDG_STATE_HOME/tt-toplike/bus`, else `~/.local/state/tt-toplike/bus`.
+/// `None` with neither a usable `XDG_STATE_HOME` nor a home directory.
+pub fn default_bus_dir() -> Option<PathBuf> {
+    resolve_bus_dir(std::env::var_os("XDG_STATE_HOME"), dirs::home_dir())
+}
+
+/// [`default_bus_dir`] with its inputs passed in. An `XDG_STATE_HOME` that
+/// is empty or relative is ignored, as the XDG spec says.
+pub fn resolve_bus_dir(
+    xdg_state_home: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    let base = match xdg_state_home.map(PathBuf::from) {
+        Some(p) if p.is_absolute() => p,
+        _ => home?.join(".local").join("state"),
+    };
+    Some(base.join("tt-toplike").join("bus"))
+}
+
+/// The bus socket path when `--bus-socket` is not given:
+/// `$XDG_RUNTIME_DIR/tt-toplike/bus.sock`, else
+/// `/tmp/tt-toplike-<uid>/bus.sock`. Both are in a directory of their own,
+/// which the socket server creates with mode 0700: the server refuses a
+/// directory others can write to, so `/tmp` itself cannot hold it.
+#[cfg(unix)]
+pub fn default_bus_socket() -> PathBuf {
+    // SAFETY: `getuid` takes no arguments, cannot fail and touches no
+    // memory. The same call is made in workload::process_monitor.
+    let uid = unsafe { libc::getuid() };
+    resolve_bus_socket(std::env::var_os("XDG_RUNTIME_DIR"), uid)
+}
+
+/// [`default_bus_socket`] with its inputs passed in. An `XDG_RUNTIME_DIR`
+/// that is empty or relative is ignored.
+pub fn resolve_bus_socket(xdg_runtime_dir: Option<std::ffi::OsString>, uid: u32) -> PathBuf {
+    match xdg_runtime_dir.map(PathBuf::from) {
+        Some(p) if p.is_absolute() => p.join("tt-toplike").join("bus.sock"),
+        _ => PathBuf::from(format!("/tmp/tt-toplike-{uid}")).join("bus.sock"),
+    }
 }
 
 /// What toplike does when it sees a `tt-smi -r` reset (`--tt-smi-reset-behavior`).
@@ -642,6 +753,10 @@ impl Cli {
             replay: None,
             speed: None,
             bus_inspect: None,
+            headless: false,
+            bus_dir: None,
+            bus_socket: None,
+            bus_retain: None,
             entity: None,
             signal: None,
         }
@@ -688,13 +803,80 @@ impl Cli {
         self.speed.unwrap_or(1.0)
     }
 
+    /// The signal-bus settings for a headless host: the log directory
+    /// (`--bus-dir`, `--record`, else [`default_bus_dir`]) and the retention
+    /// from `--bus-retain`. A replay records only into a directory given on
+    /// the command line, never the default one, so a replay is not mixed
+    /// into the live log.
+    pub fn headless_bus_config(&self) -> tt_toplike_bus::BusConfig {
+        let explicit = self.bus_dir.clone().or_else(|| self.record.clone());
+        let dir = if self.replay.is_some() {
+            explicit
+        } else {
+            explicit.or_else(default_bus_dir)
+        };
+        let mut cfg = tt_toplike_bus::BusConfig {
+            dir,
+            ..tt_toplike_bus::BusConfig::default()
+        };
+        if let Some(r) = self.bus_retain {
+            cfg.retain_secs = r.secs;
+            if let Some(b) = r.bytes {
+                cfg.retain_bytes = b;
+            }
+        }
+        cfg
+    }
+
+    /// The bus socket path: `--bus-socket`, else [`default_bus_socket`].
+    #[cfg(unix)]
+    pub fn bus_socket_path(&self) -> PathBuf {
+        self.bus_socket.clone().unwrap_or_else(default_bus_socket)
+    }
+
+    /// The bus flags that only `--headless` acts on in this build, by name,
+    /// when one is set without it. The TUI does not host the bus yet.
+    pub fn bus_flag_needing_headless(&self) -> Option<&'static str> {
+        if self.headless {
+            return None;
+        }
+        [
+            ("--record", self.record.is_some()),
+            ("--bus-dir", self.bus_dir.is_some()),
+            ("--bus-socket", self.bus_socket.is_some()),
+            ("--bus-retain", self.bus_retain.is_some()),
+        ]
+        .into_iter()
+        .find_map(|(name, set)| set.then_some(name))
+    }
+
     /// Checks for the signal-bus flags (`--record`, `--replay`, `--speed`,
-    /// `--bus-inspect`). The messages say which flags clash and why.
+    /// `--bus-inspect`, `--headless`, `--bus-dir`). The messages say which
+    /// flags clash and why.
     fn validate_bus(&self) -> Result<(), String> {
         if let Some(speed) = self.speed {
             if !(speed.is_finite() && speed > 0.0) {
                 return Err(format!(
                     "--speed must be a number above zero (1 is real time), got {speed}"
+                ));
+            }
+        }
+        if self.bus_inspect.is_some() {
+            let other = [
+                ("--replay", self.replay.is_some()),
+                ("--record", self.record.is_some()),
+                ("--serve", self.serve.is_some()),
+                ("--remote", self.remote.is_some()),
+                ("--print", self.print),
+                ("--bench", self.bench),
+                ("--headless", self.headless),
+            ]
+            .into_iter()
+            .find_map(|(name, set)| set.then_some(name));
+            if let Some(name) = other {
+                return Err(format!(
+                    "--bus-inspect prints a summary and exits, so it cannot be combined \
+                     with {name}. Only --entity and --signal go with it"
                 ));
             }
         }
@@ -713,26 +895,60 @@ impl Cli {
                         .to_string(),
                 );
             }
-        }
-        if self.bus_inspect.is_some() {
-            let other = [
-                ("--replay", self.replay.is_some()),
-                ("--record", self.record.is_some()),
-                ("--serve", self.serve.is_some()),
-                ("--remote", self.remote.is_some()),
-                ("--print", self.print),
-                ("--bench", self.bench),
+            let backend_flag = [
+                ("--mock", self.mock.is_some()),
+                ("--json", self.json),
+                ("--host", self.host),
+                ("--backend", self.backend != BackendType::Auto),
             ]
             .into_iter()
             .find_map(|(name, set)| set.then_some(name));
-            if let Some(name) = other {
+            if let Some(name) = backend_flag {
                 return Err(format!(
-                    "--bus-inspect prints a summary and exits, so it cannot be combined \
-                     with {name}. Only --entity and --signal go with it"
+                    "--replay cannot be combined with {name}: a replay reads a recorded \
+                     log and no backend. Drop {name}"
                 ));
+            }
+            if !self.headless {
+                return Err(
+                    "--replay needs --headless in this release: the TUI shows chips from a \
+                     live backend. Run `tt-toplike-tui --headless --replay PATH` and read it \
+                     on its socket (--bus-socket)"
+                        .to_string(),
+                );
+            }
+            if let (Some(rep), Some(dir)) = (
+                &self.replay,
+                &self.bus_dir.as_ref().or(self.record.as_ref()),
+            ) {
+                if same_path(rep, dir) {
+                    return Err(
+                        "--replay and --bus-dir/--record name the same directory: a replay \
+                         cannot record into the log it reads"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+        if let (Some(r), Some(d)) = (&self.record, &self.bus_dir) {
+            if !same_path(r, d) {
+                return Err(
+                    "--record and --bus-dir name different directories; --record DIR is the \
+                     same as --bus-dir DIR, so give one"
+                        .to_string(),
+                );
             }
         }
         Ok(())
+    }
+}
+
+/// True when `a` and `b` name the same place: equal after
+/// canonicalising, or equal as written when either does not exist yet.
+fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
     }
 }
 
@@ -772,6 +988,10 @@ mod tests {
             replay: None,
             speed: None,
             bus_inspect: None,
+            headless: false,
+            bus_dir: None,
+            bus_socket: None,
+            bus_retain: None,
             entity: None,
             signal: None,
         };
@@ -815,6 +1035,10 @@ mod tests {
             replay: None,
             speed: None,
             bus_inspect: None,
+            headless: false,
+            bus_dir: None,
+            bus_socket: None,
+            bus_retain: None,
             entity: None,
             signal: None,
         };
@@ -853,6 +1077,10 @@ mod tests {
             replay: None,
             speed: None,
             bus_inspect: None,
+            headless: false,
+            bus_dir: None,
+            bus_socket: None,
+            bus_retain: None,
             entity: None,
             signal: None,
         };
@@ -891,6 +1119,10 @@ mod tests {
             replay: None,
             speed: None,
             bus_inspect: None,
+            headless: false,
+            bus_dir: None,
+            bus_socket: None,
+            bus_retain: None,
             entity: None,
             signal: None,
         };
@@ -933,6 +1165,10 @@ mod tests {
             replay: None,
             speed: None,
             bus_inspect: None,
+            headless: false,
+            bus_dir: None,
+            bus_socket: None,
+            bus_retain: None,
             entity: None,
             signal: None,
         };
@@ -968,6 +1204,10 @@ mod tests {
             replay: None,
             speed: None,
             bus_inspect: None,
+            headless: false,
+            bus_dir: None,
+            bus_socket: None,
+            bus_retain: None,
             entity: None,
             signal: None,
         };
@@ -1006,6 +1246,10 @@ mod tests {
             replay: None,
             speed: None,
             bus_inspect: None,
+            headless: false,
+            bus_dir: None,
+            bus_socket: None,
+            bus_retain: None,
             entity: None,
             signal: None,
         };
@@ -1053,6 +1297,10 @@ mod tests {
             replay: None,
             speed: None,
             bus_inspect: None,
+            headless: false,
+            bus_dir: None,
+            bus_socket: None,
+            bus_retain: None,
             entity: None,
             signal: None,
         };
@@ -1088,6 +1336,10 @@ mod tests {
             replay: None,
             speed: None,
             bus_inspect: None,
+            headless: false,
+            bus_dir: None,
+            bus_socket: None,
+            bus_retain: None,
             entity: None,
             signal: None,
         };
@@ -1125,6 +1377,10 @@ mod tests {
             replay: None,
             speed: None,
             bus_inspect: None,
+            headless: false,
+            bus_dir: None,
+            bus_socket: None,
+            bus_retain: None,
             entity: None,
             signal: None,
         }
@@ -1382,7 +1638,7 @@ mod tests {
         assert_eq!(cli.record, Some(PathBuf::from("/tmp/rec")));
         assert!(cli.validate().is_ok());
 
-        let cli = parse(&["--replay", "/tmp/rec", "--speed", "4"]).unwrap();
+        let cli = parse(&["--headless", "--replay", "/tmp/rec", "--speed", "4"]).unwrap();
         assert_eq!(cli.replay, Some(PathBuf::from("/tmp/rec")));
         assert_eq!(cli.effective_speed(), 4.0);
         assert!(cli.validate().is_ok());
@@ -1441,5 +1697,163 @@ mod tests {
         let cli = parse(&["--bus-inspect", "x", "--replay", "y"]).unwrap();
         let e = cli.validate().unwrap_err();
         assert!(e.contains("--bus-inspect") && e.contains("--replay"), "{e}");
+    }
+
+    // ---- headless and bus host flags (Task 10a) -----------------------------
+
+    #[test]
+    fn headless_parses_and_does_not_mix_with_print_bench_or_inspect() {
+        let cli = parse(&["--headless", "--mock", "2"]).unwrap();
+        assert!(cli.headless);
+        assert!(cli.validate().is_ok());
+        for other in [&["--print"][..], &["--bench"], &["--bus-inspect", "x"]] {
+            let mut args = vec!["--headless"];
+            args.extend_from_slice(other);
+            assert!(parse(&args).is_err(), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn bus_socket_default_is_in_a_private_directory() {
+        assert_eq!(
+            resolve_bus_socket(Some("/run/user/1000".into()), 1000),
+            PathBuf::from("/run/user/1000/tt-toplike/bus.sock")
+        );
+        assert_eq!(
+            resolve_bus_socket(None, 1000),
+            PathBuf::from("/tmp/tt-toplike-1000/bus.sock")
+        );
+        // Empty or relative values are ignored (XDG spec).
+        for bad in ["", "run/user"] {
+            assert_eq!(
+                resolve_bus_socket(Some(bad.into()), 7),
+                PathBuf::from("/tmp/tt-toplike-7/bus.sock"),
+                "{bad:?}"
+            );
+        }
+        let cli = parse(&["--headless", "--bus-socket", "/x/s.sock"]).unwrap();
+        #[cfg(unix)]
+        assert_eq!(cli.bus_socket_path(), PathBuf::from("/x/s.sock"));
+        let _ = cli;
+    }
+
+    #[test]
+    fn bus_dir_default_follows_xdg_state_home_then_home() {
+        assert_eq!(
+            resolve_bus_dir(Some("/state".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/state/tt-toplike/bus"))
+        );
+        assert_eq!(
+            resolve_bus_dir(None, Some("/home/u".into())),
+            Some(PathBuf::from("/home/u/.local/state/tt-toplike/bus"))
+        );
+        assert_eq!(
+            resolve_bus_dir(Some("rel".into()), Some("/home/u".into())),
+            Some(PathBuf::from("/home/u/.local/state/tt-toplike/bus"))
+        );
+        assert_eq!(resolve_bus_dir(None, None), None);
+    }
+
+    #[test]
+    fn headless_bus_config_takes_bus_dir_record_or_the_default() {
+        let cli = parse(&["--headless", "--bus-dir", "/d"]).unwrap();
+        assert_eq!(cli.headless_bus_config().dir, Some(PathBuf::from("/d")));
+        let cli = parse(&["--headless", "--record", "/r"]).unwrap();
+        assert_eq!(cli.headless_bus_config().dir, Some(PathBuf::from("/r")));
+        let cli = parse(&["--headless"]).unwrap();
+        assert_eq!(cli.headless_bus_config().dir, default_bus_dir());
+        // A replay never records into the default live log.
+        let cli = parse(&["--headless", "--replay", "/log"]).unwrap();
+        assert_eq!(cli.headless_bus_config().dir, None);
+    }
+
+    #[test]
+    fn bus_retain_parses_hours_and_an_optional_size() {
+        let cli = parse(&["--headless", "--bus-retain", "2"]).unwrap();
+        assert_eq!(
+            cli.bus_retain,
+            Some(BusRetain {
+                secs: 7200,
+                bytes: None
+            })
+        );
+        let c = cli.headless_bus_config();
+        assert_eq!((c.retain_secs, c.retain_bytes), (7200, 5_000_000_000));
+        let cli = parse(&["--headless", "--bus-retain", "0.5,1.5"]).unwrap();
+        let c = cli.headless_bus_config();
+        assert_eq!((c.retain_secs, c.retain_bytes), (1800, 1_500_000_000));
+        for bad in ["0", "x", "1,", "1,0", "-3", "nan", "1,2,3"] {
+            assert!(parse_bus_retain(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn replay_with_a_live_backend_flag_is_rejected() {
+        for flag in [
+            &["--mock"][..],
+            &["--mock", "2"],
+            &["--json"],
+            &["--host"],
+            &["--backend", "json"],
+        ] {
+            let mut args = vec!["--headless", "--replay", "log"];
+            args.extend_from_slice(flag);
+            let e = parse(&args).unwrap().validate().unwrap_err();
+            assert!(
+                e.contains("--replay") && e.contains(flag[0]),
+                "{flag:?}: {e}"
+            );
+        }
+        let e = parse(&["--headless", "--replay", "log", "--serve"])
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(e.contains("--serve"), "{e}");
+    }
+
+    #[test]
+    fn replay_without_headless_points_at_the_headless_command() {
+        let e = parse(&["--replay", "log"]).unwrap().validate().unwrap_err();
+        assert!(
+            e.contains("tt-toplike-tui --headless --replay PATH") && e.contains("--bus-socket"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn replay_cannot_record_into_the_log_it_reads() {
+        let e = parse(&["--headless", "--replay", "/log", "--bus-dir", "/log"])
+            .unwrap()
+            .validate()
+            .unwrap_err();
+        assert!(e.contains("same directory"), "{e}");
+        assert!(
+            parse(&["--headless", "--replay", "/log", "--bus-dir", "/other"])
+                .unwrap()
+                .validate()
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn record_and_bus_dir_must_agree() {
+        assert!(parse(&["--headless", "--record", "/a", "--bus-dir", "/b"])
+            .unwrap()
+            .validate()
+            .is_err());
+        assert!(parse(&["--headless", "--record", "/a", "--bus-dir", "/a"])
+            .unwrap()
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn bus_flags_without_headless_are_named_for_the_tui_refusal() {
+        let cli = parse(&["--record", "/a"]).unwrap();
+        assert_eq!(cli.bus_flag_needing_headless(), Some("--record"));
+        let cli = parse(&["--bus-socket", "/a/s"]).unwrap();
+        assert_eq!(cli.bus_flag_needing_headless(), Some("--bus-socket"));
+        let cli = parse(&["--headless", "--record", "/a"]).unwrap();
+        assert_eq!(cli.bus_flag_needing_headless(), None);
     }
 }

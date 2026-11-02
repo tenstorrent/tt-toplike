@@ -237,6 +237,9 @@ struct ModelTracker {
     source: &'static str,
     map: Arc<IdentityMap>,
     tracked: HashMap<String, Tracked>,
+    /// Set by `resend_all`: the next snapshot announces every model in an
+    /// announcing phase again, changed or not.
+    resend: bool,
 }
 
 impl ModelTracker {
@@ -245,6 +248,7 @@ impl ModelTracker {
             source,
             map,
             tracked: HashMap::new(),
+            resend: false,
         }
     }
 
@@ -274,6 +278,7 @@ impl ModelTracker {
     /// `RequestsCompleted`. Then `ModelGone` for announced services that
     /// left. A service that was never announced sends nothing.
     fn process(&mut self, snaps: &[ModelSnap], out: &mut dyn FnMut(Payload)) {
+        let resend = std::mem::take(&mut self.resend);
         let mut present: HashSet<&str> = HashSet::new();
         for s in snaps {
             if !present.insert(s.key.as_str()) {
@@ -294,7 +299,7 @@ impl ModelTracker {
                 _ => None,
             };
             if let Some(w) = want {
-                if t.announced != Some(w) || t.chips != chips {
+                if t.announced != Some(w) || t.chips != chips || resend {
                     Self::announce(&model, w, &chips, s.progress, out);
                     t.announced = Some(w);
                     t.chips = chips;
@@ -566,6 +571,11 @@ impl Source for InferenceSource {
             Some(snaps) => self.tracker.process(&snaps, out),
             None => self.tracker.recheck(out),
         }
+    }
+    /// The next snapshot announces each loading or ready model again. Its
+    /// label already goes out with every snapshot.
+    fn resend_all(&mut self) {
+        self.tracker.resend = true;
     }
 }
 
@@ -975,6 +985,15 @@ impl Source for ProcessSource {
             self.emit(&p, out);
         }
     }
+    /// The next feed sends every process's name, command line and chips
+    /// again.
+    fn resend_all(&mut self) {
+        for st in self.state.values_mut() {
+            st.name_hash = None;
+            st.cmd_hash = None;
+            st.device = None;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1105,6 +1124,10 @@ mod remote {
                 None => self.models.recheck(out),
             }
             self.procs.poll(ctx, now, out);
+        }
+        fn resend_all(&mut self) {
+            self.models.resend = true;
+            self.procs.resend_all();
         }
     }
 }

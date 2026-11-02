@@ -291,6 +291,44 @@ mod tests {
         EntityKey::chip("0000:03:00.0")
     }
 
+    /// A float read back from a line is the float that was written, to the
+    /// bit, in a sample and in a sweep. The values are f32 readings widened
+    /// to f64, as the backend source writes them; serde_json's default
+    /// parser reads some of them one ulp off once they pass through the
+    /// buffered (internally tagged) payload, which a recorded mock run hit.
+    #[test]
+    fn f64_values_round_trip_bit_for_bit() {
+        let mut bad = Vec::new();
+        for i in 0..20_000u32 {
+            let x = (i as f32 * 0.012_345_6 + 0.5) as f64;
+            for p in [
+                Payload::Sample(Sample {
+                    entity: chip(),
+                    signal: "s".into(),
+                    value: Value::F64(x),
+                    prov: Provenance::Measured,
+                }),
+                Payload::Sweep(Sweep {
+                    entity: chip(),
+                    signals: vec!["s".into()],
+                    values: vec![Value::F64(x)],
+                    prov: Provenance::Measured,
+                }),
+            ] {
+                let back = Record::from_line(&rec(p.clone()).to_line()).unwrap();
+                if back.payload != p {
+                    bad.push(x);
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "{} values changed, first {:?}",
+            bad.len(),
+            &bad[..bad.len().min(3)]
+        );
+    }
+
     fn rec(payload: Payload) -> Record {
         Record {
             seq: 7,

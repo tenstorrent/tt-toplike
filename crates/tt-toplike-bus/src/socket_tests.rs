@@ -320,7 +320,7 @@ fn two_servers_racing_for_one_path_leave_exactly_one() {
                 assert_eq!(e.kind(), io::ErrorKind::AddrInUse, "round {round}: {e}");
             }
         }
-        // The winner's socket is the one on disk.
+        // The socket on disk belongs to the server that started.
         SocketClient::connect(&path).unwrap().snapshot().unwrap();
     }
 }

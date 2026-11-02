@@ -370,6 +370,10 @@ mod tests {
             replay: None,
             speed: None,
             bus_inspect: None,
+            headless: false,
+            bus_dir: None,
+            bus_socket: None,
+            bus_retain: None,
             entity: None,
             signal: None,
         };

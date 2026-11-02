@@ -319,6 +319,9 @@ pub struct GozerSource {
     pending: Option<GozerStatus>,
     /// The previous snapshot, by PCI address. `None` before the first.
     prev: Option<BTreeMap<String, View>>,
+    /// Set by `resend_all`: the next snapshot sends every chip's state and
+    /// `who` samples, changed or not. Lease events are unaffected.
+    resend: bool,
 }
 
 impl GozerSource {
@@ -330,6 +333,7 @@ impl GozerSource {
             last_start: None,
             pending: None,
             prev: None,
+            resend: false,
         }
     }
 
@@ -346,6 +350,7 @@ impl GozerSource {
             last_start: None,
             pending: None,
             prev: None,
+            resend: false,
         }
     }
 
@@ -415,9 +420,11 @@ impl GozerSource {
             })
             .collect();
 
-        // State and who samples.
+        // State and who samples. After `resend_all` every chip counts as
+        // new here (but not for lease events below).
+        let resend = std::mem::take(&mut self.resend);
         for (bdf, v) in &cur {
-            let old = prev.as_ref().and_then(|p| p.get(bdf));
+            let old = prev.as_ref().and_then(|p| p.get(bdf)).filter(|_| !resend);
             let chip = EntityKey::chip(bdf);
             if old.map(|o| &o.state) != Some(&v.state) {
                 text_sample(out, &chip, sig::GOZER_STATE, &v.state);
@@ -487,6 +494,10 @@ impl Source for GozerSource {
         if let Some(st) = self.pending.take() {
             self.process(&st, out);
         }
+    }
+
+    fn resend_all(&mut self) {
+        self.resend = true;
     }
 }
 

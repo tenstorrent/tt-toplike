@@ -13,11 +13,20 @@
 //! * [`gozer`] watches `gozer status --json` for chip leases and holds the
 //!   `Governor` that lets a chip-opening source ask whether a chip is ours.
 //! * [`redact`] hides secrets in process command lines.
+//! * [`proc_argv`] reads command lines and start times from `/proc` for the
+//!   process source.
+//! * [`host`] owns the bus, the identity map and every source, and drives
+//!   them on the host's tick.
+//! * [`headless`] runs a host with no screen (`--headless`): recording, the
+//!   socket, and the `/telemetry` broadcast.
 
 #[cfg(feature = "remote")]
 pub mod compat;
 pub mod gozer;
+pub mod headless;
+pub mod host;
 pub mod identity;
+pub mod proc_argv;
 pub mod redact;
 pub mod signals;
 pub mod source;
