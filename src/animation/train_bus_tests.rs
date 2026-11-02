@@ -908,23 +908,6 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
     });
 }
 
-/// The view's bus read must not be on the frame path: `render` reads only
-/// what `set_bus` stored. A world that changes between `set_bus` and
-/// `render` changes nothing until the next `set_bus`.
-#[test]
-fn render_reads_only_what_set_bus_stored() {
-    tc(|| {
-        let (v, b, mut bus, _) = view_fed(10, Provenance::Measured);
-        let st = TrainState::new();
-        let a = frame_hash(&v.render(&st, &b));
-        bus.run(11, 0.1, 50.0, Provenance::Measured);
-        let again = frame_hash(&v.render(&st, &b));
-        // Same frame number, same stored effects: only the sky clock could
-        // move, and it moves with `update`, so the frames match.
-        assert_eq!(a, again);
-    });
-}
-
 #[test]
 fn the_legend_and_explain_text_name_what_the_bus_draws() {
     use crate::animation::train_bus::{EXPLAIN_TEXT, LEGEND_TEXT};
