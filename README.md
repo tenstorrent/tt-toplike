@@ -440,7 +440,7 @@ tt-toplike --devices 0,2
 | `?` | Toggle help overlay (full key reference) |
 | `!` | Toggle explain overlay (how visualizations map to hardware signals) |
 
-Arcade's rows and panels (starfield, castle, flow, defrag, Wafer Waffler, training, inference, each double or triple wide if you like) are set in the `[arcade]` section of `~/.config/tt-toplike/config.toml`, the only config file tt-toplike reads. The arcade also has eight built-in layouts (`classic`, `defrag-wide`, `waffler`, `workload`, `deck`, `skyline`, `memory-lane`, `now-serving`); `}` and `{` step through them and your own `[[arcade.layouts]]`. See [docs/arcade-layout.md](docs/arcade-layout.md). `tt-toplike --check-config` lists every problem in that file with its line, and every layout.
+Arcade's rows and panels (starfield, castle, flow, defrag, Wafer Waffler, training, inference, each double or triple wide if you like) are set in the `[arcade]` section of `~/.config/tt-toplike/config.toml`, the only config file tt-toplike reads. The arcade also has eight built-in layouts (`classic`, `now-serving`, `defrag-wide`, `waffler`, `workload`, `deck`, `skyline`, `memory-lane`); `}` and `{` step through them and your own `[[arcade.layouts]]`. See [docs/arcade-layout.md](docs/arcade-layout.md). `tt-toplike --check-config` lists every problem in that file with its line, and every layout.
 
 Each view can draw a backdrop behind what it shows: the Inference view's scene (forge, storm, aurora), the Training view's sky, or the Wafer Waffler's clouds, each following real signals. The defaults are the looks each view had. Set them in the `[backdrop]` section of the same file, or with `w` and `/backdrop` at run time. See [docs/backdrop.md](docs/backdrop.md).
 
