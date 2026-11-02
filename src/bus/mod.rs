@@ -7,7 +7,12 @@
 //! * [`identity`] maps `/dev/tenstorrent/N` indexes to chip keys.
 //! * [`signals`] names the signals the backend source writes.
 //! * [`source`] defines the `Source` trait and `BackendSource`.
+//! * [`workload_sources`] turns the workload monitors' snapshots (inference,
+//!   training, hivemind, processes, `--remote`) into records.
+//! * [`redact`] hides secrets in process command lines.
 
 pub mod identity;
+pub mod redact;
 pub mod signals;
 pub mod source;
+pub mod workload_sources;
