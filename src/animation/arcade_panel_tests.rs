@@ -6,7 +6,7 @@
 
 use super::bus_tests::{frame_hash, Fixed};
 use super::*;
-use crate::animation::arcade_layout::{example_rows, PanelSpec, RowSpec};
+use crate::animation::arcade_layout::{default_rows, example_rows, PanelSpec, RowSpec};
 use crate::workload::inference_server::{mock::mock_services, Phase};
 use ratatui::text::Line;
 
@@ -407,7 +407,7 @@ fn a_panel_too_small_leaves_a_note_on_its_rule_and_draws_nothing() {
 }
 
 #[test]
-fn the_gauge_moves_to_the_gauge_panel_and_sparks_need_a_starfield() {
+fn the_gauge_moves_to_the_gauge_panel() {
     use tt_toplike_bus::{EntityKey, Event, HeaderKind, LocalView, Payload, Record, World};
     tc(|| {
         // Flow on top, training beside castle below: the gauge goes on the
@@ -506,18 +506,96 @@ fn the_gauge_moves_to_the_gauge_panel_and_sparks_need_a_starfield() {
             .filter(|(i, (_, s))| *i < castle.x && s.fg == purple)
             .count();
         assert_eq!(outside, 0, "nothing on the training panel's columns");
-        // No starfield: the spark is read but has nowhere to rise, so the
-        // stage's sky is empty and `draw_particle` draws nothing.
-        assert!(a.layout().find(View::Starfield).is_none());
-        assert_eq!(
-            a.bus_fx
-                .chips
-                .iter()
-                .map(|c| c.particles.len())
-                .sum::<usize>(),
-            1,
-            "the spark is read"
+    })
+}
+
+/// The frames of an arcade laid out by `rows` at 120x40, after a model
+/// loads on chip 0, with a spark on chip 0 (`spark`) or without one. The
+/// two arcades read the same world but for the spark, at the same times.
+fn frames_with_and_without_a_spark(rows: Vec<RowSpec>) -> (Vec<u64>, Vec<u64>, usize) {
+    use tt_toplike_bus::{EntityKey, Event, HeaderKind, LocalView, Payload, Record, World};
+    let view = |w: &World, t: u64| LocalView {
+        seq: w.seq(),
+        world: w.clone(),
+        now_mono_ns: t,
+        header_kind: HeaderKind::Live,
+    };
+    let run = |spark: bool| {
+        let (mut a, b) = arcade_with(rows.clone(), 120, 40);
+        let mut world = World::new();
+        let mut seq = 0;
+        let mut push = |w: &mut World, e: Event| {
+            seq += 1;
+            w.apply(&Record {
+                seq,
+                t_mono_ns: 1_000_000_000 + seq * 1_000_000,
+                t_wall_ms: seq,
+                source: "t".into(),
+                payload: Payload::Event(e),
+            });
+        };
+        push(
+            &mut world,
+            Event::ModelLoading {
+                model: EntityKey::model("m"),
+                chips: vec![EntityKey::chip("0000:01:00.0")],
+                progress: Some(0.5),
+            },
         );
+        a.set_bus(Some(&view(&world, 5_000_000_000)), &b);
+        a.update(&b);
+        if spark {
+            push(
+                &mut world,
+                Event::Spark {
+                    chip: Some(EntityKey::chip("0000:01:00.0")),
+                    kind: "vLLM.log".into(),
+                },
+            );
+        }
+        let mut frames = Vec::new();
+        for i in 1..=6u64 {
+            a.set_bus(Some(&view(&world, 5_000_000_000 + i * 33_000_000)), &b);
+            a.update(&b);
+            frames.push(frame_hash(&a.render(&b)));
+        }
+        let particles = a.bus_fx.chips.iter().map(|c| c.particles.len()).sum();
+        (frames, particles)
+    };
+    let (with, particles) = run(true);
+    let (without, _) = run(false);
+    (with, without, particles)
+}
+
+#[test]
+fn a_spark_is_dropped_when_no_starfield_panel_exists() {
+    tc(|| {
+        // Control: with a starfield the spark changes the frame, so the
+        // scene below can show one.
+        let (with, without, read) = frames_with_and_without_a_spark(default_rows());
+        assert_eq!(read, 1, "the spark is read");
+        assert_ne!(with, without, "with a starfield the spark is drawn");
+        // Flow over castle, no starfield: the spark is read and dropped, so
+        // every frame is the frame without it.
+        let rows = vec![
+            RowSpec {
+                height: 1,
+                panels: vec![PanelSpec {
+                    view: View::Flow,
+                    width: 1,
+                }],
+            },
+            RowSpec {
+                height: 1,
+                panels: vec![PanelSpec {
+                    view: View::Castle,
+                    width: 1,
+                }],
+            },
+        ];
+        let (with, without, read) = frames_with_and_without_a_spark(rows);
+        assert_eq!(read, 1, "the spark is read");
+        assert_eq!(with, without, "with no starfield the spark draws nothing");
     })
 }
 
@@ -536,6 +614,37 @@ fn the_hero_ranges_over_the_laid_out_rows() {
         );
         assert!(a.hero_x >= 0.0 && (a.hero_x as usize) < 160);
     })
+}
+
+#[test]
+fn the_hero_targets_a_known_row_for_a_known_power_on_two_rows() {
+    // Starfield over flow at 100x30: 25 content rows cut 12 / 13, so the
+    // bands are 2..14 (rule 2) and 15..28 (rule 15). With two rows the
+    // middle power range shares the top row.
+    let rows = vec![
+        RowSpec {
+            height: 1,
+            panels: vec![PanelSpec {
+                view: View::Starfield,
+                width: 1,
+            }],
+        },
+        RowSpec {
+            height: 1,
+            panels: vec![PanelSpec {
+                view: View::Flow,
+                width: 1,
+            }],
+        },
+    ];
+    let (a, _) = arcade_with(rows, 100, 30);
+    assert_eq!(a.layout().bands(), [2..14, 15..28]);
+    let y = |power: f32| a.calculate_hero_target(power, 50.0).1;
+    assert_eq!(y(150.0), 14.0, "high power: the end of the top row");
+    assert_eq!(y(80.0), 2.0, "80 W: the top row's rule");
+    assert_eq!(y(55.0), 8.0, "mid power: halfway down the top row");
+    assert_eq!(y(15.0), 21.5, "low power: halfway down the bottom row");
+    assert_eq!(a.calculate_hero_target(55.0, 50.0).0, 49.5, "x is current");
 }
 
 /// What the black fill costs on the wire: bytes a terminal backend writes and
