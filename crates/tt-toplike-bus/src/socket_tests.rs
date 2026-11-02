@@ -142,7 +142,9 @@ fn snapshot_then_subscribe_sees_every_record_exactly_once() {
                 // keeps taking them until one has seen the parked publisher.
                 let mut snap = c.snapshot().unwrap();
                 let mut taken = 0;
-                while taken < 20 || !overlapped.load(std::sync::atomic::Ordering::SeqCst) {
+                while taken < 20
+                    || (snap.seq < N && !overlapped.load(std::sync::atomic::Ordering::SeqCst))
+                {
                     taken += 1;
                     snap = c.snapshot().unwrap();
                     if snap.seq >= N / 2 && snap.seq < N {
