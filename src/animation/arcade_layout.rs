@@ -511,6 +511,58 @@ pub fn cloudfield_message(on: bool) -> String {
 /// The key that flips the cloudfield while the arcade is on screen.
 pub const CLOUDFIELD_KEY: char = 'c';
 
+// ---- Legend and explain text --------------------------------------------------
+
+/// The arcade legend's section on the layout and the cloudfield.
+pub const LEGEND_TEXT: &[&str] = &[
+    "The rows and panels come from [arcade] in",
+    "~/.config/tt-toplike/config.toml (or ./.toplikerc);",
+    "--check-config lists any problem in them.",
+    "  │       between two panels of a row",
+    "  ◌ NAME  a panel too small for its view, with",
+    "          the size it needs",
+    "  c       cloudfield on/off: the atmosphere of",
+    "          the featured inference server behind",
+    "          every blank cell (off by default)",
+];
+
+/// The arcade explain text's paragraph on the layout.
+pub const EXPLAIN_TEXT: &[&str] = &[
+    "",
+    "Layout: the [arcade] section of the config",
+    "file sets the rows and their panels (starfield,",
+    "castle, flow, defrag, die3d, training,",
+    "inference), each with a height or width",
+    "weight. Without it the arcade is the layout",
+    "above. A panel too small for its view is named",
+    "on its row's rule and the others take its",
+    "space. The gauges and labels go on the rule",
+    "of the first starfield, castle, defrag or",
+    "Die 3D panel. The cloudfield (c, or /arcade",
+    "cloudfield on|off) lays the inference",
+    "server's atmosphere behind blank cells.",
+    "See docs/arcade-layout.md.",
+];
+
+/// The legend lines for [`LEGEND_TEXT`], with the overlay's left bar.
+pub fn legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<ratatui::text::Line<'static>> {
+    use ratatui::style::Style;
+    use ratatui::text::{Line, Span};
+    LEGEND_TEXT
+        .iter()
+        .map(|s| {
+            Line::from(vec![
+                Span::styled("║ ", Style::default().fg(bar).bg(bg)),
+                Span::styled(*s, Style::default().fg(dim)),
+            ])
+        })
+        .collect()
+}
+
 #[cfg(test)]
 #[path = "arcade_layout_tests.rs"]
 mod tests;

@@ -1492,6 +1492,32 @@ the point (and still fun!)", plus renaming Die 3D to a fun name the user liked, 
 Blackhole chip by `rotation_visits`), and replaces the arcade hero's 0.75 V undervolt floor with
 `is_undervolt` (Blackhole 0.65 V and a busy clock). `WorldRead::entities(kind)` is new in the bus crate.
 
+### Configurable arcade layout (Nov 2 2026, branch `arcade-layout`)
+
+Prompt: "add the 3d view to arcade if you want. make defrag the big double wide. or triple wide."
+The user asked for one shared `config.toml`, a Die 3D panel at arcade quality, Training and the
+inference server as panels, a cloudfield switch, and no change with no config.
+- `src/animation/arcade_layout.rs` is the layout engine: rows of weighted panels to rectangles,
+  cut at `floor(total * running / sum)` in integer arithmetic. The default rows (4, 3, 3 high;
+  castle 11 to defrag 9) give the old fixed layout exactly; tests compare them with the old f32
+  arithmetic at every size up to 2000. A panel under its view's minimum leaves its row and is
+  named on the rule.
+- `config::load_from` merges `~/.config/tt-toplike/config.toml` and `./.toplikerc` (last wins
+  per key) through `toml_edit` spans, so every problem has a file and line. `--check-config`
+  prints them and exits 1. The old loader dropped parse errors (`.ok()`); it now reports them.
+- The arcade builds one view per shown panel. The Die 3D panel is the full `Die3dView` at the
+  panel's size; `Die3dView::render_at` takes the bus clock so the arcade can draw it in
+  `render` without the world. Training reuses `TrainView`, inference reuses the `Snake`.
+- Pinning the old frames found two things the old render did that the engine must copy: the
+  bottom panel (the flow) pushes every line it returns, including a legend line in the footer
+  row and, at 40x12, two rows past the terminal; and the castle and flow rules run one column
+  wide because `bbs_rule` cuts by characters and the labels hold a wide emoji. Both stay, pinned.
+- The arcade never had a backdrop. `cloudfield` lays `atmosphere.rs` behind the whole view,
+  off by default (`c`, `/arcade cloudfield on|off`). It is separate from the black fill:
+  measured at 200x60, the black fill repaints the same cells and costs about 4.4 KB a frame
+  (15%) more on the wire than the terminal's own background.
+- Docs: `docs/arcade-layout.md`; the gauge rule is in `docs/bus.md`.
+
 ### Version history: 0.15.1 (Nov 2 2026)
 
 0.15.1 puts arcade (`src/animation/arcade_bus.rs`) and the `~` view (`src/ui/tui/hivemind_bus.rs`) on

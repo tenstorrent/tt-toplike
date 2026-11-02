@@ -794,9 +794,22 @@ fn run_app(
 
     // Build animation config from CLI --profile flag, merged with any user config file overrides.
     // sensitivity is read at viz construction time and applied to the viz's internal AdaptiveBaseline.
+    // The config files are read once here (`config::load_config`); every
+    // problem goes to the log and the first to the status line (see
+    // `cmd_message` below), and a bad `[arcade]` keeps the default layout.
+    let loaded_config = crate::config::load_config();
+    for p in &loaded_config.problems {
+        log::warn!("config: {p}");
+    }
+    let arcade_config = loaded_config.arcade.clone();
+    let mut arcade_cloudfield = arcade_config.cloudfield;
     let anim_cfg = {
-        use crate::config::{load_config_overrides, AnimConfig};
-        AnimConfig::from_profile(cli.profile).merge(load_config_overrides())
+        use crate::config::AnimConfig;
+        AnimConfig::from_profile(cli.profile).merge(crate::config::AnimConfigOverrides {
+            sensitivity: loaded_config.overrides.sensitivity,
+            max_particles_scale: loaded_config.overrides.max_particles_scale,
+            tt_smi_reset_behavior: None,
+        })
     };
 
     // UI refresh rates — animation modes target 60 FPS, data modes ~10 FPS.
@@ -1026,7 +1039,8 @@ fn run_app(
     // so it works from every mode without mode-specific plumbing.
     let mut cmd_mode = false;
     let mut cmd_buf = String::new();
-    let mut cmd_message: Option<(String, bool)> = None; // (text, is_error)
+    let mut cmd_message: Option<(String, bool)> =
+        crate::config::problem_summary(&loaded_config.problems).map(|m| (m, true)); // (text, is_error)
 
     // `/remote` discovery picker: boxes from the most recent `/remote` (no-arg)
     // discovery, retained so `/remote <n>` can select by list position. Empty
@@ -1171,9 +1185,7 @@ fn run_app(
     // takeover gets no takeover of its own (see `reset_status`).
     let reset_behavior = crate::cli::resolve_reset_behavior(
         cli.tt_smi_reset_behavior,
-        crate::config::load_config_overrides()
-            .tt_smi_reset_behavior
-            .as_deref(),
+        loaded_config.overrides.tt_smi_reset_behavior.as_deref(),
     );
     let mut reset_status = reset_status::ResetStatus::new();
     let mut reset_detector = crate::workload::reset_detect::ResetDetector::new();
@@ -1370,8 +1382,14 @@ fn run_app(
                     }
                     if arcade.is_none() {
                         // Create new Arcade visualization
-                        let mut arc =
-                            ArcadeVisualization::new(size.width as usize, size.height as usize);
+                        // Laid out by the `[arcade]` config (the default
+                        // layout without one; see `arcade_layout`).
+                        let mut arc = ArcadeVisualization::with_config(
+                            size.width as usize,
+                            size.height as usize,
+                            &arcade_config,
+                        );
+                        arc.set_cloudfield(arcade_cloudfield);
                         arc.initialize_from_devices(backend.devices());
                         // Forward sensitivity so --profile paranoid (or any non-default profile)
                         // takes effect inside Arcade just like it does in the standalone modes.
@@ -1458,6 +1476,11 @@ fn run_app(
                     if let Some(ref mut arc) = arcade {
                         arc.set_serving(serving);
                         arc.set_activities(activities);
+                        // The Training and inference panels and the
+                        // cloudfield; the Die 3D panel's clock.
+                        arc.set_services(service_rows);
+                        arc.set_train_state(train_state);
+                        arc.set_clock(arcade_clock.elapsed().as_secs_f64());
                         // The bus: gauges, labels, hits, heartbeat, sparks
                         // and reset flashes (see `arcade_bus`).
                         arc.set_bus(Some(&tui_bus.read()), backend);
@@ -2527,6 +2550,24 @@ fn run_app(
                                             )
                                         }
                                     }
+                                } else if verb == "arcade" {
+                                    // `/arcade cloudfield on|off`: the setting lives
+                                    // here, so it holds across a resize.
+                                    let arg = cmd_buf
+                                        .trim()
+                                        .trim_start_matches('/')
+                                        .split_once(char::is_whitespace)
+                                        .map(|(_, rest)| rest)
+                                        .unwrap_or("");
+                                    let (msg, err) = crate::animation::arcade_layout::command(
+                                        arg,
+                                        &mut arcade_cloudfield,
+                                    );
+                                    if let Some(arc) = arcade.as_mut() {
+                                        arc.set_cloudfield(arcade_cloudfield);
+                                    }
+                                    cmd_message = Some((msg, err));
+                                    force_redraw = true;
                                 } else if crate::animation::die3d::commands::is_command(&verb) {
                                     // A Die 3D setting. It belongs to the open view, so it
                                     // is dispatched here, where the view is, and not in
@@ -2887,6 +2928,22 @@ fn run_app(
                                 }
                                 display_mode = next_display_mode(display_mode);
                                 log::info!("Switched to {:?} mode", display_mode);
+                            }
+                            KeyCode::Char(crate::animation::arcade_layout::CLOUDFIELD_KEY)
+                                if display_mode == DisplayMode::Arcade =>
+                            {
+                                // Flip the arcade's cloudfield (the atmosphere
+                                // backdrop). The key does nothing in other views.
+                                arcade_cloudfield = !arcade_cloudfield;
+                                if let Some(arc) = arcade.as_mut() {
+                                    arc.set_cloudfield(arcade_cloudfield);
+                                }
+                                cmd_message = Some((
+                                    crate::animation::arcade_layout::cloudfield_message(
+                                        arcade_cloudfield,
+                                    ),
+                                    false,
+                                ));
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
                                 // Jump directly to Defrag mode. If the sweeper happens
@@ -4539,7 +4596,16 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                         18,
                         kc,
                     ),
-                    cells(&[("3", waffler), ("R", "rotate (kiosk)")], 5, 18, kc),
+                    cells(
+                        &[
+                            ("3", waffler),
+                            ("R", "rotate (kiosk)"),
+                            ("c", "Arcade clouds"),
+                        ],
+                        5,
+                        18,
+                        kc,
+                    ),
                 ]
             };
             if mode == DisplayMode::Die3d {
@@ -4621,7 +4687,10 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     ("/watch <path>", "tail a log in ~"),
                     ("/watch pid <n>", "sniff a process"),
                 ]),
-                cmd(&[("/legend /explain /help", "the l ! ? panels")]),
+                cmd(&[
+                    ("/legend /explain /help", "the l ! ? panels"),
+                    ("/arcade cloudfield on|off", "Arcade backdrop"),
+                ]),
                 cmd(&[("/board /scene /cells …", &settings)]),
                 sep!("Status bar"),
                 cells(
@@ -4787,7 +4856,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                         "Inference. The stars take the lane's tint and flare",
                         "per step or request. No lanes under --remote.",
                     ],
-                    crate::animation::arcade_bus::EXPLAIN_TEXT,
+                    &[
+                        crate::animation::arcade_bus::EXPLAIN_TEXT,
+                        crate::animation::arcade_layout::EXPLAIN_TEXT,
+                    ]
+                    .concat(),
                 ),
                 DisplayMode::Insights => with_bus(
                     &[
@@ -6106,6 +6179,8 @@ fn arcade_legend_lines(
     v.extend(activity_legend_lines(bar, bg, dim));
     v.push(l(&[("◆ Signal bus", Some(head))]));
     v.extend(crate::animation::arcade_bus::legend_lines(bar, bg, dim));
+    v.push(l(&[("▦ Layout", Some(head))]));
+    v.extend(crate::animation::arcade_layout::legend_lines(bar, bg, dim));
     v
 }
 
@@ -11896,6 +11971,27 @@ pub fn run_render_bench(
         arc.initialize_from_devices(backend.devices());
         arc.initialize_topology(backend);
         results.push(measure("arcade", 60, frames, || {
+            arc.update(backend);
+            term.draw(|f| ui_arcade(f, &arc, backend)).unwrap();
+        }));
+    }
+
+    // Arcade with every panel kind, Die 3D among them (the example layout in
+    // docs/arcade-layout.md). The Die 3D panel's clock runs at 60 frames a
+    // second, so its scene is rasterised every third frame, as on screen.
+    {
+        let mut term = mk_term();
+        let cfg = crate::animation::arcade_layout::ArcadeConfig {
+            cloudfield: false,
+            rows: crate::animation::arcade_layout::example_rows(),
+        };
+        let mut arc = ArcadeVisualization::with_config(width as usize, height as usize, &cfg);
+        arc.initialize_from_devices(backend.devices());
+        arc.initialize_topology(backend);
+        let mut i = 0u32;
+        results.push(measure("arcade-panels", 60, frames, || {
+            i += 1;
+            arc.set_clock(f64::from(i) / 60.0);
             arc.update(backend);
             term.draw(|f| ui_arcade(f, &arc, backend)).unwrap();
         }));

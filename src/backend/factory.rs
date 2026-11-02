@@ -363,6 +363,7 @@ mod tests {
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            check_config: false,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,

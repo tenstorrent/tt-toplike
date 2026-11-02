@@ -240,6 +240,16 @@ pub struct Cli {
     #[arg(long)]
     pub bench: bool,
 
+    /// Check the config files and exit: print every problem with its file and
+    /// line, and exit non-zero when there is one.
+    ///
+    /// Reads `~/.config/tt-toplike/config.toml`, then `./.toplikerc`, which
+    /// overrides it key by key. The `[arcade]` section sets the arcade's
+    /// layout and its cloudfield; see docs/arcade-layout.md. Does not enter
+    /// the TUI and opens no device.
+    #[arg(long)]
+    pub check_config: bool,
+
     /// Throttle animation FPS when the host is under heavy load (opt-in).
     ///
     /// When set, animated modes drop from 60 to 30 FPS while system CPU is high
@@ -816,6 +826,7 @@ impl Cli {
             workload: false,
             print: false,
             bench: true,
+            check_config: false,
             mode: None,
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
@@ -1110,6 +1121,7 @@ mod tests {
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            check_config: false,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1160,6 +1172,7 @@ mod tests {
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            check_config: false,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1205,6 +1218,7 @@ mod tests {
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            check_config: false,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1250,6 +1264,7 @@ mod tests {
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            check_config: false,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1299,6 +1314,7 @@ mod tests {
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            check_config: false,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1341,6 +1357,7 @@ mod tests {
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            check_config: false,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1386,6 +1403,7 @@ mod tests {
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            check_config: false,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1440,6 +1458,7 @@ mod tests {
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            check_config: false,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1482,6 +1501,7 @@ mod tests {
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            check_config: false,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1526,6 +1546,7 @@ mod tests {
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
+            check_config: false,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,

@@ -42,6 +42,15 @@ fn main() {
         std::process::exit(1);
     }
 
+    // --check-config: print every problem in the config files and exit,
+    // non-zero when there is one. Needs no backend and no TTY.
+    if cli.check_config {
+        let loaded = tt_toplike::config::load_config();
+        let mut out = std::io::stdout().lock();
+        let code = tt_toplike::config::write_check_report(&loaded, &mut out);
+        std::process::exit(code);
+    }
+
     // --bus-inspect: print a summary of a recorded signal-bus log and exit.
     // Needs no backend and no TTY, and prints no banner, so the output can be
     // piped. Exit 1 when the log cannot be read or the output fails, other

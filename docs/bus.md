@@ -734,6 +734,35 @@ chips, or the first ready model when none runs on them (`arcade_bus::duel_servin
 carry no completion count, so the snake's lunge comes from the bus's `RequestsCompleted`
 events.
 
+#### The arcade with a configured layout
+
+The arcade's rows and panels can be set in the config file (`docs/arcade-layout.md`). The bus
+effects then attach to the panels that exist, by these rules:
+
+* **Gauges, model labels and reset flashes** go on the rule above the *gauge panel*: the
+  topmost, then leftmost, panel showing `starfield`, `castle`, `defrag` or `die3d`. With none of
+  those shown, the first panel. Each chip gets an equal share of the gauge panel's columns, in
+  device order. The model label never covers the rule's own labels at its left end. With no
+  panel shown at all, none of these is drawn.
+* **Spark and compile particles** rise in the starfield panel's rows below the lanes, in the
+  chip's share of the starfield's columns. A layout with no starfield draws no particles; they
+  are read and dropped.
+* **Request hits** grow from the hero, wherever it is. They are not drawn above the first
+  content row, or on the lanes when the lanes are in the top row.
+* **The heartbeat** and **the duel's lunge** belong to the hero and the header, which every
+  layout has.
+* **The Die 3D panel** reads the world itself, through `Die3dView::update`, and draws its own
+  overlay (flags, fill, pulses, GDDR rows) exactly as the `3` view does. It draws it at the bus
+  time of the last update (`Die3dView::render_at`).
+* **The Training panel** reads the world through `train_bus`, and **the inference panel**
+  draws the rows from `inference_bus::attached_rows` when the TUI is attached, as their own
+  views do.
+
+The default layout puts the gauge on the `✧ STARFIELD` rule across the whole width, as before.
+The brief that asked for this rule named castle, defrag and Die 3D; the starfield is first in
+the list so that the default layout's gauge stays where it was. The default frames, with and
+without bus effects, are pinned by hash in `src/animation/arcade_bus_tests.rs`.
+
 A TUI that records (`--record`) or serves (`--bus-socket`) refuses a backend switch (the `b`
 key and `/remote`), because the log header names one backend and mode for the whole run. An
 attached TUI refuses it too (`backend switch is disabled while attached to a bus host`): a mock

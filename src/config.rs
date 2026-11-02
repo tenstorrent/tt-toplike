@@ -151,6 +151,76 @@ pub struct LoadedConfig {
     pub files: Vec<PathBuf>,
 }
 
+/// The status line's text for `problems`: the first problem, and how many
+/// more there are. `None` with no problem. The full list is in the log and
+/// in `--check-config`.
+pub fn problem_summary(problems: &[ConfigProblem]) -> Option<String> {
+    let first = problems.first()?;
+    let more = problems.len() - 1;
+    Some(if more == 0 {
+        format!("config: {first}")
+    } else {
+        format!("config: {first} (and {more} more; run --check-config)")
+    })
+}
+
+/// Write the `--check-config` report for `loaded` to `out` and return the
+/// exit code: 0 with no problem, 1 with any. The report names the files
+/// read, the arcade layout in use, and every problem as `file:line: message`.
+pub fn write_check_report(loaded: &LoadedConfig, out: &mut dyn std::io::Write) -> i32 {
+    let _ = (|| -> std::io::Result<()> {
+        if loaded.files.is_empty() {
+            writeln!(out, "no config file found (looked for: {})", {
+                config_files()
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })?;
+        }
+        for f in &loaded.files {
+            writeln!(out, "read {}", f.display())?;
+        }
+        for p in &loaded.problems {
+            writeln!(out, "{p}")?;
+        }
+        let a = &loaded.arcade;
+        let default = a.rows == crate::animation::arcade_layout::default_rows();
+        writeln!(
+            out,
+            "arcade: {} layout, {} row{}, cloudfield {}",
+            if default { "default" } else { "configured" },
+            a.rows.len(),
+            if a.rows.len() == 1 { "" } else { "s" },
+            if a.cloudfield { "on" } else { "off" }
+        )?;
+        for (i, r) in a.rows.iter().enumerate() {
+            let panels: Vec<String> = r
+                .panels
+                .iter()
+                .map(|p| format!("{} x{}", p.view.key(), p.width))
+                .collect();
+            writeln!(
+                out,
+                "  row {} (height {}): {}",
+                i + 1,
+                r.height,
+                panels.join(", ")
+            )?;
+        }
+        match loaded.problems.len() {
+            0 => writeln!(out, "ok")?,
+            n => writeln!(
+                out,
+                "{n} problem{}; the TUI uses the default for each one",
+                if n == 1 { "" } else { "s" }
+            )?,
+        }
+        Ok(())
+    })();
+    i32::from(!loaded.problems.is_empty())
+}
+
 /// The name of the per-directory override file.
 pub const LOCAL_CONFIG: &str = ".toplikerc";
 
@@ -203,6 +273,7 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
     let mut arcade_bad = false;
     for (path, text) in sources {
         out.files.push(path.clone());
+        let first_problem = out.problems.len();
         let mut report = |span: Option<std::ops::Range<usize>>, message: String| {
             out.problems.push(ConfigProblem {
                 file: path.clone(),
@@ -262,6 +333,8 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
                 rows = Some(r);
             }
         }
+        // This file's problems in line order.
+        out.problems[first_problem..].sort_by_key(|p| p.line.unwrap_or(0));
     }
     let mut arcade = ArcadeConfig::default();
     if !arcade_bad {
@@ -858,6 +931,36 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
             "the local rows replace the shared rows"
         );
         assert_eq!(l.files.len(), 2);
+    }
+
+    #[test]
+    fn check_config_prints_every_problem_and_exits_non_zero() {
+        let text = "[[arcade.row]]\nheight = 0\npanels = [{ view = \"nope\" }]\n";
+        let l = load(&[("c.toml", text)]);
+        let mut out = Vec::new();
+        assert_eq!(write_check_report(&l, &mut out), 1);
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("c.toml:2: row 1 height"), "{out}");
+        assert!(out.contains("c.toml:3: unknown view `nope`"), "{out}");
+        assert!(out.contains("arcade: default layout"), "{out}");
+        let l = load(&[("c.toml", "[arcade]\ncloudfield = true\n")]);
+        let mut out = Vec::new();
+        assert_eq!(write_check_report(&l, &mut out), 0);
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.ends_with("ok\n") && out.contains("cloudfield on"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn the_status_line_names_the_first_problem_and_counts_the_rest() {
+        let l = load(&[("c.toml", "a = 1\nb = 2\n")]);
+        assert_eq!(
+            problem_summary(&l.problems).unwrap(),
+            "config: c.toml:1: unknown key `a` (and 1 more; run --check-config)"
+        );
+        assert_eq!(problem_summary(&[]), None);
     }
 
     #[test]

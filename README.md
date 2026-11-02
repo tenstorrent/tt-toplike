@@ -425,6 +425,7 @@ tt-toplike --devices 0,2
 | `r` | Force refresh |
 | `v` | Cycle visualization mode: Insights → Flow → Starfield → Castle → Arcade → Defrag → Inference → Insights |
 | `a` | Jump directly to Arcade |
+| `c` | In Arcade: switch the cloudfield (the atmosphere backdrop behind the whole view) on or off. Also `/arcade cloudfield on\|off`. |
 | `d` | Jump directly to Defrag |
 | `g` | Jump directly to Grid (Insights table) |
 | `i` | Open the Inference Server Monitor from **any** view; `i` while in it jumps to Insights (a quick back-and-forth), `Esc` backs out to where you came from. Also sits at the tail of the `v` cycle. |
@@ -436,6 +437,8 @@ tt-toplike --devices 0,2
 | `l` | Toggle legend overlay (what each signal means in the current mode) |
 | `?` | Toggle help overlay (full key reference) |
 | `!` | Toggle explain overlay (how visualizations map to hardware signals) |
+
+Arcade's rows and panels (starfield, castle, flow, defrag, Die 3D, training, inference, each double or triple wide if you like) are set in the `[arcade]` section of `~/.config/tt-toplike/config.toml`, or a `./.toplikerc` beside it. See [docs/arcade-layout.md](docs/arcade-layout.md). `tt-toplike --check-config` lists every problem in those files with its line.
 
 Command bar verbs (type `/` then the verb): `/fps <1–120>`, `/datafps <1–30>`, `/mode <insights\|grid\|starfield\|castle\|flow\|arcade\|defrag>`, `/theme <grayskull\|default>` (bare `/theme` toggles), `/legend` (`l`), `/explain`, `/throttle`, `/idle-on-blur`, `/help` (`?`), `/quit` (`q`).
 

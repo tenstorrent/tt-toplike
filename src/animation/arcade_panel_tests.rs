@@ -533,3 +533,146 @@ fn the_hero_ranges_over_the_laid_out_rows() {
         assert!(a.hero_x >= 0.0 && (a.hero_x as usize) < 160);
     })
 }
+
+/// What the black fill costs on the wire: bytes a terminal backend writes and
+/// cells ratatui repaints per frame, for the default arcade and the example
+/// layout, with the solid black canvas and with the terminal's own
+/// background. Prints the numbers; it asserts nothing about time. Run with
+/// `cargo test --lib --features tui repaint_cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints a measurement"]
+fn repaint_cost_with_and_without_the_black_fill() {
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::style::Color;
+    use ratatui::widgets::Paragraph;
+    use ratatui::Terminal;
+    /// Writes into a shared buffer so the bytes can be counted per frame.
+    #[derive(Clone, Default)]
+    struct Sink(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    tc(|| {
+        let (w, h) = (200u16, 60u16);
+        for (name, rows) in [
+            ("default", arcade_layout::default_rows()),
+            ("example", example_rows()),
+        ] {
+            for (fill, bg) in [("black", Color::Rgb(0, 0, 0)), ("terminal", Color::Reset)] {
+                let b = Fixed::new(2);
+                let mut a =
+                    ArcadeVisualization::with_config(w as usize, h as usize, &config(rows.clone()));
+                a.initialize_from_devices(b.devices());
+                a.initialize_topology(&b);
+                let sink = Sink::default();
+                let backend = CrosstermBackend::new(sink.clone());
+                let mut term = Terminal::with_options(
+                    backend,
+                    ratatui::TerminalOptions {
+                        viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, w, h)),
+                    },
+                )
+                .unwrap();
+                let (mut bytes, mut cells, frames) = (0usize, 0usize, 120usize);
+                let mut prev: Option<ratatui::buffer::Buffer> = None;
+                for i in 0..frames + 10 {
+                    a.set_clock(i as f64 / 60.0);
+                    a.update(&b);
+                    let before = sink.0.borrow().len();
+                    let frame = term
+                        .draw(|f| {
+                            let p = Paragraph::new(a.render(&b)).style(Style::default().bg(bg));
+                            f.render_widget(p, f.area());
+                        })
+                        .unwrap();
+                    let buf = frame.buffer.clone();
+                    if i >= 10 {
+                        bytes += sink.0.borrow().len() - before;
+                        if let Some(p) = &prev {
+                            cells += p.diff(&buf).len();
+                        }
+                    }
+                    prev = Some(buf);
+                }
+                println!(
+                    "{name:8} {fill:8} {w}x{h}: {:7.0} bytes/frame, {:6.0} cells/frame repainted",
+                    bytes as f64 / frames as f64,
+                    cells as f64 / frames as f64
+                );
+            }
+        }
+    })
+}
+
+/// Frame time of the arcade with a Die 3D panel at 200x60, in the `--bench`
+/// style: update and draw into a `TestBackend`, over 300 frames, average and
+/// 95th percentile. The Die 3D clock runs at 60 frames a second, so the
+/// scene is rasterised every third frame, as on screen. Prints the numbers;
+/// it asserts nothing about time (the box this runs on is shared). Run with
+/// `cargo test --release --lib --features tui die3d_panel_frame_time -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints a measurement"]
+fn die3d_panel_frame_time() {
+    use ratatui::backend::TestBackend;
+    use ratatui::widgets::Paragraph;
+    use ratatui::Terminal;
+    let b = Fixed::new(2);
+    let die3d_big = vec![
+        RowSpec {
+            height: 1,
+            panels: vec![PanelSpec {
+                view: View::Starfield,
+                width: 1,
+            }],
+        },
+        RowSpec {
+            height: 2,
+            panels: vec![
+                PanelSpec {
+                    view: View::Castle,
+                    width: 1,
+                },
+                PanelSpec {
+                    view: View::Die3d,
+                    width: 2,
+                },
+            ],
+        },
+    ];
+    for (name, rows) in [
+        ("default", arcade_layout::default_rows()),
+        ("example", example_rows()),
+        ("die3d x2", die3d_big),
+    ] {
+        let mut a = ArcadeVisualization::with_config(200, 60, &config(rows));
+        a.initialize_from_devices(b.devices());
+        a.initialize_topology(&b);
+        let die3d = a.layout().find(View::Die3d).map(|p| p.rect);
+        let mut term = Terminal::new(TestBackend::new(200, 60)).unwrap();
+        let mut times = Vec::new();
+        for i in 0..330u32 {
+            let t = std::time::Instant::now();
+            a.set_clock(f64::from(i) / 60.0);
+            a.update(&b);
+            term.draw(|f| f.render_widget(Paragraph::new(a.render(&b)), f.area()))
+                .unwrap();
+            if i >= 30 {
+                times.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+        let avg = times.iter().sum::<f64>() / times.len() as f64;
+        times.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        let p95 = times[times.len() * 95 / 100];
+        println!(
+            "{name:9} 200x60 die3d panel {:?}: avg {avg:.2} ms, p95 {p95:.2} ms, max {:.2} ms",
+            die3d.map(|r| (r.w, r.h)),
+            times.last().unwrap()
+        );
+    }
+}
