@@ -148,14 +148,51 @@ fn clip(mut s: String) -> String {
 /// that changed the key, 8 hex digits of a hash of the raw key are added
 /// (`svc --token <redacted>#1a2b3c4d`), so two services whose keys differ
 /// only in a hidden or clipped part stay two entities. The raw key is never
-/// written. Note: a 32-bit hash of a short, guessable secret can be found
-/// by trying candidates; it does not reveal a long random one.
+/// written.
+///
+/// The hash mixes in [`key_salt`], a random number drawn once per process.
+/// Without it, anyone holding the log could hash each guess of a short
+/// secret and compare it with the suffix. With it, the suffix is the same
+/// for the same key within one run, so keys stay distinct and stable, but
+/// it differs from one run to the next: a restarted host gives a redacted
+/// service a new entity key. Replaying a recorded log is not affected,
+/// because the log stores the key and replay does not recompute it.
 fn safe_key(raw: &str) -> String {
     let safe = clip(redact_cmdline(raw));
     if safe == raw {
         return safe;
     }
-    format!("{safe}#{:08x}", hash_of(raw) as u32)
+    format!("{safe}#{:08x}", salted_hash(raw, key_salt()) as u32)
+}
+
+/// The salt for [`safe_key`] suffixes: drawn by [`draw_salt`] at first use
+/// and kept for the life of the process.
+fn key_salt() -> u64 {
+    static SALT: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *SALT.get_or_init(draw_salt)
+}
+
+/// A random 64-bit number. It uses the same source as the bus `instance`
+/// id: std's per-process random hash keys (`RandomState`, seeded from the
+/// operating system), mixed with the time and the process id.
+fn draw_salt() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    h.write_u64(now);
+    h.write_u32(std::process::id());
+    h.finish()
+}
+
+/// Hash of `salt` followed by `s`.
+fn salted_hash(s: &str, salt: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    salt.hash(&mut h);
+    s.hash(&mut h);
+    h.finish()
 }
 
 /// The phase as the world spells it.

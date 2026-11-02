@@ -358,7 +358,7 @@ const ALNUM: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789
 const UPPER: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 /// Number of secret-bearing shapes in [`shape`].
-pub(crate) const SHAPES: usize = 47;
+pub(crate) const SHAPES: usize = 56;
 
 /// One secret-bearing command fragment and the secret it carries.
 pub(crate) fn shape(i: usize, g: &mut Lcg) -> (String, String) {
@@ -413,7 +413,19 @@ pub(crate) fn shape(i: usize, g: &mut Lcg) -> (String, String) {
         43 => format!("{{'token': '{s}'}}"),
         44 => format!("--apiKey={s}"),
         45 => format!("dbPassphrase={s}"),
-        _ => format!("-H \"X-Pass: {s}\""),
+        46 => format!("-H \"X-Pass: {s}\""),
+        // Hardening A3: a secret key whose value is a nested object or
+        // array, in both quote styles, spaced and in one word, two levels
+        // deep, with a quoted brace inside, and never closed.
+        47 => format!("-d '{{\"auth\": {{\"k\": \"{s}\"}}}}'"),
+        48 => format!("{{'auth': {{'k': '{s}'}}}}"),
+        49 => format!("--cfg \"{{'auth': {{'a': {{'b': 'x'}}, 'c': '{s}'}}}}\""),
+        50 => format!("{{\"auth\":{{\"a\":{{\"b\":1}},\"c\":\"{s}\"}}}}"),
+        51 => format!("{{'token': ['x', ['y', '{s}']]}}"),
+        52 => format!("{{\"secret\": {{\"k\": \"a}}b\", \"j\": \"{s}\"}}}}"),
+        53 => format!("{{'auth': {{'k': '{s}'"),
+        54 => format!("--auth {{\"k\": \"{s}\"}}"),
+        _ => format!("HF_AUTH={{'k': '{s}'}}"),
     };
     (frag, s)
 }
@@ -615,4 +627,150 @@ fn command_substitution_values_are_masked_through_the_close() {
     // Unclosed: masked to the end.
     let out = redact_cmdline("app --api-key $(echo sub6 tail");
     hidden(&out, &["sub6", "tail"]);
+}
+
+// ---- Hardening A2: nested values after a secret key ---------------------------
+
+// Each word of a value that spans words is hidden on its own (as for a
+// `$(...)` value), so these tests check what is hidden and what is kept
+// around it, not the exact count of `<redacted>` marks.
+
+/// `out` has only `<redacted>` marks and spaces between `before` and `after`.
+fn masked_between(out: &str, before: &str, after: &str) {
+    let rest = out
+        .strip_prefix(before)
+        .unwrap_or_else(|| panic!("{out:?} does not start {before:?}"));
+    let mid = rest
+        .strip_suffix(after)
+        .unwrap_or_else(|| panic!("{out:?} does not end {after:?}"));
+    assert!(
+        !mid.is_empty() && mid.replace(REDACTED, "").trim().is_empty(),
+        "{out:?}: {mid:?} is not only masks"
+    );
+}
+
+#[test]
+fn a_nested_object_after_a_secret_key_is_masked_whole() {
+    // The ledger case: the inner value leaked as `<redacted> 'S'}}`.
+    let out = redact_cmdline("python x.py {'auth': {'k': 'nst1'}} --port 8000");
+    masked_between(&out, "python x.py {'auth': ", "} --port 8000");
+    let out = redact_cmdline(r#"curl -d '{"auth": {"k": "nst2"}, "model": "llama"}' http://h"#);
+    masked_between(
+        &out,
+        r#"curl -d '{"auth": "#,
+        r#", "model": "llama"}' http://h"#,
+    );
+    // In one word, two levels deep, with a plain key after the inner object.
+    assert_eq!(
+        redact_cmdline(r#"app {"auth":{"a":{"b":1},"c":"nst3"},"n":2}"#),
+        r#"app {"auth":<redacted>,"n":2}"#
+    );
+    // Spaced, two levels deep.
+    let out = redact_cmdline("app --cfg \"{'auth': {'a': {'b': 'x'}, 'c': 'nst4'}}\" -v");
+    masked_between(&out, "app --cfg \"{'auth': ", "}\" -v");
+}
+
+#[test]
+fn a_nested_array_after_a_secret_key_is_masked_whole() {
+    let out = redact_cmdline("app {'token': ['x', ['y', 'nsa1']], 'm': 1}");
+    masked_between(&out, "app {'token': ", ", 'm': 1}");
+    assert_eq!(
+        redact_cmdline(r#"app {"keys":[["a","nsa2"],["b"]]}"#),
+        r#"app {"keys":<redacted>}"#
+    );
+}
+
+#[test]
+fn a_quoted_brace_inside_a_nested_value_does_not_end_it() {
+    let out = redact_cmdline(r#"app {"secret": {"k": "a}b", "j": "nsq1"}} -v"#);
+    masked_between(&out, r#"app {"secret": "#, "} -v");
+    let out = redact_cmdline(r"app {'auth': {'k': 'x]y\'}', 'j': 'nsq2'}} -v");
+    masked_between(&out, "app {'auth': ", "} -v");
+    // In one word too.
+    assert_eq!(
+        redact_cmdline(r#"app {"secret":{"k":"a}b","j":"nsq3"},"n":1}"#),
+        r#"app {"secret":<redacted>,"n":1}"#
+    );
+}
+
+#[test]
+fn a_stray_quote_inside_an_open_nested_value_masks_to_the_end() {
+    // Found by the 20,000-seed re-run: the stray `"` in `say"` put the
+    // quote tracking out of step, the scan closed at the `}` inside
+    // `"a}b"`, and the later secret leaked.
+    let out = redact_cmdline(
+        r#"{'auth': {'k': 'nsx1' say" -v {"secret": {"k": "a}b", "j": "nsx2"}} serve it's"#,
+    );
+    hidden(&out, &["nsx1", "nsx2", "serve"]);
+    // Here the splitter pairs the stray `"` with a later one, so no word
+    // ends inside a quote; the quote straight after `say` gives it away.
+    let out = redact_cmdline(
+        r#"serve {'auth': {'k': 'nsx3' say" {"secret": {"k": "a}b", "j": "nsx4"}} " say""#,
+    );
+    hidden(&out, &["nsx3", "nsx4"]);
+    // A quoted string with spaces is one word, so it does not count as a
+    // stray quote.
+    let out = redact_cmdline("app {'auth': {'k': 'a b}'}} --port 8000");
+    masked_between(&out, "app {'auth': ", "} --port 8000");
+}
+
+#[test]
+fn each_stray_quote_sign_stops_the_nested_scan_on_its_own() {
+    let open = Nest {
+        depth: 1,
+        ..Nest::default()
+    };
+    // A clean word: the brackets balance and the close is trusted.
+    assert_eq!(scan_nest("'a}b'}", open).0, Some(6));
+    // A quote that opens straight after a letter (closed again in the
+    // word, so only this rule sees it).
+    let (end, st) = scan_nest("say\"x\"}", open);
+    assert!(end.is_none() && st.to_end, "{st:?}");
+    // A quote that closes straight before a letter.
+    let (end, st) = scan_nest("'a'b}", open);
+    assert!(end.is_none() && st.to_end, "{st:?}");
+    // A word that ends inside a quote, with no letter next to the quote.
+    let (end, st) = scan_nest("{'a", open);
+    assert!(end.is_none() && st.to_end, "{st:?}");
+    // Once set, nothing closes the value.
+    assert_eq!(scan_nest("}}}", st).0, None);
+}
+
+#[test]
+fn an_attached_dash_p_password_that_spells_a_secret_word_is_masked() {
+    // Found by the 20,000-seed re-run: `-pwdUca...` split into words is
+    // `pwd uca ...`, so it was taken for a secret flag name and kept.
+    for (cmd, secret) in [
+        ("app -pwdUcaEXSkw9 --port 8000", "UcaEXSkw9"),
+        ("app -passX9yz --port 8000", "X9yz"),
+    ] {
+        let out = redact_cmdline(cmd);
+        hidden(&out, &[secret]);
+        assert!(out.ends_with(" --port 8000"), "{out}");
+    }
+}
+
+#[test]
+fn text_after_a_nested_value_still_goes_through_the_word_rules() {
+    // `don't` pairs with the quote after `}}`, joining the later arguments
+    // to the word that closes the nested value.
+    let out = redact_cmdline(
+        r#"don't -d '{"auth": {"k": "nsr1"}}' bash -c "serve --secret nsr2 --port 1" 'x"#,
+    );
+    hidden(&out, &["nsr1", "nsr2"]);
+}
+
+#[test]
+fn an_unclosed_nested_value_is_masked_to_the_end() {
+    let out = redact_cmdline("app {'auth': {'k': 'nsu1', 'j': 'nsu2' --port 8000");
+    hidden(&out, &["nsu1", "nsu2", "8000"]);
+    assert!(out.starts_with("app {'auth': "), "{out}");
+}
+
+#[test]
+fn a_nested_value_after_a_secret_flag_or_env_name_is_masked_whole() {
+    let out = redact_cmdline(r#"app --auth {"k": "nsf1"} --port 8000"#);
+    masked_between(&out, "app --auth ", " --port 8000");
+    let out = redact_cmdline("env HF_AUTH={'k': 'nsf2'} app");
+    masked_between(&out, "env HF_AUTH=", " app");
 }

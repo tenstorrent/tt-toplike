@@ -847,6 +847,27 @@ fn keys_that_differ_only_in_a_redacted_part_stay_distinct() {
 }
 
 #[test]
+fn key_suffix_is_not_the_unsalted_hash_of_the_raw_key() {
+    // Hardening A1: the suffix must not be a plain hash of the raw key,
+    // which anyone could recompute offline for each guess of a short secret.
+    let raw = "svc --token aaa111";
+    let key = safe_key(raw);
+    let unsalted = format!("#{:08x}", hash_of(raw) as u32);
+    assert!(!key.ends_with(&unsalted), "{key}");
+    // The suffix is stable within the run.
+    assert_eq!(safe_key(raw), key);
+    // It is the salted hash under this process's salt.
+    assert!(
+        key.ends_with(&format!("#{:08x}", salted_hash(raw, key_salt()) as u32)),
+        "{key}"
+    );
+    // The salt changes the hash, and each draw gives a new salt, so a
+    // second run gives other suffixes.
+    assert_ne!(salted_hash(raw, 1), salted_hash(raw, 2));
+    assert_ne!(draw_salt(), draw_salt());
+}
+
+#[test]
 fn keys_that_differ_only_after_the_clip_stay_distinct() {
     let map = map_with(&[(0, A)]);
     let mut src = InferenceSource::new(map);

@@ -72,6 +72,12 @@ pub const REDACTED: &str = "<redacted>";
 ///   name contains `token`, `key`, `secret`, `password`, `passwd`, `auth`
 ///   or `credential`, or is a secret name as above, in one word or split
 ///   across words.
+/// * A value that is a nested object or array (`{'auth': {'k': 'x'}}`,
+///   `--auth {"k": "x"}`, `HF_AUTH=[...]`): hidden through the bracket
+///   that balances it, however deep; brackets inside quoted strings do not
+///   count. If it never balances, or a stray quote (`say"`, `don't`) makes
+///   the quote pairing untrustworthy, everything to the end of the line is
+///   hidden. Text after the close goes through these rules as usual.
 ///
 /// What is hidden anywhere (shape pass 2): `hf_` + 16 or more letters and
 /// digits, `sk-` + 16 or more, `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_` + 20 or
@@ -111,12 +117,105 @@ enum Pending {
     SubstParen(i32),
     /// Inside a secret backtick value: hide words until the closing one.
     SubstTick,
+    /// Inside a secret value that is a nested object or array (`{...}` or
+    /// `[...]`): hide words until the brackets balance, or to the end of
+    /// the line if they never do.
+    Nested(Nest),
 }
 
-/// Hide a secret value. A value that opens `$(` or a backtick and does not
-/// close in this word keeps hiding the following words until it closes (or
-/// the line ends).
+/// Where a scan of a nested secret value stands: how many brackets are
+/// open, and whether it is inside a quoted string (and with which quote).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct Nest {
+    depth: u32,
+    quote: Option<u8>,
+    escaped: bool,
+    /// A stray quote was seen, so the quote pairing (and with it any later
+    /// close) cannot be trusted: hide to the end of the line. Signs of a
+    /// stray quote: a word ends inside a quote (the quote-aware split keeps
+    /// a quoted string with spaces in one word), a quote that opens a
+    /// string comes straight after a letter or digit (`say"`, `don't`), or
+    /// a quote that closes one is followed straight by a letter or digit.
+    /// JSON and dict text has neither.
+    to_end: bool,
+}
+
+/// Scan `s`, one word, as the continuation of a nested value. `{` and `[`
+/// open, `}` and `]` close, and brackets inside a quoted string (either
+/// quote, with backslash escapes) do not count. Returns the byte index just
+/// after the bracket that brings the depth back to zero, or `None` and the
+/// state at the end of `s` when the value is still open (or a stray quote
+/// set [`Nest::to_end`]).
+fn scan_nest(s: &str, mut st: Nest) -> (Option<usize>, Nest) {
+    let b = s.as_bytes();
+    let alnum_at = |j: usize| b.get(j).is_some_and(|c| c.is_ascii_alphanumeric());
+    for (i, &c) in b.iter().enumerate() {
+        if st.to_end {
+            return (None, st);
+        }
+        if let Some(q) = st.quote {
+            if st.escaped {
+                st.escaped = false;
+            } else if c == b'\\' {
+                st.escaped = true;
+            } else if c == q {
+                st.quote = None;
+                if alnum_at(i + 1) {
+                    st.to_end = true;
+                }
+            }
+            continue;
+        }
+        match c {
+            b'"' | b'\'' => {
+                st.quote = Some(c);
+                if i > 0 && alnum_at(i - 1) {
+                    st.to_end = true;
+                }
+            }
+            b'{' | b'[' => st.depth += 1,
+            b'}' | b']' => {
+                st.depth = st.depth.saturating_sub(1);
+                if st.depth == 0 {
+                    return (Some(i + 1), st);
+                }
+            }
+            _ => {}
+        }
+    }
+    if st.quote.is_some() {
+        st.to_end = true;
+    }
+    (None, st)
+}
+
+/// Hide the part of `tok` that belongs to a nested value in state `st`.
+/// When the value closes inside `tok`, the text after it goes through the
+/// word rules as plain words (a mis-paired quote can join later arguments
+/// to this word, and they may hold a secret flag); otherwise the whole word
+/// is hidden and the next word carries on.
+fn mask_nested(tok: &str, st: Nest) -> (String, Pending) {
+    match scan_nest(tok, st) {
+        (Some(end), _) => {
+            let (rest, next) = redact_words_from(&tok[end..], false, Pending::None);
+            (format!("{REDACTED}{rest}"), next)
+        }
+        (None, st) => (REDACTED.into(), Pending::Nested(st)),
+    }
+}
+
+/// Does a secret value open a nested object or array?
+fn opens_nest(v: &str) -> bool {
+    v.starts_with(['{', '['])
+}
+
+/// Hide a secret value. A value that opens `$(`, a backtick, `{` or `[` and
+/// does not close in this word keeps hiding the following words until it
+/// closes (or the line ends).
 fn mask_value(v: &str) -> (String, Pending) {
+    if opens_nest(v) {
+        return mask_nested(v, Nest::default());
+    }
     let core = v.trim_start_matches(QUOTES);
     let next = if core.starts_with("$(") {
         let depth = paren_depth(v);
@@ -196,6 +295,7 @@ fn redact_word(tok: &str, pending: Pending) -> (String, Pending) {
             };
             return (mask(tok), next);
         }
+        Pending::Nested(st) => return mask_nested(tok, st),
         _ => {}
     }
     let core = tok.trim_matches(QUOTES);
@@ -288,6 +388,12 @@ fn redact_word(tok: &str, pending: Pending) -> (String, Pending) {
     // Flags.
     if core.starts_with('-') && core.len() > 1 {
         if is_secret_flag(core) {
+            // A one-dash `-p...` word may be `-p` with a password attached
+            // whose first letters spell a secret word (`-pwdXy7`, `-passX9`).
+            // Hide the attached part as well as the next word.
+            if !core.starts_with("--") && core.starts_with("-p") && !KEEP_P.contains(&core) {
+                return (format!("{lead}-p{}", mask(&after[2..])), Pending::FlagValue);
+            }
             return (tok.into(), Pending::FlagValue);
         }
         if core == "-p" {
@@ -325,14 +431,8 @@ fn redact_word(tok: &str, pending: Pending) -> (String, Pending) {
     }
 
     // JSON and URLs anywhere in the word.
-    let (text, json_key_open) = mask_json(tok);
-    let text = mask_url(&text);
-    let next = if json_key_open {
-        Pending::Secret
-    } else {
-        Pending::None
-    };
-    (text, next)
+    let (text, next) = mask_json(tok);
+    (mask_url(&text), next)
 }
 
 /// Compiler flags that start with `-p` and are not a password.
@@ -541,9 +641,13 @@ fn is_secret_query_name(name: &str) -> bool {
         || is_secret_name(name)
 }
 
-/// Hide JSON (or Python dict) values of secret keys in `s`. Returns the text and whether `s`
-/// ends just after a secret key's colon, so the value is the next word.
-fn mask_json(s: &str) -> (String, bool) {
+/// Hide JSON (or Python dict) values of secret keys in `s`. A value that is
+/// a nested object or array is hidden up to its matching close, however deep
+/// (brackets inside quoted strings do not count), or to the end of the line
+/// if it never closes. Returns the text and what the next word should
+/// expect: [`Pending::Secret`] when `s` ends just after a secret key's
+/// colon, [`Pending::Nested`] when a nested value is still open.
+fn mask_json(s: &str) -> (String, Pending) {
     let b = s.as_bytes();
     let n = b.len();
     let mut out = String::with_capacity(n);
@@ -584,7 +688,20 @@ fn mask_json(s: &str) -> (String, bool) {
         }
         if k >= n {
             out.push_str(&s[copied..]);
-            return (out, true);
+            return (out, Pending::Secret);
+        }
+        // A nested object or array: hide it through its matching close.
+        if b[k] == b'{' || b[k] == b'[' {
+            out.push_str(&s[copied..k]);
+            out.push_str(REDACTED);
+            match scan_nest(&s[k..], Nest::default()) {
+                (Some(len), _) => {
+                    copied = k + len;
+                    i = copied;
+                    continue;
+                }
+                (None, st) => return (out, Pending::Nested(st)),
+            }
         }
         // The value: a string up to its closing quote, or anything up to
         // `,`, `}` or `]`.
@@ -608,7 +725,7 @@ fn mask_json(s: &str) -> (String, bool) {
         i = if closing { end + 1 } else { end };
     }
     out.push_str(&s[copied..]);
-    (out, false)
+    (out, Pending::None)
 }
 
 /// Hide URL userinfo and secret query values in `s`.
