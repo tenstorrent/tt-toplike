@@ -666,6 +666,52 @@ fn a_chip_this_tui_does_not_have_gets_no_strip_cell_and_no_row() {
     assert_eq!(b.rows(None, Severity::Trace).len(), 2);
 }
 
+/// Attached to a host on another machine (`TuiBus::origin_is_local` is
+/// false), no chip is local: `update` passes no chips. `ReadView` would let
+/// through events on a foreign chip whose PCI address happens to equal a
+/// local one, so this view's own check is what keeps them off screen. A
+/// spark with no chip is the host's and still shows.
+#[test]
+fn attached_to_another_machine_no_chip_is_ours() {
+    let mut f = Fx::new();
+    f.label("theirs", "Theirs", Provenance::Measured);
+    let at = Instant::now();
+    let mut b = HivemindBus::default();
+    b.read_world(&f.view(5 * SEC_NS), &[], false, 5 * SEC_NS, at);
+    f.tps("theirs", 500.0)
+        .ready("theirs", &[0])
+        .requests("theirs", 7)
+        .event(Event::Spark {
+            chip: Some(chip_key(0)),
+            kind: "metal.log".into(),
+        })
+        .event(Event::KernelCompiled {
+            chip: Some(chip_key(0)),
+            source: "metal".into(),
+        })
+        .event(Event::Reset {
+            chips: vec![chip_key(0)],
+        })
+        .event(Event::Spark {
+            chip: None,
+            kind: "driver.driver".into(),
+        });
+    let now = 5 * SEC_NS + TICK_NS;
+    b.read_world(&f.view(now), &[], false, now, at);
+    assert!(b.strip().is_empty());
+    let kinds: Vec<(BusKind, Option<u8>)> = b
+        .rows(None, Severity::Trace)
+        .iter()
+        .map(|r| (r.kind, r.device))
+        .collect();
+    assert_eq!(kinds, vec![(BusKind::Spark, None)]);
+    assert_eq!(
+        b.kitt_activity(0.0, at),
+        0.0,
+        "their traffic moves nothing here"
+    );
+}
+
 // ---- The KITT scanner -------------------------------------------------------
 
 #[test]
