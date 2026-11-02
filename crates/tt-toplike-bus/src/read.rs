@@ -22,7 +22,7 @@
 //! answer every method alike (see the tests below). When they differ, the
 //! summary is missing something, and the fix is to add it to the summary.
 
-use crate::entity::EntityKey;
+use crate::entity::{EntityKey, EntityKind};
 use crate::record::{Event, HeaderKind};
 use crate::summary::SUMMARY_EVENTS;
 use crate::world::{ModelView, Reading, World};
@@ -40,6 +40,18 @@ pub trait WorldRead: Send + Sync {
 
     /// The model announced on `chip`. With two, the first by key.
     fn model_on_chip(&self, chip: &EntityKey) -> Option<ModelView>;
+
+    /// Every entity of `kind` the world holds a reading for, in key order.
+    /// A view uses it to find entities whose keys it cannot build, such as
+    /// training runs (`run:<binary>:<pid>@<start>`).
+    ///
+    /// The default lists nothing. It exists so that a hand-written test
+    /// world need not implement it; [`LocalView`], [`crate::RemoteView`]
+    /// and the main crate's `ReadView` all implement it.
+    fn entities(&self, kind: EntityKind) -> Vec<EntityKey> {
+        let _ = kind;
+        Vec::new()
+    }
 
     /// The latest reading of `signal` on `entity`, with its provenance,
     /// sequence number and record time.
@@ -90,6 +102,10 @@ impl WorldRead for LocalView {
         self.world.model_on_chip(chip).cloned()
     }
 
+    fn entities(&self, kind: EntityKind) -> Vec<EntityKey> {
+        self.world.entities(kind).cloned().collect()
+    }
+
     fn reading(&self, entity: &EntityKey, signal: &str) -> Option<Reading> {
         self.world.reading(entity, signal)
     }
@@ -136,6 +152,16 @@ impl WorldRead for crate::client::RemoteView {
             .iter()
             .find(|m| m.chips.contains(chip))
             .cloned()
+    }
+
+    fn entities(&self, kind: EntityKind) -> Vec<EntityKey> {
+        // `entities` is in key order, as `World`'s set is.
+        self.world
+            .entities
+            .iter()
+            .filter(|k| k.kind() == kind)
+            .cloned()
+            .collect()
     }
 
     fn reading(&self, entity: &EntityKey, signal: &str) -> Option<Reading> {
@@ -214,6 +240,12 @@ mod tests {
             signals: vec!["chip.temp_c".into(), "chip.aiclk_mhz".into()],
             values: vec![Value::F64(61.25), Value::U64(1350)],
             prov: Provenance::Derived,
+        }));
+        push(Payload::Sample(Sample {
+            entity: EntityKey::training_run("nano_gpt:7@1"),
+            signal: "toplike.train.step".into(),
+            value: Value::U64(12),
+            prov: Provenance::Measured,
         }));
         for (i, prov) in [
             Provenance::Measured,
@@ -298,6 +330,14 @@ mod tests {
             out.push(format!("kind {:?}", v.header_kind()));
             out.push(format!("now {}", v.now_mono_ns()));
             out.push(format!("models {:?}", v.models()));
+            for kind in [
+                EntityKind::Chip,
+                EntityKind::Model,
+                EntityKind::TrainingRun,
+                EntityKind::Other,
+            ] {
+                out.push(format!("entities {kind:?}: {:?}", v.entities(kind)));
+            }
             let mut entities: Vec<EntityKey> = Vec::new();
             let mut signals: Vec<String> = Vec::new();
             for r in &recs {
@@ -354,6 +394,9 @@ mod tests {
             Provenance::Decoration
         );
         assert_eq!(remote.header_kind(), HeaderKind::Replay);
+        let runs = local.entities(EntityKind::TrainingRun);
+        assert_eq!(runs, vec![EntityKey::training_run("nano_gpt:7@1")]);
+        assert!(local.entities(EntityKind::Chip).contains(&chip(1)));
     }
 
     /// A reading's age grows with `now` and never goes below 0.

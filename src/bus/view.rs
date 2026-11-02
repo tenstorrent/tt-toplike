@@ -28,7 +28,8 @@
 //! An attached world is another process's, and can name chips this TUI
 //! does not have. [`ReadView::only_chips`] limits every chip-keyed answer
 //! to a set of chip keys (the local backend's): a reading of an unknown
-//! chip or of its DRAM channels, ports or tiles is `None`, a model's chip
+//! chip or of its DRAM channels, ports or tiles is `None` (and `entities`
+//! does not list them), a model's chip
 //! list is cut to known chips, `model_on_chip` and `reset_seq` of an
 //! unknown chip are `None`, and events are cut the same way (an event that
 //! names only unknown chips is dropped). `TuiBus::read` applies it for an
@@ -39,7 +40,9 @@ use crate::bus::host::BusHost;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use tt_toplike_bus::{EntityKey, Event, HeaderKind, LocalView, ModelView, Reading, WorldRead};
+use tt_toplike_bus::{
+    EntityKey, EntityKind, Event, HeaderKind, LocalView, ModelView, Reading, WorldRead,
+};
 
 /// Where the TUI's bus lives.
 pub enum BusView {
@@ -221,6 +224,13 @@ impl WorldRead for ReadView {
             return None;
         }
         self.data.model_on_chip(chip).map(|m| self.cut_model(m))
+    }
+    /// The entities of `kind`. A chip, or a DRAM channel, port or tile of a
+    /// chip, is listed only when the chip is known.
+    fn entities(&self, kind: EntityKind) -> Vec<EntityKey> {
+        let mut out = self.data.entities(kind);
+        out.retain(|e| e.chip_owner().is_none_or(|c| self.knows(&c)));
+        out
     }
     fn reading(&self, entity: &EntityKey, signal: &str) -> Option<Reading> {
         if let Some(c) = entity.chip_owner() {
