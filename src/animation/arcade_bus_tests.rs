@@ -1404,7 +1404,9 @@ const BASE_GRID: &str = include_str!("fixtures/arcade_base_grid.txt");
 /// The widths of the grid: every width to 60, then a spread up to 240.
 fn grid_widths() -> Vec<usize> {
     let mut w: Vec<usize> = (1..=60).collect();
-    w.extend([64, 72, 80, 90, 100, 110, 120, 132, 144, 160, 180, 200, 220, 240]);
+    w.extend([
+        64, 72, 80, 90, 100, 110, 120, 132, 144, 160, 180, 200, 220, 240,
+    ]);
     w
 }
 
@@ -1485,7 +1487,6 @@ fn grid_busy(w: usize, h: usize) -> u64 {
     grid_cell_hash(a.render(&backend), w, h)
 }
 
-
 #[test]
 fn the_default_layout_draws_the_base_frame_at_every_size_of_the_grid() {
     let want: Vec<(usize, usize, u64, u64)> = BASE_GRID
@@ -1496,7 +1497,11 @@ fn the_default_layout_draws_the_base_frame_at_every_size_of_the_grid() {
             (f[0] as usize, f[1] as usize, f[2], f[3])
         })
         .collect();
-    assert_eq!(want.len(), grid_widths().len() * 60, "the fixture covers the grid");
+    assert_eq!(
+        want.len(),
+        grid_widths().len() * 60,
+        "the fixture covers the grid"
+    );
     // Four workers. The theme is pinned app-wide by `tc` on this thread;
     // truecolor is per thread, so each worker pins it again.
     let bad: Vec<String> = tc(|| {
@@ -1517,7 +1522,10 @@ fn the_default_layout_draws_the_base_frame_at_every_size_of_the_grid() {
                     })
                 })
                 .collect();
-            workers.into_iter().flat_map(|t| t.join().unwrap()).collect()
+            workers
+                .into_iter()
+                .flat_map(|t| t.join().unwrap())
+                .collect()
         })
     });
     assert!(

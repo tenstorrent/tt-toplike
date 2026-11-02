@@ -1502,8 +1502,11 @@ inference server as panels, a cloudfield switch, and no change with no config.
   castle 11 to defrag 9) give the old fixed layout exactly; tests compare them with the old f32
   arithmetic at every size up to 2000. A panel under its view's minimum leaves its row and is
   named on the rule.
-- `config::load_from` merges `~/.config/tt-toplike/config.toml` and `./.toplikerc` (last wins
-  per key) through `toml_edit` spans, so every problem has a file and line. `--check-config`
+- `config::load_from` reads `~/.config/tt-toplike/config.toml` through `toml_edit` spans, so
+  every problem has a file and line. (A `./.toplikerc` override was built and then removed in
+  the fix wave: a repo you check out must not change tt-toplike, and a symlinked `.toplikerc`
+  to `/dev/zero` or a FIFO hung the TUI. `config::read_config_file` now reads only a regular
+  file of at most 256 KiB, before raw mode.) `--check-config`
   prints them and exits 1. The old loader dropped parse errors (`.ok()`); it now reports them.
 - The arcade builds one view per shown panel. The Die 3D panel is the full `Die3dView` at the
   panel's size; `Die3dView::render_at` takes the bus clock so the arcade can draw it in
@@ -1517,6 +1520,13 @@ inference server as panels, a cloudfield switch, and no change with no config.
   measured at 200x60, the black fill repaints the same cells and costs about 4.4 KB a frame
   (15%) more on the wire than the terminal's own background.
 - Docs: `docs/arcade-layout.md`; the gauge rule is in `docs/bus.md`.
+- Fix wave after review. The review found the default layout differed from the old arcade at
+  heights 3 to 8 and widths 1 and 2 (a row given no content rows hid its 1x1 panel and wrote
+  `needs 1x1` on the rule). `View::fits` now lets an empty panel of a 1x1 view stay and draw
+  nothing. `src/animation/fixtures/arcade_base_grid.txt` holds the old arcade's frame hashes
+  over 4440 sizes, captured on 89bf8d05 in a git worktree outside the repo, and a test compares
+  every one. Rule labels and the hero's bands are made with the layout, so a frame builds
+  neither. User-facing Die 3D strings take the display name (`◆ WAFER WAFFLER`).
 
 ### Version history: 0.15.1 (Nov 2 2026)
 

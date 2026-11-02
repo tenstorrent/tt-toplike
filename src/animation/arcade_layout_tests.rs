@@ -72,7 +72,7 @@ fn the_default_layout_hides_nothing_at_any_size() {
     for w in 0..=240 {
         for h in 0..=20 {
             let l = layout(&default_rows(), w, h);
-            let labels: Vec<String> = l.rows.iter().map(|r| r.label()).collect();
+            let labels: Vec<&str> = l.rows.iter().map(|r| r.label()).collect();
             assert_eq!(labels, want, "{w}x{h}");
             assert!(l.rows.iter().all(|r| r.hidden.is_empty()), "{w}x{h}");
             assert_eq!(l.bands().len(), 3, "the hero keeps three bands at {w}x{h}");
@@ -159,7 +159,11 @@ fn a_panel_under_its_minimum_is_named_on_the_rule_and_the_others_take_its_column
     assert_eq!(r.panels[0].view, View::Castle);
     assert_eq!(r.panels[0].rect.w, 40, "the castle takes the whole row");
     assert_eq!(r.hidden, vec![(View::Die3d, (16, 6))]);
-    assert!(r.label().contains("◌ DIE 3D needs 16x6"), "{}", r.label());
+    let note = format!(
+        "◌ {} needs 16x6",
+        crate::animation::DIE3D_DISPLAY_NAME.to_uppercase()
+    );
+    assert!(r.label().contains(&note), "{}", r.label());
     assert!(r.label().starts_with("🏰 MEMORY CASTLE"), "{}", r.label());
 }
 
@@ -186,7 +190,10 @@ fn a_row_with_nothing_left_gives_its_rows_to_the_others() {
     assert!(l.rows[1].panels.is_empty());
     assert_eq!(l.rows[0].height, 30 - HEADER_ROWS - 2 - FOOTER_ROWS);
     assert_eq!(l.rows[1].rule_y, l.rows[0].rule_y + 1 + l.rows[0].height);
-    assert!(l.rows[1].label().contains("DIE 3D needs"));
+    assert!(l.rows[1]
+        .label()
+        .starts_with(&hidden_note(View::Die3d, 16, 6)));
+    assert!(l.rows[1].label().contains(" needs "));
     assert_eq!(l.lines(), 30 - FOOTER_ROWS);
 }
 
@@ -271,7 +278,7 @@ fn the_hero_bands_are_the_old_region_fields() {
     let ss = 2;
     let cs = ss + s + 1;
     let fs = cs + c + 1;
-    assert_eq!(l.bands(), vec![ss..ss + s, cs..cs + c, fs..fs + f]);
+    assert_eq!(l.bands(), [ss..ss + s, cs..cs + c, fs..fs + f]);
 }
 
 #[test]

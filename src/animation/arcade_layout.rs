@@ -90,14 +90,15 @@ impl View {
     }
 
     /// The label on the panel's rule. The first four are the labels the
-    /// arcade has always printed.
+    /// arcade has always printed. Die 3D's comes from its display name
+    /// (`DIE3D_DISPLAY_NAME`), in capitals like the others.
     pub fn label(self) -> &'static str {
         match self {
             View::Starfield => "✧ STARFIELD",
             View::Castle => "🏰 MEMORY CASTLE",
             View::Flow => "🌊 MEMORY FLOW",
             View::Defrag => "▓ DEFRAG",
-            View::Die3d => "◆ DIE 3D",
+            View::Die3d => die3d_label(),
             View::Training => "∿ TRAINING",
             View::Inference => "≈ INFERENCE",
         }
@@ -121,6 +122,14 @@ impl View {
             View::Inference => (24, 8),
         }
     }
+}
+
+/// `◆ ` and the Die 3D view's display name in capitals, made once.
+fn die3d_label() -> &'static str {
+    static LABEL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        format!("◆ {}", crate::animation::DIE3D_DISPLAY_NAME.to_uppercase())
+    });
+    LABEL.as_str()
 }
 
 impl View {
@@ -271,14 +280,22 @@ pub struct LaidRow {
     /// The panels taken out because they did not fit, with the size each
     /// needs, in config order.
     pub hidden: Vec<(View, (usize, usize))>,
+    /// The text in the row's rule (see [`LaidRow::label`]), made when the
+    /// layout is worked out so a frame does not build it.
+    label: String,
 }
 
 impl LaidRow {
     /// The text in the row's rule: the shown panels' labels, then a note for
     /// each hidden one.
-    pub fn label(&self) -> String {
-        let mut parts: Vec<String> = self.panels.iter().map(|p| p.view.label().into()).collect();
-        for (v, (w, h)) in &self.hidden {
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Build [`LaidRow::label`] from the panels and the hidden ones.
+    fn make_label(panels: &[Panel], hidden: &[(View, (usize, usize))]) -> String {
+        let mut parts: Vec<String> = panels.iter().map(|p| p.view.label().into()).collect();
+        for (v, (w, h)) in hidden {
             parts.push(hidden_note(*v, *w, *h));
         }
         parts.join(LABEL_SEP)
@@ -301,6 +318,8 @@ pub struct Layout {
     pub width: usize,
     pub height: usize,
     pub rows: Vec<LaidRow>,
+    /// [`Layout::bands`], made with the layout.
+    bands: Vec<std::ops::Range<usize>>,
 }
 
 impl Layout {
@@ -332,12 +351,8 @@ impl Layout {
     /// The rows that show a panel, top to bottom, as the hero's bands:
     /// `rule_y .. rule_y + height` (the old `*_start .. *_end` fields). A
     /// row given no content rows still counts, as the old fields did.
-    pub fn bands(&self) -> Vec<std::ops::Range<usize>> {
-        self.rows
-            .iter()
-            .filter(|r| !r.panels.is_empty())
-            .map(|r| r.rule_y..r.rule_y + r.height)
-            .collect()
+    pub fn bands(&self) -> &[std::ops::Range<usize>] {
+        &self.bands
     }
 
     /// Lines the composed arcade has: the header, every rule, every content
@@ -409,7 +424,7 @@ pub fn layout(rows: &[RowSpec], width: usize, height: usize) -> Layout {
         for (i, (shown, hidden)) in placed.into_iter().enumerate() {
             let h = if alive[i] { heights[i] } else { 0 };
             let rule_y = y;
-            let panels = shown
+            let panels: Vec<Panel> = shown
                 .into_iter()
                 .map(|(p, (x, w))| Panel {
                     view: p.view,
@@ -421,22 +436,30 @@ pub fn layout(rows: &[RowSpec], width: usize, height: usize) -> Layout {
                     },
                 })
                 .collect();
-            let hidden = hidden
+            let hidden: Vec<(View, (usize, usize))> = hidden
                 .into_iter()
                 .map(|p| (p.view, p.view.min_size()))
                 .collect();
+            let label = LaidRow::make_label(&panels, &hidden);
             out.push(LaidRow {
                 rule_y,
                 height: h,
                 panels,
                 hidden,
+                label,
             });
             y = rule_y + 1 + h;
         }
+        let bands = out
+            .iter()
+            .filter(|r| !r.panels.is_empty())
+            .map(|r| r.rule_y..r.rule_y + r.height)
+            .collect();
         return Layout {
             width,
             height,
             rows: out,
+            bands,
         };
     }
 }
@@ -518,7 +541,7 @@ pub fn command(arg: &str, cloudfield: &mut bool) -> (String, bool) {
 }
 
 /// The usage line for `/arcade`.
-pub const USAGE: &str = "/arcade cloudfield on|off   the atmosphere behind the arcade";
+pub const USAGE: &str = "/arcade cloudfield on|off   the atmosphere behind the arcade, shown only while an inference service is loading or serving";
 
 /// The status-line message for a cloudfield change.
 pub fn cloudfield_message(on: bool) -> String {
@@ -530,35 +553,18 @@ pub const CLOUDFIELD_KEY: char = 'c';
 
 // ---- Legend and explain text --------------------------------------------------
 
-/// The arcade legend's section on the layout and the cloudfield.
-pub const LEGEND_TEXT: &[&str] = &[
-    "The rows and panels come from [arcade] in",
-    "~/.config/tt-toplike/config.toml (or ./.toplikerc);",
-    "--check-config lists any problem in them.",
-    "  │       between two panels of a row",
-    "  ◌ NAME  a panel too small for its view, with",
-    "          the size it needs",
-    "  c       cloudfield on/off: the atmosphere of",
-    "          the featured inference server behind",
-    "          every blank cell (off by default)",
-];
+/// The text after the `▦ Layout` heading of the arcade legend.
+pub const LEGEND_HEAD: &str = "rows and panels from [arcade] in config.toml";
 
-/// The arcade explain text's paragraph on the layout.
+/// The arcade legend's lines on the layout and the cloudfield, under
+/// [`LEGEND_HEAD`]. Short, so the legend fits 30 rows at 80 columns.
+pub const LEGEND_TEXT: &[&str] =
+    &["  ◌ NAME  a panel too small   c  cloudfield, while a model serves"];
+
+/// The arcade explain text's line on the layout. The detail is in the docs.
 pub const EXPLAIN_TEXT: &[&str] = &[
     "",
-    "Layout: the [arcade] section of the config",
-    "file sets the rows and their panels (starfield,",
-    "castle, flow, defrag, die3d, training,",
-    "inference), each with a height or width",
-    "weight. Without it the arcade is the layout",
-    "above. A panel too small for its view is named",
-    "on its row's rule and the others take its",
-    "space. The gauges and labels go on the rule",
-    "of the first starfield, castle, defrag or",
-    "Die 3D panel. The cloudfield (c, or /arcade",
-    "cloudfield on|off) lays the inference",
-    "server's atmosphere behind blank cells.",
-    "See docs/arcade-layout.md.",
+    "Layout: [arcade] in config.toml (docs/arcade-layout.md).",
 ];
 
 /// The legend lines for [`LEGEND_TEXT`], with the overlay's left bar.

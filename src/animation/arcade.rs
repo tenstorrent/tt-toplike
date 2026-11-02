@@ -106,6 +106,9 @@ pub struct ArcadeVisualization {
     services: Vec<crate::workload::inference_server::ServiceState>,
     /// The training run of this tick, for the Training panel.
     train_state: Option<crate::workload::train::TrainState>,
+    /// The state the Training panel draws with no run, made once so a frame
+    /// does not build one.
+    idle_train: crate::workload::train::TrainState,
     /// Seconds of view time for the Die 3D panel, set by the TUI each update
     /// (`set_clock`). `None` uses the frame count at 60 frames a second,
     /// which keeps tests on a fixed clock.
@@ -230,6 +233,7 @@ impl ArcadeVisualization {
             atmosphere: crate::animation::atmosphere::Atmosphere::new(),
             services: Vec::new(),
             train_state: None,
+            idle_train: crate::workload::train::TrainState::default(),
             clock_s: None,
             die3d_bus_now: None,
             die3d_fed: false,
@@ -886,7 +890,7 @@ impl ArcadeVisualization {
         // and flow, as before. Each band is a row's rule and the content rows
         // after it (`Layout::bands`).
         let bands = self.layout.bands();
-        let band = |i: usize| {
+        let band = |i: usize| -> std::ops::Range<usize> {
             bands
                 .get(i)
                 .cloned()
@@ -937,7 +941,7 @@ impl ArcadeVisualization {
 
         // Each configured row: its rule, then its panels side by side.
         for row in &self.layout.rows {
-            lines.push(self.render_separator(&row.label(), row.height));
+            lines.push(self.render_separator(row.label(), row.height));
             self.compose_row(row, backend, &mut lines);
         }
 
@@ -1051,8 +1055,7 @@ impl ArcadeVisualization {
                 .as_ref()
                 .map(|v| v.render_at(self.die3d_bus_now, self.now_s())),
             View::Training => self.train.as_ref().map(|t| {
-                let none = crate::workload::train::TrainState::default();
-                let st = self.train_state.as_ref().unwrap_or(&none);
+                let st = self.train_state.as_ref().unwrap_or(&self.idle_train);
                 if st.proc.is_none() && !t.shows_bus_run() {
                     note("no training run")
                 } else {
@@ -1172,7 +1175,7 @@ impl ArcadeVisualization {
                 Some(*y),
                 cols.clone(),
                 UnicodeWidthStr::width("╔══[ ")
-                    + UnicodeWidthStr::width(label.as_str())
+                    + UnicodeWidthStr::width(*label)
                     + UnicodeWidthStr::width(" ]"),
             ),
             None => (None, 0..0, 0),

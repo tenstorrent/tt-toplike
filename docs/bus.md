@@ -751,7 +751,7 @@ effects then attach to the panels that exist, by these rules:
   content row, or on the lanes when the lanes are in the top row.
 * **The heartbeat** and **the duel's lunge** belong to the hero and the header, which every
   layout has.
-* **The Die 3D panel** reads the world itself, through `Die3dView::update`, and draws its own
+* **The Wafer Waffler panel** reads the world itself, through `Die3dView::update`, and draws its own
   overlay (flags, fill, pulses, GDDR rows) exactly as the `3` view does. It draws it at the bus
   time of the last update (`Die3dView::render_at`).
 * **The Training panel** reads the world through `train_bus`, and **the inference panel**
@@ -759,7 +759,7 @@ effects then attach to the panels that exist, by these rules:
   views do.
 
 The default layout puts the gauge on the `✧ STARFIELD` rule across the whole width, as before.
-The brief that asked for this rule named castle, defrag and Die 3D; the starfield is first in
+The brief that asked for this rule named castle, defrag and the Wafer Waffler; the starfield is first in
 the list so that the default layout's gauge stays where it was. The default frames, with and
 without bus effects, are pinned by hash in `src/animation/arcade_bus_tests.rs`.
 

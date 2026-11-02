@@ -539,7 +539,7 @@ pub(crate) fn left(start: u64, now: u64, dur_ns: u64) -> f32 {
 }
 
 /// Where on the arcade's lines the bus effects go. The arcade fills it from
-/// its layout (`ArcadeVisualization::draw_bus`): see "Where things go with a
+/// its layout (`ArcadeVisualization::draw_bus`): see "The arcade with a
 /// configured layout" in `docs/bus.md`.
 #[derive(Debug, Clone)]
 pub struct Stage {
@@ -883,10 +883,9 @@ pub(crate) fn restyle(
 /// The arcade legend's section on what the bus draws.
 pub const LEGEND_TEXT: &[&str] = &[
     "Each chip has an equal share of the width, chip 0 left:",
-    "  gauge   the ✧ STARFIELD rule fills purple as a model",
-    "          compiles or loads, as far as its progress;",
-    "          with no figure a band sweeps (decoration).",
-    "          Teal at ready, grey when it goes down",
+    "  gauge   the ✧ STARFIELD rule fills purple to a model's",
+    "          compile or load progress (no figure: a band",
+    "          sweeps, decoration); teal at ready, grey when down",
     "  label   model, phase and tokens/s right of the rule;",
     "          '~' marks an estimate",
     "  ✦ ring  from the hero, one per request completed (8 max)",

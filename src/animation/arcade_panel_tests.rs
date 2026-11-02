@@ -128,7 +128,7 @@ fn the_die3d_panel_draws_what_the_die3d_view_draws_at_that_size() {
                 }
             }
         }
-        assert_eq!(differ, 0, "the panel is the Die 3D view's frame");
+        assert_eq!(differ, 0, "the panel is the full view's frame");
         let text = text_in(&got, rect);
         assert!(!text.contains("no Tenstorrent device"), "{text}");
     })
@@ -398,7 +398,11 @@ fn a_panel_too_small_leaves_a_note_on_its_rule_and_draws_nothing() {
         a.update(&b);
         let lines = a.render(&b);
         let rule: String = lines[2].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(rule.contains("◌ DIE 3D needs 16x6"), "{rule}");
+        let note = format!(
+            "◌ {} needs 16x6",
+            crate::animation::DIE3D_DISPLAY_NAME.to_uppercase()
+        );
+        assert!(rule.contains(&note), "{rule}");
     })
 }
 

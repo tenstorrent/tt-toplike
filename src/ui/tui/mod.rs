@@ -723,6 +723,15 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         }
     };
 
+    // The config file is read here, once, before raw mode: reading it
+    // after `enable_raw_mode` would leave a blank raw-mode screen if the
+    // read ever stalled. `config::read_config_file` reads only a regular
+    // file of at most 256 KiB. Every problem goes to the log and the first
+    // to the status line (see `cmd_message` in `run_app`), and a bad
+    // `[arcade]` keeps the default layout. Pinned by
+    // `config_read_tests::the_config_is_read_before_raw_mode`.
+    let loaded_config = crate::config::load_config();
+
     // Setup terminal
     enable_raw_mode().map_err(|e| {
         TTTopError::Terminal(format!(
@@ -754,6 +763,7 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         config,
         cli,
         &mut tui_bus,
+        &loaded_config,
     );
 
     // Re-enable stderr output before exiting
@@ -788,16 +798,14 @@ fn run_app(
     config: BackendConfig,
     cli: &Cli,
     tui_bus: &mut crate::bus::tui_bus::TuiBus,
+    loaded_config: &crate::config::LoadedConfig,
 ) -> Result<(), TTTopError> {
     let update_interval = Duration::from_millis(cli.interval);
     let mut last_update = Instant::now();
 
     // Build animation config from CLI --profile flag, merged with any user config file overrides.
     // sensitivity is read at viz construction time and applied to the viz's internal AdaptiveBaseline.
-    // The config files are read once here (`config::load_config`); every
-    // problem goes to the log and the first to the status line (see
-    // `cmd_message` below), and a bad `[arcade]` keeps the default layout.
-    let loaded_config = crate::config::load_config();
+    // The config file was read in `run_tui`, before raw mode.
     for p in &loaded_config.problems {
         log::warn!("config: {p}");
     }
@@ -4687,10 +4695,16 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     ("/watch <path>", "tail a log in ~"),
                     ("/watch pid <n>", "sniff a process"),
                 ]),
-                cmd(&[
-                    ("/legend /explain /help", "the l ! ? panels"),
-                    ("/arcade cloudfield on|off", "Arcade backdrop"),
-                ]),
+                // Narrower descriptions, so the long /arcade usage fits.
+                cells(
+                    &[
+                        ("/legend /explain /help", "l ! ? panels"),
+                        ("/arcade cloudfield on|off", "Arcade clouds"),
+                    ],
+                    19,
+                    13,
+                    lbl,
+                ),
                 cmd(&[("/board /scene /cells …", &settings)]),
                 sep!("Status bar"),
                 cells(
@@ -4843,12 +4857,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                         "Arcade Mode — Unified View",
                         "",
                         "Starfield, Memory Castle, Defrag and Memory Flow on one",
-                        "screen.",
-                        "The @ hero roams on live telemetry: x is current draw",
-                        "(0–100 A), y is power, colour is die temperature. The",
-                        "glyph is its health: @ healthy, ! throttled or faulted,",
-                        "? ARC stalled, % undervolt (a busy Blackhole under",
-                        "0.65 V, other chips under 0.75 V).",
+                        "screen. The @ hero roams on live telemetry: x is current",
+                        "draw (0–100 A), y is power, colour is die temperature.",
+                        "The glyph is its health: @ healthy, ! throttled or",
+                        "faulted, ? ARC stalled, % undervolt (a busy Blackhole",
+                        "under 0.65 V, other chips under 0.75 V).",
                         "",
                         "While something trains, loads or serves, the top rows",
                         "become up to two lanes, most urgent first: ▶ TRAIN,",
@@ -6179,7 +6192,10 @@ fn arcade_legend_lines(
     v.extend(activity_legend_lines(bar, bg, dim));
     v.push(l(&[("◆ Signal bus", Some(head))]));
     v.extend(crate::animation::arcade_bus::legend_lines(bar, bg, dim));
-    v.push(l(&[("▦ Layout", Some(head))]));
+    v.push(l(&[
+        ("▦ Layout  ", Some(head)),
+        (crate::animation::arcade_layout::LEGEND_HEAD, None),
+    ]));
     v.extend(crate::animation::arcade_layout::legend_lines(bar, bg, dim));
     v
 }
@@ -13676,5 +13692,34 @@ mod bus_wiring_tests {
         // The served bus is a mock run, so the attached label says so.
         assert_eq!(hint, format!("bus: {} (mock)", sock.display()));
         assert!(bar(&b, Some(&hint)).contains(&hint));
+    }
+}
+
+#[cfg(test)]
+mod config_read_tests {
+    /// The config file is read in `run_tui` before the terminal enters raw
+    /// mode, and `run_app` (which runs in raw mode) reads no config file.
+    #[test]
+    fn the_config_is_read_before_raw_mode() {
+        let src = include_str!("mod.rs");
+        let run_tui = src.find("\npub fn run_tui(").expect("run_tui");
+        let run_app = src.find("\nfn run_app(").expect("run_app");
+        let read = "let loaded_config = crate::config::load_config();";
+        let raw = "enable_raw_mode().map_err(";
+        let read_at = src[run_tui..run_app]
+            .find(read)
+            .expect("run_tui reads the config");
+        let raw_at = src[run_tui..run_app]
+            .find(raw)
+            .expect("run_tui enables raw mode");
+        assert!(read_at < raw_at, "the config is read before raw mode");
+        // The test module (which quotes these names) comes after `run_app`.
+        let app_end = src[run_app..]
+            .find("\n}\n")
+            .map_or(src.len(), |i| run_app + i);
+        assert!(
+            !src[run_app..app_end].contains("config::load_config"),
+            "run_app reads no config file"
+        );
     }
 }

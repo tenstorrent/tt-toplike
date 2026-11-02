@@ -6,21 +6,24 @@ draws the layout it has always had.
 
 ## Where the config lives
 
-* `~/.config/tt-toplike/config.toml` is the shared config file. The other settings in it
-  (`sensitivity`, `max_particles_scale`, `tt_smi_reset_behavior`) work as before.
-* `./.toplikerc` in the directory you start tt-toplike from may override it. It has the same
-  schema. A key set in both files takes the value from `.toplikerc`, key by key: `cloudfield`
-  set only in the shared file stays, and an `[[arcade.row]]` list in `.toplikerc` replaces the
-  whole row list of the shared file.
+The layout is set in `~/.config/tt-toplike/config.toml`, the one config file tt-toplike
+reads. The other settings in it (`sensitivity`, `max_particles_scale`, `tt_smi_reset_behavior`)
+work as before. No file in the working directory is read, so a repository you check out cannot
+change tt-toplike.
 
-Check the files without starting the TUI:
+The file must be a regular file of at most 256 KiB. A symlink to one works. A directory, FIFO,
+socket or device is never opened, and a larger file is not read; each is reported as a problem,
+and so is a file that cannot be read. tt-toplike reads the file once, before the terminal
+switches to raw mode.
+
+Check the file without starting the TUI:
 
 ```sh
 tt-toplike --check-config
 ```
 
-It lists the files it read, every problem with its file and line, and the arcade layout that
-will be used. It exits with status 1 when there is a problem and 0 otherwise. It opens no device.
+It says whether it found the file, lists every problem with its line, and shows the arcade
+layout that will be used. It exits with status 1 when there is a problem and 0 otherwise. It opens no device.
 
 ## Schema
 
@@ -64,13 +67,13 @@ This example is `arcade_layout::example_rows()`; the bench draws it as `arcade-p
 | `castle` | Memory Castle: DDR, L2 and L1 as a dungeon of particles | 1 x 1 |
 | `flow` | Memory Flow: NoC particles and the DDR perimeter | 1 x 1 |
 | `defrag` | the GDDR block map | 1 x 1 |
-| `die3d` | the Die 3D view of each Blackhole board, with its bus overlay (`waffler` is accepted as another name) | 16 x 6 |
+| `die3d` | the Wafer Waffler view of each Blackhole board, with its bus overlay (`waffler` is accepted as another name) | 16 x 6 |
 | `training` | the Training view; `no training run` when there is none | 20 x 10 |
 | `inference` | the `i` view's serving snake; `no inference server` when none is up or coming up | 24 x 8 |
 
 Every panel draws the same view as its own mode, at the panel's size:
 
-* The Die 3D panel is the Die 3D view (`Die3dView`), with the same background, theme and cell
+* The Wafer Waffler panel is the Wafer Waffler view (`Die3dView`), with the same background, theme and cell
   style the `3` view uses. It reads the bus as the `3` view does, so model flags, the bring-up
   fill, pulses and the per-channel GDDR rows show in it. At 16 x 6 and above it always draws a
   scene; the history panel appears from 120 x 36 and the chip flags at the sizes the `3` view
@@ -94,8 +97,10 @@ and 3, with castle at width 11 and defrag at width 9. These weights give the old
 rows and the castle's 55% of the columns exactly.
 
 A panel smaller than its view's smallest size is taken out of its row, and the row's other
-panels share its columns. The row's rule names the panel and the size it needs, for example
-`◌ DIE 3D needs 16x6`. The panel taken out first is the rightmost one that does not fit; the
+panels share its columns. The four views with a 1 x 1 minimum are never taken out: a panel of
+theirs that gets no column or no content row draws nothing and keeps its label, as the arcade
+did before it had a layout, so the default layout draws the same frame as before at every size. The row's rule names the panel and the size it needs, for example
+`◌ WAFER WAFFLER needs 16x6`. The panel taken out first is the rightmost one that does not fit; the
 columns are then shared again, so a removal that makes room keeps the other panels. A row with
 no panel left keeps its rule and gives its content rows to the other rows.
 
@@ -120,7 +125,8 @@ are drawn around the hero.
 
 ## The cloudfield
 
-`cloudfield = true` lays the atmosphere backdrop (`src/animation/atmosphere.rs`, also drawn behind
+The cloudfield shows only while an inference service is loading or serving. `cloudfield = true`
+lays the atmosphere backdrop (`src/animation/atmosphere.rs`, also drawn behind
 the `i` view's snake) behind the whole arcade. It follows the featured inference service: a forge
 while a model compiles or loads, a storm while requests wait for their first token, an aurora
 while tokens flow, a dream while a model is ready and idle. It fills blank cells only, so no
@@ -140,11 +146,18 @@ background).
 A problem never stops the TUI. It starts with the default for the setting that has the problem,
 shows the first problem on the status line (`config: <file>:<line>: <message>`, with a count of
 the others), and writes every problem to the log. Any problem in `[arcade]` gives the default
-layout with the cloudfield off. A TOML syntax error makes the TUI ignore that whole file.
+layout with the cloudfield off. A TOML syntax error, or a file that cannot be read, makes the TUI
+ignore the whole file.
 
 | Problem | Message |
 |---|---|
-| TOML syntax | `TOML syntax error: <the parser's message>` |
+| the file is not a regular file | `is a FIFO; the config must be a regular file` (or a directory, a character device, a block device, a socket) |
+| the file is too large | `is larger than 256 KiB (300000 bytes); it was not read` |
+| the file cannot be read | `cannot be read: Permission denied (os error 13)` |
+| the file is not UTF-8 | `is not UTF-8 text` |
+| a symlink to nothing | `is a symlink to a file that does not exist` |
+| TOML syntax | `TOML syntax error: <the parser's message>`, its lines joined with `; ` |
+| an unknown `tt_smi_reset_behavior` | `unknown tt_smi_reset_behavior "bogus" (expected ignore, inform, dazzle or demo); the TUI uses inform` |
 | an unknown top-level key | ``unknown key `colour` `` |
 | an unknown key in `[arcade]` | ``unknown key `arcade.clouds` (expected cloudfield or row)`` |
 | an unknown key in a row | ``unknown key `heigth` in row 1 (expected height or panels)`` |
@@ -166,11 +179,11 @@ Each message is prefixed with the file and, where the parser gives a position, t
 Measured with `die3d_panel_frame_time` (`src/animation/arcade_panel_tests.rs`), release build,
 200 x 60, two Blackhole chips, on a shared box with a load average near 34:
 
-| Layout | Die 3D panel | Average | 95th percentile |
+| Layout | Wafer Waffler panel | Average | 95th percentile |
 |---|---|---|---|
 | default | none | 2.6 to 2.9 ms | 3.7 to 3.9 ms |
 | the example above | 66 x 23 | 1.9 to 2.0 ms | 2.8 ms |
-| starfield over castle beside Die 3D at width 2 | 133 x 37 | 3.1 to 3.2 ms | 4.5 to 4.7 ms |
+| starfield over castle beside the Wafer Waffler at width 2 | 133 x 37 | 3.1 to 3.2 ms | 4.5 to 4.7 ms |
 
-The Die 3D panel draws a new scene about 20 times a second and returns its last frame in
+The Wafer Waffler panel draws a new scene about 20 times a second and returns its last frame in
 between, as the `3` view does. A frame at 60 fps has 16.7 ms.
