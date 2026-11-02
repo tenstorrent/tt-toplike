@@ -1454,6 +1454,13 @@ Copilot's review, each claim checked against the code before acting:
 - Docs: the PR title said 0.14.2 while the code said 0.14.3 (release metadata is the version).
 - Tests that used 0 W as a chip's idle now use 37 W: no powered chip reads under a watt.
 
+### Version history: 0.15.0 (Nov 2 2026)
+
+0.15.0 adds the signal bus (`crates/tt-toplike-bus`, `src/bus/`, `docs/bus.md`). The root package
+goes from 0.14.5 to 0.15.0 (minor: a new subsystem). The bus crate stays at 0.1.0. The lessons
+are in the "Signal bus" section below. CI now runs `cargo test --locked --test tui_panic_hook`,
+because the `--lib` job does not run integration tests.
+
 ### Open items closed before the human review (Oct 31 2026, v0.14.5)
 
 Prompt: "hit all these open issues before we ask for a human review" (the PR body's list).

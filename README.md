@@ -261,7 +261,8 @@ tt-toplike-tui --bus-attach /tmp/tt-toplike-$UID/replay.sock    # a TUI that rea
 * Command lines in the log have common secret shapes (tokens, keys, passwords) replaced with
   `<redacted>`. The matcher has known gaps, listed in `docs/bus.md`.
 * Limits of this release: no hardware run yet, the Die 3D tile glow is still an estimate, the
-  per-tile counter sidecar is not included, and the `i` view does not read the bus yet.
+  per-tile counter sidecar is not included (a live reader on a chip blocks gozer reset and
+  release), and the order of DRAM rows within a side is not documented.
 
 ---
 

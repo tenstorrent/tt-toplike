@@ -17,6 +17,36 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.15.0
+- The signal bus. Every source writes to one ordered log and every view reads it. The log keeps
+  samples, events, gaps and the provenance of each value (measured, derived or estimated). A
+  `--headless` host keeps 24 hours or 5 GB of log (`--bus-retain HOURS[,GB]`) in a directory only
+  the owner can read. A TUI keeps its bus in memory unless `--record DIR` is given.
+- Replay and inspect: `--bus-inspect DIR` summarises a recording, and `--replay DIR --speed N`
+  plays it back through a headless host. Missing or unreadable segments show up as gaps.
+- The socket: a host serves its bus on a Unix socket (`--bus-socket PATH`) for snapshots, live
+  following and replay. A TUI on the same machine attaches to a live host with the same chips.
+  `--bus-attach SOCKET` attaches on request and `--no-bus-attach` turns the start-up probe off.
+- `--headless` runs the host with no screen, for systemd. It locks the log directory and the
+  socket, so two hosts cannot write one log. `--bus-dir DIR` sets the directory, and
+  `--mock-workloads` adds invented models and runs to a mock host.
+- Sources: the chip backend, the inference monitor, training runs, hivemind, the process scan,
+  `--remote` scrapes and gozer leases. The gozer governor permits only what the lease list shows.
+  It can be up to 60 seconds stale after a failed refresh.
+- Secrets in command lines (tokens, keys, passwords, URL credentials) are replaced with
+  `<redacted>` before they reach the log. The matcher has known gaps, listed in `docs/bus.md`.
+- tt-station frames are built from the bus. The bytes are unchanged on the test fixture.
+- Die 3D reads the bus: model flags, a bring-up fill that grows with load progress, pulses,
+  sparks and per-channel DRAM rows. The legend and explain text name them, and `~` marks
+  estimated values.
+- The `i` view reads an attached host's world, and marks a host that has disconnected.
+- Limits: not yet run on real hardware with the bus. The tile glow is still an estimate. The
+  per-tile counter sidecar is not included, because a live reader on a chip blocks gozer reset
+  and release. The order of DRAM rows within a side is not documented. Deferred review findings
+  are in `docs/bus.md` section 13.
+- The new crate `tt-toplike-bus` is at 0.1.0. CI now runs its tests and clippy, and the
+  `tui_panic_hook` integration test.
+
 ### 0.14.5
 - Die 3D: the arrow keys move the window over a clipped scene, stop at its edge, and do nothing
   when the whole scene fits. The footer says "arrows pan" beside the clipped note.

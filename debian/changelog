@@ -1,3 +1,56 @@
+tt-toplike (0.15.0) noble; urgency=medium
+
+  * New: the signal bus. Every source writes its readings to one ordered,
+    timestamped log, and every view reads from it. The log records samples,
+    events, gaps and the provenance of each value (measured, derived or
+    estimated). A headless host keeps 24 hours or 5 GB of log in a directory
+    only the owner can read (--bus-retain HOURS[,GB] changes that). A TUI
+    without --record keeps its bus in memory. The log is described in
+    docs/bus.md.
+  * Replay and inspect. --record DIR makes a normal TUI record to a directory.
+    --bus-inspect DIR prints a summary of a recording (add --entity or
+    --signal to narrow it). --replay DIR --speed N plays a recording back
+    through a headless host. Replay reports holes in a log as gaps.
+  * The socket. A host serves its bus on a Unix socket in a private directory
+    (--bus-socket PATH). A client can ask for a snapshot, follow live records
+    or replay. A second TUI on the same machine attaches to a live host that
+    has the same chips. --bus-attach SOCKET attaches on request, and
+    --no-bus-attach turns the start-up probe off. The probe skips a host with
+    a different host identity or a mock backend.
+  * --headless runs the host with no screen, for systemd (Restart=on-failure,
+    no root). It takes a lock on the log directory and on the socket, so two
+    hosts cannot write one log. --mock-workloads adds invented models and
+    runs to a mock host. --bus-dir DIR sets the log directory.
+  * Sources: the chip backend, the inference monitor, training runs,
+    hivemind, the process scan, --remote scrapes and gozer leases. Gozer
+    leases are read with gozer's read-only commands, and the governor only
+    permits what the lease list shows (it can be up to 60 seconds stale after
+    a failed refresh).
+  * Secrets in command lines are replaced with <redacted> before they reach
+    the log. The matcher covers tokens, keys, passwords, URL credentials and
+    common flag and variable names. It has known false positives and known
+    leaks, both listed in docs/bus.md.
+  * tt-station frames are now built from the bus. The bytes a client sees are
+    unchanged.
+  * Die 3D reads the bus: model flags, a bring-up fill that grows with load
+    progress, pulses on events, sparks, and per-channel DRAM rows. The legend
+    and the explain text name each of these, and estimated values are marked
+    with ~.
+  * The i (inference monitor) view reads an attached host's world. A host that
+    disconnects shows a (host disconnected) or (reconnecting) marker, and the
+    rotation uses the attached rows.
+  * Limits of this release. It has not been run on real hardware with the
+    bus. The tile glow in Die 3D is still an estimate. The per-tile counter
+    sidecar is not included, because a live reader on a chip blocks gozer
+    reset and release. The order of the DRAM rows within a side is not
+    documented, so the viewer keeps its own order and says so. Deferred review
+    findings are listed in docs/bus.md section 13.
+  * The root package is 0.15.0. The new crate tt-toplike-bus stays at 0.1.0.
+  * CI runs the bus crate's tests and clippy, and the tui_panic_hook
+    integration test.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 12:00:00 -0800
+
 tt-toplike (0.14.5) noble; urgency=medium
 
   * Die 3D: the arrow keys move the window over a scene that is clipped (too
