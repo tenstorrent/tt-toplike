@@ -469,6 +469,115 @@ impl HybridBackend {
             .collect()
     }
 
+    /// Start the tt-smi reader thread and return at once. `init` calls it
+    /// after sysfs discovery; it never waits for the first snapshot, so the
+    /// first frame is drawn from sysfs alone and tt-smi's fields join when
+    /// they arrive. An empty `resolved_path` parks the thread (sysfs-only).
+    fn start_reader(&mut self, resolved_path: String) {
+        // ── 3. Start SMBUS reader thread — returns immediately ────────────────
+        //
+        // The thread polls tt-smi directly (no shell wrapper, no `timeout`
+        // dependency, no RS delimiter) every 1.5 s.  Results are deposited via
+        // lock-free ArcSwap; the render thread picks them up on the next frame.
+        //
+        // init() does NOT wait for the first record — the first render shows sysfs
+        // data instantly, and SMBUS fields (board IDs, DDR status, etc.) populate
+        // within ~1–2 s as the background thread completes its first poll.
+        let smbus_shared = Arc::clone(&self.smbus_shared);
+        let device_meta_shared = Arc::clone(&self.device_meta_shared);
+        let device_meta_stamp = Arc::clone(&self.device_meta_stamp);
+        let smbus_stamp = Arc::clone(&self.smbus_stamp);
+        let smbus_generation = Arc::clone(&self.smbus_generation);
+        let stop_flag = Arc::clone(&self.stop_flag);
+        let last_raw = Arc::clone(&self.last_raw);
+        // Join key map, snapshotted for the reader thread. Built now — after
+        // sysfs.init() above — because that is where the device list (and thus
+        // every bus id) comes from.
+        self.bus_to_index = self.sysfs_bus_index();
+        let bus_to_index = self.bus_to_index.clone();
+
+        let handle = thread::Builder::new()
+            .name("hybrid-smbus-reader".to_string())
+            .spawn(move || {
+                // tt-smi is enrichment; it waits for the render thread.
+                crate::workload::background::lower_priority();
+                log::debug!("HybridBackend: SMBUS reader thread started");
+
+                if resolved_path.is_empty() {
+                    log::debug!("HybridBackend: no tt-smi path — reader thread idle");
+                    // Park the thread; Drop will set stop_flag to release it.
+                    while !stop_flag.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_secs(1));
+                    }
+                    return;
+                }
+
+                while !stop_flag.load(Ordering::Relaxed) {
+                    crate::startup_log::phase("tt-smi spawn");
+                    // Spawn tt-smi directly — no shell, no `timeout` dependency.
+                    let polled = std::process::Command::new(&resolved_path)
+                        .arg("-s")
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::null())
+                        .output();
+                    crate::startup_log::phase("tt-smi returned");
+                    match polled {
+                        Ok(out) if out.status.success() => {
+                            let json_str = String::from_utf8_lossy(&out.stdout);
+
+                            // Retain the verbatim tt-smi output for snapshot_json()
+                            // (the --serve relay), regardless of what the SMBUS
+                            // parse below finds — this is exactly what tt-smi
+                            // printed, so there's nothing to fabricate. Off the
+                            // render hot path: this lock is only ever touched by
+                            // this background thread (writer) and an occasional
+                            // snapshot_json() caller (reader), never per-frame.
+                            if let Ok(mut guard) = last_raw.lock() {
+                                *guard = Some(json_str.to_string());
+                            }
+
+                            // Single parse pass (SMBUS + firmware/limits/PCIe/
+                            // board power), re-keyed onto sysfs device indices by
+                            // bus id, then deposited for the render thread.
+                            publish_snapshot(
+                                &json_str,
+                                &bus_to_index,
+                                &smbus_shared,
+                                &device_meta_shared,
+                                &device_meta_stamp,
+                                &smbus_stamp,
+                                &smbus_generation,
+                            );
+                        }
+                        Ok(out) => {
+                            log::debug!("HybridBackend: tt-smi exited {:?}", out.status.code());
+                        }
+                        Err(e) => {
+                            log::warn!("HybridBackend: failed to run tt-smi: {}", e);
+                            // Back off longer on spawn failure to avoid busy-looping.
+                            thread::sleep(Duration::from_secs(5));
+                            continue;
+                        }
+                    }
+
+                    // Sleep 1.5 s between polls, checking stop flag every 50 ms
+                    // so Drop doesn't block waiting for the full sleep to expire.
+                    let poll_start = std::time::Instant::now();
+                    while poll_start.elapsed() < Duration::from_millis(1500) {
+                        if stop_flag.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                }
+
+                log::debug!("HybridBackend: SMBUS reader thread exiting");
+            })
+            .expect("failed to spawn hybrid-smbus-reader thread");
+
+        *self.refresh_handle.lock().unwrap() = Some(handle);
+    }
+
     /// Create a new Hybrid backend with explicit configuration.
     pub fn with_config(tt_smi_path: impl Into<String>, _config: BackendConfig) -> Self {
         let empty: Arc<HashMap<usize, SmbusTelemetry>> = Arc::new(HashMap::new());
@@ -534,104 +643,7 @@ impl TelemetryBackend for HybridBackend {
             }
         };
 
-        // ── 3. Start SMBUS reader thread — returns immediately ────────────────
-        //
-        // The thread polls tt-smi directly (no shell wrapper, no `timeout`
-        // dependency, no RS delimiter) every 1.5 s.  Results are deposited via
-        // lock-free ArcSwap; the render thread picks them up on the next frame.
-        //
-        // init() does NOT wait for the first record — the first render shows sysfs
-        // data instantly, and SMBUS fields (board IDs, DDR status, etc.) populate
-        // within ~1–2 s as the background thread completes its first poll.
-        let smbus_shared = Arc::clone(&self.smbus_shared);
-        let device_meta_shared = Arc::clone(&self.device_meta_shared);
-        let device_meta_stamp = Arc::clone(&self.device_meta_stamp);
-        let smbus_stamp = Arc::clone(&self.smbus_stamp);
-        let smbus_generation = Arc::clone(&self.smbus_generation);
-        let stop_flag = Arc::clone(&self.stop_flag);
-        let last_raw = Arc::clone(&self.last_raw);
-        // Join key map, snapshotted for the reader thread. Built now — after
-        // sysfs.init() above — because that is where the device list (and thus
-        // every bus id) comes from.
-        self.bus_to_index = self.sysfs_bus_index();
-        let bus_to_index = self.bus_to_index.clone();
-
-        let handle = thread::Builder::new()
-            .name("hybrid-smbus-reader".to_string())
-            .spawn(move || {
-                log::debug!("HybridBackend: SMBUS reader thread started");
-
-                if resolved_path.is_empty() {
-                    log::debug!("HybridBackend: no tt-smi path — reader thread idle");
-                    // Park the thread; Drop will set stop_flag to release it.
-                    while !stop_flag.load(Ordering::Relaxed) {
-                        thread::sleep(Duration::from_secs(1));
-                    }
-                    return;
-                }
-
-                while !stop_flag.load(Ordering::Relaxed) {
-                    // Spawn tt-smi directly — no shell, no `timeout` dependency.
-                    match std::process::Command::new(&resolved_path)
-                        .arg("-s")
-                        .stdout(std::process::Stdio::piped())
-                        .stderr(std::process::Stdio::null())
-                        .output()
-                    {
-                        Ok(out) if out.status.success() => {
-                            let json_str = String::from_utf8_lossy(&out.stdout);
-
-                            // Retain the verbatim tt-smi output for snapshot_json()
-                            // (the --serve relay), regardless of what the SMBUS
-                            // parse below finds — this is exactly what tt-smi
-                            // printed, so there's nothing to fabricate. Off the
-                            // render hot path: this lock is only ever touched by
-                            // this background thread (writer) and an occasional
-                            // snapshot_json() caller (reader), never per-frame.
-                            if let Ok(mut guard) = last_raw.lock() {
-                                *guard = Some(json_str.to_string());
-                            }
-
-                            // Single parse pass (SMBUS + firmware/limits/PCIe/
-                            // board power), re-keyed onto sysfs device indices by
-                            // bus id, then deposited for the render thread.
-                            publish_snapshot(
-                                &json_str,
-                                &bus_to_index,
-                                &smbus_shared,
-                                &device_meta_shared,
-                                &device_meta_stamp,
-                                &smbus_stamp,
-                                &smbus_generation,
-                            );
-                        }
-                        Ok(out) => {
-                            log::debug!("HybridBackend: tt-smi exited {:?}", out.status.code());
-                        }
-                        Err(e) => {
-                            log::warn!("HybridBackend: failed to run tt-smi: {}", e);
-                            // Back off longer on spawn failure to avoid busy-looping.
-                            thread::sleep(Duration::from_secs(5));
-                            continue;
-                        }
-                    }
-
-                    // Sleep 1.5 s between polls, checking stop flag every 50 ms
-                    // so Drop doesn't block waiting for the full sleep to expire.
-                    let poll_start = std::time::Instant::now();
-                    while poll_start.elapsed() < Duration::from_millis(1500) {
-                        if stop_flag.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        thread::sleep(Duration::from_millis(50));
-                    }
-                }
-
-                log::debug!("HybridBackend: SMBUS reader thread exiting");
-            })
-            .expect("failed to spawn hybrid-smbus-reader thread");
-
-        *self.refresh_handle.lock().unwrap() = Some(handle);
+        self.start_reader(resolved_path);
 
         log::info!(
             "HybridBackend: ready ({} sysfs devices; SMBUS data arriving in background)",
@@ -1759,5 +1771,122 @@ mod tests {
             Some(0.72),
             "voltage must be preserved from sysfs"
         );
+    }
+}
+
+/// A fake `tt-smi` that answers only when the test lets it, behind the same
+/// `Command` the reader thread runs. It proves that start-up does not wait for
+/// tt-smi and that its fields join the sysfs values when it answers.
+#[cfg(all(test, unix))]
+mod slow_tt_smi_tests {
+    use super::*;
+    use crate::models::{Device, Telemetry};
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::mpsc;
+    use std::time::Instant;
+
+    /// Upper bound for waiting on an event; each wait ends as soon as the
+    /// event happens. A deadlock guard only, not a timing assertion.
+    const DEADLINE: Duration = Duration::from_secs(20);
+
+    fn backend_with_one_chip() -> HybridBackend {
+        let mut b = HybridBackend::new("unused");
+        b.sysfs.push_device_for_test(Device::new(
+            0,
+            "p300c".to_string(),
+            "0000:01:00.0".to_string(),
+            String::new(),
+        ));
+        b.sysfs.insert_telemetry_for_test(
+            0,
+            Telemetry {
+                power: Some(21.0),
+                current: None,
+                voltage: Some(0.72),
+                asic_temperature: Some(40.0),
+                aiclk: None,
+                heartbeat: None,
+                timestamp: chrono::Utc::now(),
+                board_power: None,
+            },
+        );
+        b.bus_to_index = b.sysfs_bus_index();
+        b
+    }
+
+    /// Write the fake: it waits until `gate` exists, then prints `json`.
+    fn fake_tt_smi(dir: &std::path::Path, json: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let gate = dir.join("gate");
+        let doc = dir.join("snapshot.json");
+        std::fs::write(&doc, json).unwrap();
+        let script = dir.join("tt-smi");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nwhile [ ! -e '{}' ]; do sleep 0.02; done\ncat '{}'\n",
+                gate.display(),
+                doc.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        (script, gate)
+    }
+
+    #[test]
+    fn start_up_does_not_wait_for_tt_smi_and_its_fields_join_on_arrival() {
+        let td = tempfile::tempdir().unwrap();
+        let json = r#"{"device_info": [{
+            "board_info": {"bus_id": "0000:01:00.0", "board_type": "p300c"},
+            "telemetry": {"power": " 21.0", "board_power": " 96.0"},
+            "smbus_telem": {"BOARD_ID_LOW": "0xCARD01", "AICLK": "800"},
+            "firmwares": {"fw_bundle_version": "19.11.0.0"}
+        }]}"#;
+        let (script, gate) = fake_tt_smi(td.path(), json);
+
+        // Start the reader on a helper thread, so a reader that waited for
+        // tt-smi fails this test on the deadline instead of hanging it.
+        let mut b = backend_with_one_chip();
+        let (tx, rx) = mpsc::channel();
+        let path = script.to_string_lossy().into_owned();
+        std::thread::spawn(move || {
+            b.start_reader(path);
+            let _ = tx.send(b);
+        });
+        let mut b = rx
+            .recv_timeout(DEADLINE)
+            .expect("start_reader returned while tt-smi was still silent");
+
+        // tt-smi has not answered (the gate is closed): the first update
+        // serves sysfs alone.
+        b.update().unwrap();
+        assert_eq!(b.smbus_generation.load(Ordering::Acquire), 0);
+        assert_eq!(b.backend_info(), "Hybrid (1 via sysfs, no tt-smi)");
+        assert_eq!(b.telemetry(0).and_then(|t| t.asic_temperature), Some(40.0));
+        assert!(b.devices()[0].firmwares.is_none());
+
+        // Let tt-smi answer and wait for the deposit.
+        std::fs::write(&gate, "").unwrap();
+        let t = Instant::now();
+        while b.smbus_generation.load(Ordering::Acquire) == 0 && t.elapsed() < DEADLINE {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            b.smbus_generation.load(Ordering::Acquire) > 0,
+            "tt-smi answered"
+        );
+        b.update().unwrap();
+
+        // Its fields joined; what sysfs showed is still there and the same.
+        assert_eq!(b.devices().len(), 1);
+        assert_eq!(b.backend_info(), "Hybrid (1 via sysfs+json)");
+        assert!(b.devices()[0].firmwares.is_some(), "firmware joined");
+        assert_eq!(b.telemetry(0).and_then(|t| t.board_power), Some(96.0));
+        assert_eq!(
+            b.telemetry(0).and_then(|t| t.asic_temperature),
+            Some(40.0),
+            "the sysfs temperature was not reset"
+        );
+        assert_eq!(b.devices()[0].board_type, "p300c");
     }
 }

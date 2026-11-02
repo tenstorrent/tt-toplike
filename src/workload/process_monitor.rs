@@ -10,9 +10,20 @@
 //! It also detects processes using hugepages or Tenstorrent-related memory
 //! mappings, which indicates shared resource usage even without direct device
 //! file access.
+//!
+//! The driver's own holder lists (`/proc/driver/tenstorrent/<N>/pids`) are
+//! read first, so processes of other users and in containers are attributed
+//! too, without reading their `fd/`. The device numbers are mapped to the
+//! backend's indices with a [`DeviceMap`]. See
+//! [`crate::workload::device_holders`] for the sources, the map and the
+//! bounds.
 
-use procfs::process::{FDTarget, Process};
+use crate::workload::device_holders::{
+    self, DeviceMap, FdRead, Holder, HolderSource, ProcHolders, ScanCounts,
+};
+use procfs::process::Process;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Information about a process using Tenstorrent devices
 #[derive(Debug, Clone)]
@@ -61,52 +72,101 @@ pub struct ProcessMonitor {
     /// Processes using hugepages but no specific device file
     /// (e.g., Docker containers, shared memory workloads)
     shared_processes: Vec<ProcessInfo>,
+    /// The `/proc` to read. `/proc` itself, except in tests.
+    root: PathBuf,
+    /// True when the last scan read the driver's holder lists, so it saw
+    /// every process holding a device, whoever owns it.
+    complete: bool,
+    /// Why the last scan's answer may be partial.
+    counts: ScanCounts,
 }
+
+/// Most processes one scan looks at. The rest are counted in
+/// [`ScanCounts::proc_truncated`].
+pub const MAX_PROCESSES: usize = 32768;
 
 impl ProcessMonitor {
     /// Create a new process monitor
     pub fn new() -> Self {
+        Self::with_root("/proc")
+    }
+
+    /// A monitor that reads `root` as its `/proc`. Tests point it at a temp
+    /// directory laid out like `/proc`.
+    pub fn with_root(root: impl Into<PathBuf>) -> Self {
         ProcessMonitor {
             device_processes: HashMap::new(),
             shared_processes: Vec::new(),
+            root: root.into(),
+            complete: false,
+            counts: ScanCounts::default(),
         }
     }
 
-    /// Update the process list by scanning `/proc`
-    ///
-    /// This method scans all processes in `/proc/[pid]/` and checks for:
-    /// - Open file descriptors to `/dev/tenstorrent/*` devices
-    /// - Hugepages usage
-    /// - Tenstorrent-related memory mappings
-    ///
-    /// This is relatively lightweight (<10ms typically) but should be called
-    /// every few seconds rather than every frame to avoid overhead.
+    /// Update the process list by scanning `/proc`, using each device number
+    /// as its index. See [`Self::update_mapped`].
     pub fn update(&mut self) {
+        self.update_mapped(&DeviceMap::identity());
+    }
+
+    /// Update the process list by scanning `/proc`.
+    ///
+    /// A process holds a device when the driver lists it in
+    /// `/proc/driver/tenstorrent/<N>/pids` (any user) or when one of its
+    /// `fd` links points at `/dev/tenstorrent/<N>` (processes this user may
+    /// read). `map` turns each device number into the backend's index; see
+    /// [`crate::workload::device_holders`]. Processes using hugepages or
+    /// Tenstorrent-related memory mappings are also recorded, for the
+    /// processes this user may read.
+    ///
+    /// A process that exits during the scan is skipped and counted. A
+    /// process owned by another user is never read beyond the world-readable
+    /// `stat` and `cmdline`, and only when the driver lists it.
+    pub fn update_mapped(&mut self, map: &DeviceMap) {
         // Clear previous state
         self.device_processes.clear();
         self.shared_processes.clear();
+        self.counts = ScanCounts::default();
+
+        let driver = device_holders::read_driver_pids(&self.root);
+        self.complete = driver.is_some();
+        let driver = driver.unwrap_or_default();
 
         // Attempt to scan all processes, but don't fail on errors
         // Some processes may be inaccessible due to permissions
-        match procfs::process::all_processes() {
+        match procfs::process::all_processes_with_root(&self.root) {
             Ok(processes) => {
-                for process_result in processes {
-                    if let Ok(process) = process_result {
-                        // Skip processes this user does not own BEFORE touching
-                        // `fd()` or `maps()`. Both are denied cross-uid, and a
-                        // denied open is an audited event on a STIG host while
-                        // this loop runs every 2 s over every process. The old
-                        // "silently skip if permission denied" was silent to us
-                        // but not to auditd. See `crate::workload::proc_access`.
-                        if !crate::workload::proc_access::may_read(process.pid()) {
-                            continue;
-                        }
-                        // A denied open is silent to this program but not to
-                        // the host: auditd can log each one. Ownership and the
-                        // denial cache are checked above; the scan itself
-                        // still tolerates a refusal, which it then remembers.
-                        let _ = self.scan_process(&process);
+                for (i, process_result) in processes.enumerate() {
+                    if i == MAX_PROCESSES {
+                        self.counts.proc_truncated += 1;
+                        continue;
                     }
+                    let Ok(process) = process_result else {
+                        // Listed, then gone before it could be opened.
+                        self.counts.vanished += 1;
+                        continue;
+                    };
+                    let held = driver.get(&process.pid()).cloned().unwrap_or_default();
+                    // Skip processes this user does not own BEFORE touching
+                    // `fd()` or `maps()`. Both are denied cross-uid, and a
+                    // denied open is an audited event on a STIG host while
+                    // this loop runs every 2 s over every process. The old
+                    // "silently skip if permission denied" was silent to us
+                    // but not to auditd. See `crate::workload::proc_access`.
+                    if !crate::workload::proc_access::may_read_in(&self.root, process.pid()) {
+                        self.counts.foreign += 1;
+                        if !held.is_empty() {
+                            // The driver says it holds a device: record it from
+                            // the world-readable `stat` and `cmdline` alone.
+                            self.record_foreign(&process, &held, map);
+                        }
+                        continue;
+                    }
+                    // A denied open is silent to this program but not to
+                    // the host: auditd can log each one. Ownership and the
+                    // denial cache are checked above; the scan itself
+                    // still tolerates a refusal, which it then remembers.
+                    self.scan_process(&process, &held, map);
                 }
             }
             Err(e) => {
@@ -119,38 +179,88 @@ impl ProcessMonitor {
         }
     }
 
-    /// Scan a single process for Tenstorrent device usage
-    fn scan_process(&mut self, process: &Process) -> Result<(), Box<dyn std::error::Error>> {
-        let mut device_indices = Vec::new();
+    /// Whether the last scan saw every holder (it read the driver's lists).
+    pub fn complete(&self) -> bool {
+        self.complete
+    }
+
+    /// Why the last scan's answer may be partial.
+    pub fn counts(&self) -> ScanCounts {
+        self.counts
+    }
+
+    /// Record a process another user owns that the driver lists as a holder.
+    fn record_foreign(&mut self, process: &Process, held: &[u32], map: &DeviceMap) {
+        let Ok(stat) = process.stat() else {
+            self.counts.vanished += 1;
+            return;
+        };
+        let cmdline = process
+            .cmdline()
+            .ok()
+            .filter(|a| !a.is_empty())
+            .map(|a| a.join(" "))
+            .unwrap_or_else(|| format!("[pid {}]", process.pid()));
+        self.push(ProcessInfo {
+            pid: process.pid(),
+            name: stat.comm,
+            cmdline: cmdline.chars().take(60).collect(),
+            device_indices: map.indices_for(held),
+            hugepages_1g: 0,
+            hugepages_2m: 0,
+            has_tt_mapping: false,
+        });
+    }
+
+    /// File a process under each device it holds, or as a shared user.
+    fn push(&mut self, info: ProcessInfo) {
+        if info.device_indices.is_empty() {
+            self.shared_processes.push(info);
+            return;
+        }
+        for &idx in &info.device_indices {
+            self.device_processes
+                .entry(idx)
+                .or_default()
+                .push(info.clone());
+        }
+    }
+
+    /// Scan a single process for Tenstorrent device usage. `held` is what
+    /// the driver lists for it (device numbers).
+    fn scan_process(&mut self, process: &Process, held: &[u32], map: &DeviceMap) {
+        let mut numbers: Vec<u32> = held.to_vec();
         let mut hugepages_1g = 0;
         let mut hugepages_2m = 0;
         let mut has_tt_mapping = false;
 
-        // Check file descriptors for /dev/tenstorrent/* devices
-        let fds = process.fd();
-        if matches!(fds, Err(procfs::ProcError::PermissionDenied(_))) {
-            // We own this pid but the kernel's ptrace-style access check still
-            // refuses `fd/`; `maps` is refused for the same reason, so skip it
-            // too and remember the pid so later scans do not retry for a while.
-            crate::workload::proc_access::note_denied(process.pid());
-            return Ok(());
+        // Check file descriptors for /dev/tenstorrent/* devices. Links are
+        // read with `readlink` only; nothing is opened.
+        let (fds, truncated) =
+            device_holders::fd_numbers(&self.root.join(process.pid().to_string()).join("fd"));
+        if truncated {
+            self.counts.fd_truncated += 1;
         }
-        if let Ok(fds) = fds {
-            for fd_result in fds {
-                if let Ok(fd_info) = fd_result {
-                    // Check if FD points to /dev/tenstorrent/*
-                    if let FDTarget::Path(path) = fd_info.target {
-                        let path_str = path.to_string_lossy();
-                        if path_str.starts_with("/dev/tenstorrent/") {
-                            // Extract device index: /dev/tenstorrent/0 -> 0
-                            if let Some(idx_str) = path_str.strip_prefix("/dev/tenstorrent/") {
-                                if let Ok(idx) = idx_str.parse::<usize>() {
-                                    if !device_indices.contains(&idx) {
-                                        device_indices.push(idx);
-                                    }
-                                }
-                            }
-                        }
+        match fds {
+            FdRead::Denied => {
+                // We own this pid but the kernel's ptrace-style access check still
+                // refuses `fd/`; `maps` is refused for the same reason, so skip it
+                // too and remember the pid so later scans do not retry for a while.
+                crate::workload::proc_access::note_denied(process.pid());
+                self.counts.denied += 1;
+                if !held.is_empty() {
+                    self.record_foreign(process, held, map);
+                }
+                return;
+            }
+            FdRead::Gone => {
+                self.counts.vanished += 1;
+                return;
+            }
+            FdRead::Numbers(found) => {
+                for n in found {
+                    if !numbers.contains(&n) {
+                        numbers.push(n);
                     }
                 }
             }
@@ -184,7 +294,12 @@ impl ProcessMonitor {
         }
 
         // If process uses tenstorrent devices OR has hugepages/TT mappings, record it
-        if !device_indices.is_empty() || hugepages_1g > 0 || hugepages_2m > 0 || has_tt_mapping {
+        if !numbers.is_empty() || hugepages_1g > 0 || hugepages_2m > 0 || has_tt_mapping {
+            let Ok(stat) = process.stat() else {
+                // It exited between the fd read and now.
+                self.counts.vanished += 1;
+                return;
+            };
             let cmdline = process
                 .cmdline()
                 .ok()
@@ -197,37 +312,40 @@ impl ProcessMonitor {
                 })
                 .unwrap_or_else(|| format!("[pid {}]", process.pid()));
 
-            let name = process
-                .stat()
-                .ok()
-                .map(|s| s.comm)
-                .unwrap_or_else(|| "unknown".to_string());
-
-            let proc_info = ProcessInfo {
+            self.push(ProcessInfo {
                 pid: process.pid(),
-                name,
+                name: stat.comm,
                 cmdline: cmdline.chars().take(60).collect(), // Truncate long commands
-                device_indices: device_indices.clone(),
+                device_indices: map.indices_for(&numbers),
                 hugepages_1g,
                 hugepages_2m,
                 has_tt_mapping,
-            };
+            });
+        }
+    }
 
-            // Add to device-specific lists
-            if !device_indices.is_empty() {
-                for &idx in &device_indices {
-                    self.device_processes
-                        .entry(idx)
-                        .or_insert_with(Vec::new)
-                        .push(proc_info.clone());
-                }
-            } else if hugepages_1g > 0 || hugepages_2m > 0 || has_tt_mapping {
-                // Process uses hugepages/TT resources but no specific device file
-                self.shared_processes.push(proc_info);
+    /// Every process holding a device, for blending with tt-smi.
+    pub fn holders(&self, map: &DeviceMap) -> ProcHolders {
+        let mut by_pid: std::collections::BTreeMap<i32, &ProcessInfo> = Default::default();
+        for list in self.device_processes.values() {
+            for p in list {
+                by_pid.entry(p.pid).or_insert(p);
             }
         }
-
-        Ok(())
+        ProcHolders {
+            holders: by_pid
+                .into_values()
+                .map(|p| Holder {
+                    pid: p.pid as i64,
+                    devices: p.device_indices.clone(),
+                    name: p.name.clone(),
+                    cmdline: p.cmdline.clone(),
+                    source: HolderSource::Proc,
+                })
+                .collect(),
+            complete: self.complete,
+            map: map.clone(),
+        }
     }
 
     /// Get the list of processes using a specific device
@@ -325,5 +443,143 @@ mod proc_guard_tests {
             !is_denied_for_test(pid),
             "a /proc read was attempted on a foreign pid"
         );
+    }
+}
+
+/// The scan against a fake `/proc`: driver lists, `fd` links, a refused `fd/`
+/// directory and a process that vanished during the scan. Pids are large so
+/// the process-wide denial cache never meets a real pid.
+#[cfg(all(test, target_os = "linux"))]
+mod fake_root_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::os::unix::fs::{symlink, PermissionsExt};
+    use std::path::Path;
+
+    /// A `/proc/<pid>` with a `stat`, a `cmdline` and `fd` links.
+    fn fake_pid(root: &Path, pid: i32, comm: &str, links: &[&str]) {
+        let d = root.join(pid.to_string());
+        fs::create_dir_all(d.join("fd")).unwrap();
+        // 52 fields, as a current kernel writes them.
+        let rest: Vec<String> = (0..50)
+            .map(|i| if i == 0 { "S".into() } else { "0".into() })
+            .collect();
+        fs::write(
+            d.join("stat"),
+            format!("{pid} ({comm}) {}\n", rest.join(" ")),
+        )
+        .unwrap();
+        fs::write(d.join("cmdline"), format!("{comm}\0--serve\0")).unwrap();
+        for (i, l) in links.iter().enumerate() {
+            symlink(l, d.join("fd").join((i + 3).to_string())).unwrap();
+        }
+    }
+
+    fn driver(root: &Path, lists: &[(u32, &[i32])]) {
+        for (n, pids) in lists {
+            let d = root.join("driver/tenstorrent").join(n.to_string());
+            fs::create_dir_all(&d).unwrap();
+            let text: String = pids.iter().map(|p| format!("{p}\n")).collect();
+            fs::write(d.join("pids"), text).unwrap();
+        }
+    }
+
+    fn map_1_to_3() -> DeviceMap {
+        let numbers: BTreeMap<u32, String> = [
+            (0, "0000:01:00.0".to_string()),
+            (1, "0000:04:00.0".to_string()),
+        ]
+        .into();
+        DeviceMap::from_parts(
+            &numbers,
+            &[("0000:01:00.0".into(), 0), ("0000:04:00.0".into(), 3)],
+        )
+    }
+
+    #[test]
+    fn fd_links_and_driver_lists_give_mapped_devices() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        fake_pid(
+            root,
+            4_100_001,
+            "vllm",
+            &["/dev/tenstorrent/1", "/dev/null"],
+        );
+        fake_pid(root, 4_100_002, "bash", &["/dev/pts/0"]);
+        // Only the driver knows this one holds device 0 (its fd links say
+        // nothing, as for a process whose fds we could not read).
+        fake_pid(root, 4_100_003, "worker", &[]);
+        driver(root, &[(0, &[4_100_003]), (1, &[4_100_001])]);
+
+        let mut pm = ProcessMonitor::with_root(root);
+        pm.update_mapped(&map_1_to_3());
+        assert!(pm.complete(), "the driver lists were read");
+        let holders = pm.holders(&map_1_to_3()).holders;
+        let got: Vec<(i64, Vec<usize>, String)> = holders
+            .iter()
+            .map(|h| (h.pid, h.devices.clone(), h.name.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (4_100_001, vec![3], "vllm".to_string()),
+                (4_100_003, vec![0], "worker".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn without_driver_lists_the_answer_is_marked_incomplete() {
+        let td = tempfile::tempdir().unwrap();
+        fake_pid(td.path(), 4_100_011, "train", &["/dev/tenstorrent/0"]);
+        let mut pm = ProcessMonitor::with_root(td.path());
+        pm.update();
+        assert!(!pm.complete());
+        assert_eq!(
+            pm.holders(&DeviceMap::identity()).holders[0].devices,
+            vec![0]
+        );
+    }
+
+    #[test]
+    fn a_process_that_vanished_mid_scan_is_skipped_and_counted() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        fake_pid(root, 4_100_021, "vllm", &["/dev/tenstorrent/0"]);
+        // Listed in /proc and by the driver, but its files are already gone.
+        fs::create_dir_all(root.join("4100022")).unwrap();
+        driver(root, &[(0, &[4_100_021, 4_100_022])]);
+        let mut pm = ProcessMonitor::with_root(root);
+        pm.update();
+        let pids: Vec<i64> = pm
+            .holders(&DeviceMap::identity())
+            .holders
+            .iter()
+            .map(|h| h.pid)
+            .collect();
+        assert_eq!(pids, vec![4_100_021]);
+        assert_eq!(pm.counts().vanished, 1);
+    }
+
+    #[test]
+    fn a_refused_fd_directory_is_counted_and_the_driver_still_names_it() {
+        let td = tempfile::tempdir().unwrap();
+        let root = td.path();
+        fake_pid(root, 4_100_031, "locked", &["/dev/tenstorrent/1"]);
+        let fd = root.join("4100031/fd");
+        fs::set_permissions(&fd, fs::Permissions::from_mode(0o000)).unwrap();
+        driver(root, &[(1, &[4_100_031])]);
+        let mut pm = ProcessMonitor::with_root(root);
+        pm.update_mapped(&map_1_to_3());
+        fs::set_permissions(&fd, fs::Permissions::from_mode(0o700)).unwrap();
+        crate::workload::proc_access::clear_denied_for_test(4_100_031);
+        let holders = pm.holders(&map_1_to_3()).holders;
+        assert_eq!(holders.len(), 1);
+        assert_eq!(holders[0].devices, vec![3]);
+        if unsafe { libc::geteuid() } != 0 {
+            assert_eq!(pm.counts().denied, 1, "the refusal is counted");
+        }
     }
 }

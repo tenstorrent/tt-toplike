@@ -35,8 +35,11 @@ pub use bench::BenchResult;
 pub mod chip_portrait;
 pub mod perf;
 pub use perf::PerfMeter;
+#[cfg(test)]
+mod arcade_traffic;
 pub(crate) mod proc_scan;
 pub(crate) mod reset_status;
+pub(crate) mod splash;
 pub mod throttle;
 pub use throttle::ThrottleState;
 mod backdrop_bus;
@@ -800,6 +803,7 @@ pub fn start_bus_after_panic_hook(
 }
 
 pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
+    crate::startup_log::begin();
     // Check if we have a TTY available
     if !std::io::stdout().is_terminal() {
         return Err(TTTopError::Terminal(
@@ -808,6 +812,10 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
                 .to_string()
         ));
     }
+
+    // The start-up splash (`splash`): it draws only if the first frame takes
+    // longer than 150 ms, and the guard gives the screen back on an error.
+    let splash_guard = splash::start();
 
     // Create backend config
     let config = BackendConfig::new()
@@ -822,10 +830,16 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
 
     // Create initial backend
     let backend_type = cli.effective_backend();
+    splash::set_step(if backend_type == BackendType::Json {
+        splash::Step::ReadingTtSmi
+    } else {
+        splash::Step::LookingForChips
+    });
     let mut backend =
         factory::create_backend(backend_type, config.clone(), cli).map_err(TTTopError::Backend)?;
 
     log::info!("TUI started with {:?} backend", backend_type);
+    crate::startup_log::phase("backend ready");
 
     // Disable stderr log output BEFORE entering raw mode. Once the terminal is
     // in raw mode, a stray `\n` from a log line doesn't return the cursor to
@@ -840,6 +854,7 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // to a dead socket) reports on a normal terminal.
     let bus_opts =
         crate::bus::tui_bus::TuiBusOptions::from_cli(cli, backend_type, &backend.backend_info());
+    splash::set_step(splash::Step::StartingBus);
     let mut tui_bus = match start_bus_after_panic_hook(&bus_opts, backend.as_ref()) {
         Ok(b) => b,
         Err(e) => {
@@ -855,6 +870,7 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // to the status line (see `cmd_message` in `run_app`), and a bad
     // `[arcade]` keeps the default layout. Pinned by
     // `config_read_tests::the_config_is_read_before_raw_mode`.
+    crate::startup_log::phase("bus started");
     let mut loaded_config = crate::config::load_config();
     // `--arcade-layout NAME` wins over `[arcade] layout`.
     crate::config::choose_layout(&mut loaded_config, cli.arcade_layout.as_deref());
@@ -882,6 +898,8 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         .clear()
         .map_err(|e| TTTopError::Terminal(e.to_string()))?;
 
+    splash::handover();
+    crate::startup_log::phase("alt screen");
     // Create app state and run
     let res = run_app(
         &mut terminal,
@@ -892,6 +910,10 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         &mut tui_bus,
         &loaded_config,
     );
+
+    // Stop the splash if no frame was ever drawn, before the screen is
+    // restored below.
+    drop(splash_guard);
 
     // Re-enable stderr output before exiting
     crate::logging::enable_stderr();
@@ -983,36 +1005,33 @@ fn run_app(
 
     // The 2-second process scan (see `proc_scan`). `Scanner` owns the
     // cross-platform sysinfo process listing and, on Linux with
-    // `linux-procfs`, the /proc TT attribution and the serving probes. One
-    // synchronous scan here fills the panels for the first frame; after that
-    // the scanner moves to a worker thread (`scan_handle`, below) so the
-    // ~135 ms refresh never runs on this render/input thread.
-    let mut scanner = proc_scan::Scanner::new();
-    let initial_scan = {
-        use proc_scan::Scan;
-        scanner.scan(&proc_scan::ScanRequest {
-            // TT-attributed backends (Sysfs/Hybrid/Json/Luwen — anything but
-            // --host/--mock) show the TT-filtered list from the first frame.
-            only_tt: crate::cli::backend_shows_only_tt(backend_type),
-            // The prober has no verdicts before its first cycle.
-            verdicts: std::collections::HashMap::new(),
-            // No reset scan at start-up, as before.
-            want_processes: false,
-            want_trainer: false,
-        })
-    };
+    // `linux-procfs`, the /proc TT attribution and the serving probes. It
+    // runs on a worker thread (`scan_handle`) from the start, so the first
+    // frame does not wait for it: the first scan is asked for here and its
+    // result is applied by the loop like every later one, a few hundred
+    // milliseconds in (see `startup` for the measurements).
+    crate::ui::tui::splash::set_step(crate::ui::tui::splash::Step::ScanningProcesses);
+    let mut scan_handle = proc_scan::ScannerHandle::spawn_with(proc_scan::Scanner::new);
+    scan_handle.request(proc_scan::ScanRequest {
+        // TT-attributed backends (Sysfs/Hybrid/Json/Luwen — anything but
+        // --host/--mock) show the TT-filtered list.
+        only_tt: crate::cli::backend_shows_only_tt(backend_type),
+        // The prober has no verdicts before its first cycle.
+        verdicts: std::collections::HashMap::new(),
+        // No reset scan and no trainer search in the first scan, as before.
+        want_processes: false,
+        want_trainer: false,
+        devices: proc_scan::device_keys(backend.devices()),
+    });
     // Background liveness prober: confirms server runtimes (vllm, ollama) via
-    // their local API off the render path. First cycle has no verdicts yet, so
-    // rows() relies on the cheap snapshot tier until the worker reports back.
+    // their local API off the render path. It gets its first targets when
+    // the first scan result is applied.
     let liveness_prober = crate::workload::LivenessProber::spawn();
-    liveness_prober.submit(initial_scan.runtimes);
     // Background inference-server monitor: probes detected TT inference-server
-    // containers (docker stats + /health) off the render path. Not yet read by
-    // any panel — used by the [i] panel in the next task.
+    // containers (docker stats + /health) off the render path. Its first
+    // targets also come with the first scan result.
     #[cfg(target_os = "linux")]
     let inference_monitor = crate::workload::InferenceServerMonitor::spawn();
-    #[cfg(target_os = "linux")]
-    inference_monitor.submit(initial_scan.inference_servers);
     // Multi-model roster lines for the `[i]` view, recomputed each monitor tick
     // (in the InferenceMonitor update branch). Held here so the render pass —
     // which must reserve the same number of rows the snake was sized against —
@@ -1027,20 +1046,17 @@ fn run_app(
     // Background model-catalog refresher: curl-refreshes the compatibility
     // catalog off the render path; feeds the cold-trail starfield screensaver.
     let catalog_refresher = crate::workload::CatalogRefresher::spawn();
-    // Linux `/proc` builds also keep the start-up serving metrics; the
-    // loop's `serving_metrics` is seeded from them further down.
-    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-    let initial_serving_metrics = initial_scan.serving_metrics;
-    let mut proc_rows: Vec<ProcRow> = initial_scan.proc_rows;
-    // From here on every scan runs on the worker. The loop asks for one at
-    // the 2 s cadence and applies each result when it arrives.
-    let mut scan_handle = proc_scan::ScannerHandle::spawn(scanner);
+    // Empty until the first scan result is applied.
+    let mut proc_rows: Vec<ProcRow> = Vec::new();
+    // The loop asks for the next scan 2 s from now and applies each result
+    // when it arrives.
     let mut last_proc_rows_update = Instant::now();
 
     // Host CPU / RAM monitoring — sampled on the same 2s cadence as processes.
     // Cross-platform: the bars are useful on macOS too. sysinfo needs two calls
-    // separated in time to compute meaningful CPU%; we call it twice at init
-    // (with a tiny sleep) so the first frame shows real data rather than zeros.
+    // separated in time to compute a CPU%. The first is made here; the second
+    // when the first scan result arrives (`host_cpu_primed`), so start-up
+    // does not sleep for it. Until then the CPU bar reads 0.
     let (mut sys_monitor, mut host_cpu_pct, mut host_mem_used, mut host_mem_total) = {
         use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
         let mut s = System::new_with_specifics(
@@ -1050,16 +1066,14 @@ fn run_app(
         );
         s.refresh_cpu_usage();
         s.refresh_memory();
-        // A brief pause lets the kernel accumulate CPU ticks for a real sample.
-        std::thread::sleep(Duration::from_millis(200));
-        s.refresh_cpu_usage();
-        s.refresh_memory();
         let cpu = s.global_cpu_usage();
         let used = s.used_memory();
         let tot = s.total_memory();
         (s, cpu, used, tot)
     };
+    let mut host_cpu_primed = false;
 
+    crate::startup_log::phase("loop setup");
     // UI state - initialize from CLI --mode option if provided
     let mut display_mode = cli
         .mode
@@ -1296,7 +1310,7 @@ fn run_app(
     let mut inference_engine = InferenceEngine::new();
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut serving_metrics: std::collections::HashMap<i32, ServingMetrics> =
-        initial_serving_metrics;
+        std::collections::HashMap::new();
     // Cross-platform: the unified render path reads these. They're only mutated
     // by the Linux-gated process-navigation / kill key handlers; off-Linux they
     // stay at their defaults (cursor 0, no kill dialog).
@@ -1363,6 +1377,7 @@ fn run_app(
     let mut last_takeover_tick = Instant::now();
 
     loop {
+        let iter_start = Instant::now();
         // Decide whether to advance animations this iteration.
         // nvtop-style trick: input always polls at INPUT_POLL_MS (16 ms) so
         // keystrokes are never delayed.  Viz updates are gated separately so
@@ -2176,7 +2191,10 @@ fn run_app(
             // `remote_proc_rows` (computed above) is `None` under `--remote` —
             // i.e. the list below is still LOCAL processes, not the remote
             // box's. See `remote_local_fallback_note`.
-            let remote_note = remote_local_fallback_note(backend_type, has_remote_proc_rows);
+            // Before the first scan lands (`host_cpu_primed` is set then)
+            // the panel says it is scanning (`SCANNING_NOTE`).
+            let remote_note = remote_local_fallback_note(backend_type, has_remote_proc_rows)
+                .or((!host_cpu_primed).then_some(SCANNING_NOTE));
             // The rows the panel actually renders this frame: the remote list
             // when present, else the local scan.
             let display_proc_rows: &[ProcRow] = remote_proc_rows.as_deref().unwrap_or(&proc_rows);
@@ -2207,6 +2225,8 @@ fn run_app(
                 backdrop_settings.choice(view_name(display_mode)),
                 shared_backdrop.estimated(),
             );
+            // The splash (if it is up) stops and clears before the first frame.
+            splash::first_frame();
             let draw_start = Instant::now();
             terminal
                 .draw(|f| {
@@ -2359,6 +2379,7 @@ fn run_app(
                 })
                 .map_err(|e| TTTopError::Terminal(e.to_string()))?;
             perf_meter.record_frame(draw_start.elapsed());
+            crate::startup_log::frame(draw_start.elapsed(), draw_start - iter_start);
         } // end if do_draw
 
         // Input always polls at 16 ms so keystrokes respond immediately.
@@ -3583,6 +3604,21 @@ fn run_app(
                 &mut serving_metrics,
             );
             let scanned_processes = applied.processes;
+            // The second CPU sample, taken once, when the first scan lands.
+            if !std::mem::replace(&mut host_cpu_primed, true) {
+                sys_monitor.refresh_cpu_usage();
+                host_cpu_pct = sys_monitor.global_cpu_usage();
+            }
+            // The Wafer Waffler's process events, from this machine's /proc
+            // (never on --mock or --remote, whose chips are not these).
+            if crate::cli::backend_shows_only_tt(backend_type) {
+                for dv in [die3d.as_mut(), insights_inset.as_mut()]
+                    .into_iter()
+                    .flatten()
+                {
+                    dv.set_proc_holders(applied.holders.clone());
+                }
+            }
             // The worker's trainer search result: for Arcade's lane, and for the
             // rotation's idea of whether Training has anything to show.
             rotation_activity.note_trainer(&applied.trainer);
@@ -3724,6 +3760,7 @@ fn run_app(
                 // if one exists. The worker finds it (the `maps` reads must
                 // stay off this thread).
                 want_trainer: scan_wants_trainer(display_mode, rotate_enabled, backend_type),
+                devices: proc_scan::device_keys(backend.devices()),
             });
 
             sys_monitor.refresh_cpu_usage();
@@ -7928,6 +7965,11 @@ fn bar_color(frac: f32) -> ratatui::style::Color {
 /// is attached (`chip_flags`, see `grid_bus::ChipFlags::process_row`), so a
 /// headless host's model shows; otherwise, on Linux, from a matching
 /// `serving_metrics` entry (port / health / model / tok-s).
+/// The process panel's note before the first process scan has landed. It
+/// travels in the `remote_note` slot, shows as the empty-state line instead
+/// of "No processes ...", and is not added to the header.
+const SCANNING_NOTE: &str = "scanning processes";
+
 fn render_process_panel(
     f: &mut Frame,
     area: Rect,
@@ -8004,7 +8046,7 @@ fn render_process_panel(
         Span::raw("  "),
         Span::styled("Processes", Style::default().fg(Color::Gray)),
     ];
-    if let Some(note) = remote_note {
+    if let Some(note) = remote_note.filter(|n| *n != SCANNING_NOTE) {
         header_spans.push(Span::styled(
             format!(" · {note}"),
             Style::default()
@@ -8015,7 +8057,9 @@ fn render_process_panel(
     lines.push(Line::from(header_spans));
 
     if rows.is_empty() {
-        let empty_msg = if tt_filtered {
+        let empty_msg = if remote_note == Some(SCANNING_NOTE) {
+            SCANNING_NOTE
+        } else if tt_filtered {
             "No processes using TT devices detected"
         } else {
             "nothing is feeding the chips right now"

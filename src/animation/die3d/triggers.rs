@@ -260,6 +260,13 @@ impl TriggerDetector {
         out
     }
 
+    /// Forget the process set, so the next [`Self::observe_processes`] call
+    /// only records its starting set again. Used when the source of the
+    /// process list changes (the first `/proc` scan joins tt-smi's list).
+    pub fn forget_processes(&mut self) {
+        self.procs = None;
+    }
+
     /// Observe which processes have which devices open: `(pid, device)` pairs.
     /// A trigger for each device where one opened or closed since the last
     /// call. The first call only records the starting set.

@@ -231,6 +231,7 @@ impl CommandRunner {
         if !matches!(args.first(), Some(&"status") | Some(&"env")) {
             return None;
         }
+        crate::startup_log::phase("gozer exec");
         let deadline = Instant::now() + timeout;
         let mut child = Command::new(&self.program)
             .args(args)
@@ -383,6 +384,7 @@ impl GozerSource {
             let spawned = std::thread::Builder::new()
                 .name("gozer-status".into())
                 .spawn(move || {
+                    crate::workload::background::lower_priority();
                     let _ = tx.send(runner.status_json(COMMAND_TIMEOUT));
                 });
             self.last_start = Some(now);

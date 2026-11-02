@@ -826,6 +826,77 @@ fn a_process_already_there_at_the_start_is_not_an_event() {
     assert!(v.director.cut_at().is_none());
 }
 
+/// `/proc` holders for the Wafer Waffler: one process, these devices.
+fn proc_holders(list: &[(i64, &[usize], &str)]) -> crate::workload::device_holders::ProcHolders {
+    use crate::workload::device_holders::{DeviceMap, Holder, HolderSource, ProcHolders};
+    ProcHolders {
+        holders: list
+            .iter()
+            .map(|(pid, devs, cmd)| Holder {
+                pid: *pid,
+                devices: devs.to_vec(),
+                name: cmd.split_whitespace().next().unwrap_or("").to_string(),
+                cmdline: cmd.to_string(),
+                source: HolderSource::Proc,
+            })
+            .collect(),
+        complete: true,
+        map: DeviceMap::identity(),
+    }
+}
+
+#[test]
+fn a_process_seen_by_proc_opening_a_device_cuts_the_camera() {
+    // The backend has no tt-smi list (Hybrid before tt-smi answers).
+    let b = two_boards();
+    let mut v = quiet_two_boards(&b);
+    // The first /proc list is history: what already runs is not an event.
+    v.set_proc_holders(proc_holders(&[(10, &[0], "vllm serve")]));
+    v.update(&b, None, 1.0);
+    assert!(
+        v.director.cut_at().is_none(),
+        "the first list made an event"
+    );
+    // A new holder on chip 2 (board 1) is.
+    v.set_proc_holders(proc_holders(&[
+        (10, &[0], "vllm serve"),
+        (11, &[2], "train.py"),
+    ]));
+    v.update(&b, None, 2.0);
+    assert_eq!(v.director.cut_at(), Some(2.0));
+    assert_eq!(v.switcher.scene_at(7.0), Scene::Board(1));
+}
+
+#[test]
+fn a_tt_smi_snapshot_run_holding_every_chip_is_not_an_event() {
+    let b = two_boards();
+    let mut v = quiet_two_boards(&b);
+    v.set_proc_holders(proc_holders(&[]));
+    v.update(&b, None, 1.0);
+    v.set_proc_holders(proc_holders(&[(
+        30,
+        &[0, 1, 2, 3],
+        "/venv/bin/python /usr/bin/tt-smi -s",
+    )]));
+    v.update(&b, None, 2.0);
+    assert!(v.director.cut_at().is_none(), "tt-smi -s cut the camera");
+}
+
+#[test]
+fn tt_smi_arriving_after_proc_with_the_same_processes_is_not_an_event() {
+    let mut b = two_boards();
+    let mut v = quiet_two_boards(&b);
+    v.set_proc_holders(proc_holders(&[(10, &[0], "vllm serve")]));
+    v.update(&b, None, 1.0);
+    // tt-smi's list lands, naming the same process.
+    b.open_device(10, 0);
+    v.update(&b, None, 2.0);
+    assert!(
+        v.director.cut_at().is_none(),
+        "the blend made an event of nothing new"
+    );
+}
+
 #[test]
 fn a_temperature_rise_cuts_with_chaos() {
     use camera::TransitionKind::Chaos;
