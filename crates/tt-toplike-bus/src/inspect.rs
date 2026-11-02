@@ -212,6 +212,18 @@ pub fn inspect(path: &Path, filter: &Filter, out: &mut impl Write) -> io::Result
         "records: {total} (skipped {} bad lines)",
         replay.bad_lines()
     )?;
+    if replay.hole_count() == 0 {
+        writeln!(out, "holes: 0 holes")?;
+    }
+    for h in replay.holes() {
+        let next = h.next_seq.map_or("none".to_string(), |n| format!("#{n}"));
+        writeln!(
+            out,
+            "holes: after #{}, next {next}: {}",
+            h.after_seq,
+            h.describe()
+        )?;
+    }
     writeln!(
         out,
         "by kind: sample {samples}, sweep {sweeps}, event {events_n}, raw {raws}, gap {gaps}"
@@ -340,5 +352,35 @@ mod tests {
     fn a_missing_log_is_an_error() {
         let mut out = Vec::new();
         assert!(inspect(Path::new("/nonexistent/bus"), &Filter::default(), &mut out).is_err());
+    }
+
+    #[test]
+    fn a_hole_in_the_log_is_printed() {
+        let dir = crate::testutil::TempDir::new("inspect-hole");
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let text = std::fs::read_to_string(FIXTURE).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        // Header + records 1..=10 in one segment, records 21.. in another.
+        std::fs::write(
+            dir.path().join("bus-1.jsonl"),
+            lines[..11].join("\n") + "\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("bus-21.jsonl"),
+            lines[21..].join("\n") + "\n",
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        inspect(dir.path(), &Filter::default(), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("holes: after #10, next #21"), "{text}");
+        assert!(text.contains("missing records 11..=20"), "{text}");
+        assert!(!text.contains("0 holes"), "{text}");
+    }
+
+    #[test]
+    fn an_intact_log_says_zero_holes() {
+        assert!(run(&Filter::default()).contains("holes: 0 holes"));
     }
 }

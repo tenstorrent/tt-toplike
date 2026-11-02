@@ -31,5 +31,5 @@ pub use record::{
     DecodeError, Event, Gap, Header, HeaderKind, Payload, Provenance, RawFrame, Record, Sample,
     Sweep, Value, SCHEMA_VERSION,
 };
-pub use replay::{ManualPlayClock, PlayClock, RealClock, Replay};
+pub use replay::{Hole, ManualPlayClock, PlayClock, RealClock, Replay};
 pub use world::{ModelPhase, ModelView, Reading, Snapshot, World};
