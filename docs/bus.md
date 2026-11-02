@@ -739,6 +739,56 @@ attached TUI refuses it too (`backend switch is disabled while attached to a bus
 backend would put mock chips at the PCI addresses real boards use, under the host's measured
 readings. A memory-only bus follows the switch.
 
+### Memory Castle on the bus
+
+Memory Castle reads the bus on every update through the arcade's reading step,
+`ArcadeFx::from_world`, so the two modes share the phase, history and away rules. The drawing
+is in `src/animation/castle_bus.rs`. Each chip's tower is its column of the canvas (the whole
+canvas with one chip). It draws:
+
+| What | Signal | Measured, derived or decoration |
+|---|---|---|
+| A purple wing raised from the bottom of the tower, with its empty cells filled `░`, while a model compiles or loads | `model_on_chip`, the phase and `model.progress` | the height is derived from the reported progress |
+| A purple band climbing the tower when there is no progress figure | the phase | decoration: it says the model is busy and does not say how far |
+| The tower lit teal on a change to `Ready`, grey on a change to `Down`, fading over 2 s | the phase, against the phase seen last | the change is read; the fade is decoration |
+| A banner on the tower's top row: name, phase, progress and tokens/s, `⚑` in front while it serves, `~` in front for an estimate (a bare `~` when no form fits) | `model.label`, `model.phase`, `model.progress`, `model.tokens_per_s`, `model.waiting` | as reported; `~` through `model_text_is_estimated` |
+| One `♞` per request (up to eight) climbing the tower over 1 s | `RequestsCompleted` for a model on the chip | the count is read; the positions and the climb are decoration |
+| A flickering `☼` for 0.8 s, in the `spark_rgb` colours (purple for a compile) | `Spark` and `KernelCompiled` naming the chip | the event is read; the position and flicker are decoration |
+| A red `╳` at the bottom of the tower under the channel's eighth of the width, healing through `╱` and `·` over 2 s | `EccTick` on the chip | the event and channel are read; the healing is decoration |
+| The tower shown reversed for 0.6 s | a new `reset_seq` for the chip | the reset is read |
+
+In the fleet-grid tier (too many chips for towers) each chip's cell shows the gauge on its power
+bar, the reset flash, and `~` in the label's last column for an estimate; the messengers,
+torches and cracks are not drawn there. The castle embedded in the arcade reads no bus of its
+own. With an empty world the castle draws the frames it drew before the bus; a test pins them.
+
+### Defrag on the bus
+
+Defrag (`d`) is the model-loading view, and the bus drives its blocks directly. It reads the
+world through `ArcadeFx::from_world` too, in `DefragVis::set_bus`, and `defrag_bus.rs` holds
+the rules and the drawing.
+
+| What | Signal | Measured, derived or decoration |
+|---|---|---|
+| `COMPILE`: the blocks hold and a purple scan sweeps each channel row | a model in `Compiling` on the chip | the phase is read; the scan is decoration |
+| `DMA`: every trained channel filled to the model's progress | a model in `Loading` with `model.progress` | derived from the reported progress |
+| `DMA` with the write head at Defrag's own pace | a model in `Loading` with no progress | decoration |
+| `RUN` with every channel full, washed teal for 2 s on a change to `Ready` | a model in `Ready` | the phase is read; the wash is decoration |
+| `EVICT`: the blocks drain right to left | the chip's model was up and is now `Down` or gone (`ModelGone`) | the change is read |
+| A scatter burst across the blocks of a running chip | `RequestsCompleted` for a model on the chip | the brightness follows the count; the cells are decoration |
+| One bright block for 0.8 s | `Spark` and `KernelCompiled` naming the chip | the event is read; the place is decoration |
+| Name, phase and tokens/s right of the power bar, `~` for an estimate | the model's readings | as reported |
+| The chip's label row reversed for 0.6 s | a new `reset_seq` | the reset is read |
+
+A chip with no model keeps the phase its power and clock readings give, as before. The EVICT on
+an unload used to come from the local inference monitor; it now comes from the bus, which the
+monitor feeds, so an attached TUI sees the host's unloads on its own chips. On a local bus a
+ready model that names no chip evicts every chip when it unloads, as the monitor's signal did.
+An attached TUI does not do this, since there such a model runs on the host's chips. Unloads
+seen across a gap (the first read, or a return from another view) evict nothing. The model's
+`model.kernel_count` is not used. With an empty world Defrag draws the frames it drew before
+the bus; a test pins them.
+
 ### The `~` view (HivemindSweeper)
 
 The `~` view reads the bus the way Die 3D does (`TuiBus::read`, limited to local chips when

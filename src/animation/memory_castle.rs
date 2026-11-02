@@ -593,7 +593,7 @@ impl MemoryCastle {
                     ));
                 }
             }
-            // The bus on the one tower (the cells after the left padding).
+            // The bus on the single tower (the cells after the left padding).
             if let Some(co) = self.bus_chip(0) {
                 castle_bus::draw_row(
                     co,

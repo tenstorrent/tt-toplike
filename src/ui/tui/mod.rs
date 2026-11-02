@@ -810,11 +810,6 @@ fn run_app(
     let inference_monitor = crate::workload::InferenceServerMonitor::spawn();
     #[cfg(target_os = "linux")]
     inference_monitor.submit(initial_scan.inference_servers);
-    // Previous inference snapshot, for detecting the model-unload edge that
-    // triggers the Defrag EVICT animation.
-    #[cfg(target_os = "linux")]
-    let mut prev_inference_snapshot: Vec<crate::workload::inference_server::ServiceState> =
-        inference_monitor.snapshot();
     // Multi-model roster lines for the `[i]` view, recomputed each monitor tick
     // (in the InferenceMonitor update branch). Held here so the render pass —
     // which must reserve the same number of rows the snake was sized against —
@@ -1624,6 +1619,10 @@ fn run_app(
                         defrag = Some(DefragVis::new(size.width as usize, size.height as usize));
                     }
                     if let Some(ref mut dv) = defrag {
+                        // The bus: phase and fill per model, eviction on an
+                        // unload, bursts and sparks (see `defrag_bus`).
+                        let world = tui_bus.read();
+                        dv.set_bus(Some(&world), backend, !tui_bus.is_attached());
                         dv.update(backend);
                     }
                 }
@@ -3232,19 +3231,8 @@ fn run_app(
             // Refresh the inference-server monitor's target set (containers only).
             #[cfg(target_os = "linux")]
             inference_monitor.submit(applied.inference_servers);
-            // Model-unload edge → kick off the Defrag EVICT animation. The
-            // power-EMA heuristic can't detect unload on Blackhole (see
-            // DefragVis::trigger_evict), so we drive it from this discrete signal.
-            #[cfg(target_os = "linux")]
-            {
-                let cur_inf = inference_monitor.snapshot();
-                if inference_panel::model_unloaded(&prev_inference_snapshot, &cur_inf) {
-                    if let Some(dv) = defrag.as_mut() {
-                        dv.trigger_evict();
-                    }
-                }
-                prev_inference_snapshot = cur_inf;
-            }
+            // Defrag's EVICT on a model unload comes from the bus now: the
+            // services go on it just below (see `defrag_bus`).
 
             // The workload monitors' results go on the bus once per applied
             // scan. What the views show: under `--mock` the synthetic
@@ -4541,7 +4529,12 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     v.extend(crate::animation::castle_bus::legend_lines(bar, bg, dim));
                     v
                 }
-                DisplayMode::Defrag => defrag_legend_lines(bar, bg, dim, key),
+                DisplayMode::Defrag => {
+                    let mut v = defrag_legend_lines(bar, bg, dim, key);
+                    v.push(sep!("◆ Signal bus"));
+                    v.extend(crate::animation::defrag_bus::legend_lines(bar, bg, dim));
+                    v
+                }
                 DisplayMode::MemoryFlow => flow_legend_lines(bar, bg, dim),
                 DisplayMode::InferenceMonitor => inference_legend_lines(bar, bg, dim),
                 DisplayMode::Insights => insights_legend_lines(bar, bg, dim),
@@ -4669,9 +4662,10 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "",
                     "░ empty     ▒ loading    ▓█ resident",
                     "",
-                    "EVICT flashes when the runtime unloads",
-                    "a model — triggered when inference power",
-                    "surges above the rolling baseline.",
+                    "EVICT drains the blocks when a model",
+                    "unloads: when the signal bus sees it go",
+                    "down or away, or when power falls back to",
+                    "idle after a load.",
                     "",
                     "Block character intensity (░▒▓█) encodes",
                     "relative activity within each cell.",
@@ -4680,7 +4674,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "A dark-red ✗ is a bad sector: a channel that",
                     "failed its BIST, and stays that way. A bright",
                     "red ✗ flashes on an uncorrectable error.",
-                ],
+                ]
+                .iter()
+                .chain(crate::animation::defrag_bus::EXPLAIN_TEXT)
+                .copied()
+                .collect::<Vec<&str>>(),
                 cols,
             ),
             DisplayMode::MemoryFlow => explain_lines(

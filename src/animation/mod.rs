@@ -28,6 +28,7 @@ pub(crate) mod bus_test_support;
 pub mod castle_bus;
 pub mod common;
 pub mod defrag;
+pub mod defrag_bus;
 pub mod die3d;
 pub mod duel;
 pub mod inference_load;

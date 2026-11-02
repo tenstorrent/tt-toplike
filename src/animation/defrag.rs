@@ -51,12 +51,16 @@
 //!    blocks dissolve right→left per channel at staggered prime-modulated rates,
 //!    then DMA rebuild restarts automatically.
 
+use crate::animation::arcade_bus::{ArcadeBusState, ArcadeFx, ChipFx};
+use crate::animation::defrag_bus::{self, Hold, RowKind};
 use crate::animation::{hsv_to_rgb, lerp, temp_to_hue};
 use crate::backend::TelemetryBackend;
 use crate::models::telemetry::parse_hex_or_dec;
 use crate::ui::colors;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
+use std::collections::{HashMap, HashSet};
+use tt_toplike_bus::{EntityKey, ModelPhase, WorldRead};
 
 const GDDR_CHANNELS: usize = 8;
 const POWER_IDLE_W: f32 = 8.0;
@@ -142,6 +146,9 @@ enum Phase {
     /// Theatrical deconstruct: blocks evaporate right→left per channel,
     /// then immediately trigger a rebuild (Dma animation from scratch).
     Deconstructing,
+    /// A model on this chip is compiling (from the signal bus only): the
+    /// blocks hold while a scan sweeps them.
+    Compile,
 }
 
 /// Per-channel state.
@@ -284,12 +291,84 @@ impl DeviceState {
     }
 }
 
+/// Throw a scatter burst of `intensity` (0..1) across every trained
+/// channel of `ds`, seeded by `frame`. Used for a power spike and for
+/// completed requests seen on the bus.
+fn spawn_bursts(ds: &mut DeviceState, frame: u64, intensity: f32) {
+    for ch_idx in 0..GDDR_CHANNELS {
+        let ch = &ds.channels[ch_idx];
+        if !ch.enabled || !ch.trained {
+            continue;
+        }
+        // Use 200 as upper bound — render will clamp against actual width.
+        // .max(1) prevents zero-modulo panic when fill rounds to 0.
+        let resident_cells = ((ch.fill * 200.0) as usize).max(1);
+        // n_cells: 5–12, varies by frame + channel to avoid sync flicker.
+        let n_cells = 5 + (frame.wrapping_mul(7).wrapping_add(ch_idx as u64 * 13)) % 8;
+        // Pseudo-random cell indices — no rand crate needed.
+        // Seed mixes frame, channel, and cell index for independence.
+        let cells: Vec<usize> = (0..n_cells as usize)
+            .map(|i| {
+                let seed = frame
+                    .wrapping_mul(31)
+                    .wrapping_add(ch_idx as u64 * 97)
+                    .wrapping_add(i as u64 * 61);
+                (seed % resident_cells as u64) as usize
+            })
+            .collect();
+        ds.scatter_bursts.push(ScatterBurst {
+            channel: ch_idx,
+            cells,
+            ttl: 18, // ~0.3 s at 60 fps
+            intensity,
+        });
+    }
+}
+
+/// Hand `ds` to the EVICT (Deconstructing) animation. With `refill`, its
+/// trained channels are filled first so there is a full drain to watch.
+/// A device with no trained channels is left alone. `update` holds
+/// `Deconstructing` until the channels drain, then returns to `Idle`.
+fn evict_device(ds: &mut DeviceState, refill: bool) {
+    if !ds.channels.iter().any(|c| c.enabled && c.trained) {
+        return;
+    }
+    if refill {
+        for ch in ds.channels.iter_mut() {
+            if ch.enabled && ch.trained {
+                ch.fill = 1.0;
+                ch.head_pos = 1.0;
+            }
+        }
+    }
+    ds.phase = Phase::Deconstructing;
+    ds.running_since = None;
+    ds.scatter_bursts.clear();
+    ds.burst_cooldown = 0;
+    ds.inference_energy = 0.0;
+}
+
 /// Defrag visualization.
 pub struct DefragVis {
     width: usize,
     height: usize,
     frame: u64,
     devices: std::collections::HashMap<usize, DeviceState>,
+    // ── Signal bus (see `defrag_bus`) ─────────────────────────────────────
+    /// What the bus puts on each chip, from the last `set_bus`. Empty until
+    /// a world is given, and always empty when Defrag is embedded in the
+    /// arcade (which reads the bus itself).
+    bus_fx: ArcadeFx,
+    /// What the bus reading remembers between updates.
+    bus_state: ArcadeBusState,
+    /// The bus time of the last `set_bus`, which the frame path draws at.
+    bus_now: u64,
+    /// The phase of the model on each device (by device index) at the last
+    /// `set_bus`, `None` for no model. A model that was up and is now down
+    /// or gone evicts the device.
+    bus_seen: HashMap<usize, Option<ModelPhase>>,
+    /// The ready models that name no chip, at the last `set_bus`.
+    bus_unplaced: HashSet<EntityKey>,
 }
 
 impl DefragVis {
@@ -299,7 +378,117 @@ impl DefragVis {
             height,
             frame: 0,
             devices: Default::default(),
+            bus_fx: ArcadeFx::default(),
+            bus_state: ArcadeBusState::default(),
+            bus_now: 0,
+            bus_seen: HashMap::new(),
+            bus_unplaced: HashSet::new(),
         }
+    }
+
+    /// Read the signal bus for this update (see `defrag_bus`), before
+    /// `update`. `None` drops what was read, and the next world is a first
+    /// sight.
+    ///
+    /// A device whose model was up at the last read and is now down or gone
+    /// is evicted, and completed requests on a running device throw a
+    /// scatter burst. Both act only on a fresh update (not the first, not
+    /// after the view was away). With `unplaced_evicts_all` (a local bus), a
+    /// ready model that names no chip evicts every device when it goes down
+    /// or away, as the local inference monitor's unload signal did; an
+    /// attached TUI passes `false`, since there a model with no chips is one
+    /// on the host's own chips.
+    pub fn set_bus(
+        &mut self,
+        world: Option<&dyn WorldRead>,
+        backend: &dyn TelemetryBackend,
+        unplaced_evicts_all: bool,
+    ) {
+        let Some(w) = world else {
+            self.bus_fx = ArcadeFx::default();
+            self.bus_state = ArcadeBusState::default();
+            self.bus_seen.clear();
+            self.bus_unplaced.clear();
+            return;
+        };
+        let devices = backend.devices();
+        // The bus names a chip by its PCI address, never by position.
+        let chips: Vec<(usize, EntityKey)> = devices
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| !d.bus_id.is_empty())
+            .map(|(slot, d)| (slot, EntityKey::chip(&d.bus_id)))
+            .collect();
+        let now = w.now_mono_ns();
+        self.bus_fx = ArcadeFx::from_world(w, &chips, devices.len(), now, &mut self.bus_state);
+        self.bus_now = now;
+        let fresh = self.bus_fx.fresh;
+
+        let mut evict: Vec<(usize, bool)> = Vec::new();
+        let mut bursts: Vec<(usize, u32)> = Vec::new();
+        for (slot, d) in devices.iter().enumerate() {
+            let co = self.bus_fx.chips.iter().find(|c| c.slot == slot);
+            let phase = co.and_then(|c| c.flag.as_ref()).map(|f| f.phase);
+            let before = self.bus_seen.insert(d.index, phase);
+            let up = |p: &Option<ModelPhase>| p.is_some_and(|p| p != ModelPhase::Down);
+            if fresh && before.as_ref().is_some_and(up) && !up(&phase) {
+                // Refill first when the model was serving, as the monitor's
+                // signal did, so there is a full drain to watch; a model
+                // that went down while loading drains what it had.
+                evict.push((d.index, before == Some(Some(ModelPhase::Ready))));
+            }
+            if let Some(co) = co {
+                let n: u32 = co
+                    .hits
+                    .iter()
+                    .filter(|h| h.start_ns == now)
+                    .map(|h| h.glyphs)
+                    .sum();
+                if fresh && n > 0 {
+                    bursts.push((d.index, n));
+                }
+            }
+        }
+        let known: HashSet<usize> = devices.iter().map(|d| d.index).collect();
+        self.bus_seen.retain(|k, _| known.contains(k));
+
+        let unplaced: HashSet<EntityKey> = if unplaced_evicts_all {
+            w.models()
+                .into_iter()
+                .filter(|m| m.phase == ModelPhase::Ready && m.chips.is_empty())
+                .map(|m| m.key)
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        let unloaded = self.bus_unplaced.iter().any(|k| !unplaced.contains(k));
+        self.bus_unplaced = unplaced;
+        if fresh && unloaded {
+            evict = devices.iter().map(|d| (d.index, true)).collect();
+        }
+
+        for (idx, refill) in evict {
+            if let Some(ds) = self.devices.get_mut(&idx) {
+                evict_device(ds, refill);
+            }
+        }
+        let frame = self.frame;
+        for (idx, n) in bursts {
+            if let Some(ds) = self.devices.get_mut(&idx) {
+                // Completed requests are discrete events, so they do not
+                // wait for the power spike's cooldown; they do start it, so
+                // a spike right after does not double the flash.
+                if ds.phase == Phase::Running {
+                    spawn_bursts(ds, frame, crate::animation::die3d::overlay::strength(n));
+                    ds.burst_cooldown = 30;
+                }
+            }
+        }
+    }
+
+    /// What the bus puts on the device in position `slot`, if anything.
+    fn bus_chip(&self, slot: usize) -> Option<&ChipFx> {
+        self.bus_fx.chips.iter().find(|c| c.slot == slot)
     }
 
     /// Returns false when all devices are in Init or Idle phase — no animation
@@ -313,8 +502,16 @@ impl DefragVis {
     pub fn update(&mut self, backend: &dyn TelemetryBackend) {
         self.frame = self.frame.wrapping_add(1);
 
-        for device in backend.devices() {
+        for (slot, device) in backend.devices().iter().enumerate() {
             let idx = device.index;
+            // What the bus says this chip's blocks do, if it names a model
+            // on the chip (see `defrag_bus`).
+            let hold = self
+                .bus_fx
+                .chips
+                .iter()
+                .find(|c| c.slot == slot)
+                .and_then(defrag_bus::hold_of);
             let ds = self
                 .devices
                 .entry(idx)
@@ -548,6 +745,13 @@ impl DefragVis {
                 }
             } else if !ds.channels.iter().any(|c| c.enabled && c.trained) {
                 Phase::Init
+            } else if let Some(h) = hold {
+                // The bus names a model on this chip: its phase decides.
+                match h {
+                    Hold::Compile => Phase::Compile,
+                    Hold::Load(_) => Phase::Dma,
+                    Hold::Serve => Phase::Running,
+                }
             } else if ds.phase == Phase::Running
                 && evict_eligible(
                     self.frame,
@@ -662,7 +866,21 @@ impl DefragVis {
 
             // Per-frame updates
             match ds.phase {
-                Phase::Init => {}
+                Phase::Init | Phase::Compile => {}
+
+                Phase::Dma if matches!(hold, Some(Hold::Load(Some(_)))) => {
+                    // The bus reports how far the model has loaded: every
+                    // trained channel is filled to that share.
+                    let Some(Hold::Load(Some(p))) = hold else {
+                        unreachable!()
+                    };
+                    for ch in ds.channels.iter_mut() {
+                        if ch.enabled && ch.trained {
+                            ch.fill = p.clamp(0.0, 1.0);
+                            ch.head_pos = ch.fill;
+                        }
+                    }
+                }
 
                 Phase::Dma => {
                     let start = ds.dma_start_frame.unwrap_or(self.frame);
@@ -733,36 +951,7 @@ impl DefragVis {
                     {
                         // Intensity = fractional excess above baseline, clamped to [0, 1].
                         let intensity = ((ds.power_ema / ds.power_ema_slow) - 1.0).clamp(0.0, 1.0);
-                        for ch_idx in 0..GDDR_CHANNELS {
-                            let ch = &ds.channels[ch_idx];
-                            if !ch.enabled || !ch.trained {
-                                continue;
-                            }
-                            // Use 200 as upper bound — render will clamp against actual width.
-                            // .max(1) prevents zero-modulo panic when fill rounds to 0.
-                            let resident_cells = ((ch.fill * 200.0) as usize).max(1);
-                            // n_cells: 5–12, varies by frame + channel to avoid sync flicker.
-                            let n_cells = 5
-                                + (self.frame.wrapping_mul(7).wrapping_add(ch_idx as u64 * 13)) % 8;
-                            // Pseudo-random cell indices — no rand crate needed.
-                            // Seed mixes frame, channel, and cell index for independence.
-                            let cells: Vec<usize> = (0..n_cells as usize)
-                                .map(|i| {
-                                    let seed = self
-                                        .frame
-                                        .wrapping_mul(31)
-                                        .wrapping_add(ch_idx as u64 * 97)
-                                        .wrapping_add(i as u64 * 61);
-                                    (seed % resident_cells as u64) as usize
-                                })
-                                .collect();
-                            ds.scatter_bursts.push(ScatterBurst {
-                                channel: ch_idx,
-                                cells,
-                                ttl: 18, // ~0.3 s at 60 fps
-                                intensity,
-                            });
-                        }
+                        spawn_bursts(ds, self.frame, intensity);
                         // Cooldown: ~0.5 s at 60 fps — prevents strobing on sustained spikes.
                         ds.burst_cooldown = 30;
                     }
@@ -826,20 +1015,7 @@ impl DefragVis {
     /// channels drain, then returns to `Idle`.
     pub fn trigger_evict(&mut self) {
         for ds in self.devices.values_mut() {
-            if !ds.channels.iter().any(|c| c.enabled && c.trained) {
-                continue;
-            }
-            for ch in ds.channels.iter_mut() {
-                if ch.enabled && ch.trained {
-                    ch.fill = 1.0;
-                    ch.head_pos = 1.0;
-                }
-            }
-            ds.phase = Phase::Deconstructing;
-            ds.running_since = None;
-            ds.scatter_bursts.clear();
-            ds.burst_cooldown = 0;
-            ds.inference_energy = 0.0;
+            evict_device(ds, true);
         }
     }
 
@@ -900,11 +1076,36 @@ impl DefragVis {
                 if d_idx > 0 {
                     spans.push(Span::raw(" ".repeat(gutter)));
                 }
+                // This device's share of the row starts here; the bus draws
+                // on it (see `defrag_bus`).
+                let seg = spans.len();
+                let bus = self.bus_chip(d_idx);
+                let compiling = ds.is_some_and(|s| s.phase == Phase::Compile);
 
                 if row == 0 {
                     self.render_device_label(&mut spans, device, ds, power, temp, aiclk, grid_w);
+                    if let Some(co) = bus {
+                        defrag_bus::draw(
+                            co,
+                            self.bus_now,
+                            RowKind::Label,
+                            compiling,
+                            &mut spans,
+                            seg,
+                        );
+                    }
                 } else if row == 1 {
                     self.render_power_bar(&mut spans, ds, power, temp, grid_w);
+                    if let Some(co) = bus {
+                        defrag_bus::draw(
+                            co,
+                            self.bus_now,
+                            RowKind::Power,
+                            compiling,
+                            &mut spans,
+                            seg,
+                        );
+                    }
                 } else {
                     let ch_row = row - header_rows;
                     let ch_idx = ch_row / rows_per_channel;
@@ -924,6 +1125,17 @@ impl DefragVis {
                         temp,
                         mvddq_norm,
                     );
+                    if let Some(co) = bus {
+                        let ch = ds.and_then(|s| s.channels.get(ch_idx));
+                        let kind = RowKind::Channel {
+                            ch: ch_idx,
+                            first: sub_row == 0,
+                            // As `render_channel_row` lays the row out.
+                            label_w: if sub_row == 0 && grid_w > 4 { 2 } else { 0 },
+                            live: ch.is_none_or(|c| c.enabled && !c.bist_fail),
+                        };
+                        defrag_bus::draw(co, self.bus_now, kind, compiling, &mut spans, seg);
+                    }
                 }
             }
             lines.push(Line::from(spans));
@@ -957,6 +1169,7 @@ impl DefragVis {
             Phase::Running => " RUN ▶▶  ",        // 9 display cols
             Phase::Idle => " idle    ",           // 9 display cols
             Phase::Deconstructing => " EVICT ░ ", // 9 display cols
+            Phase::Compile => " COMPILE ",        // 9 display cols
         };
         let phase_color = match phase {
             Phase::Init => colors::rgb(120, 120, 180),
@@ -964,6 +1177,10 @@ impl DefragVis {
             Phase::Running => colors::rgb(80, 220, 140),
             Phase::Idle => colors::rgb(80, 80, 100),
             Phase::Deconstructing => colors::rgb(220, 80, 80),
+            Phase::Compile => {
+                let c = crate::animation::die3d::overlay::LOAD_PURPLE;
+                colors::rgb(c[0], c[1], c[2])
+            }
         };
 
         // Heartbeat indicator: pulses on ARC tick
@@ -1468,7 +1685,8 @@ impl DefragVis {
                     .map(|s| s.phase)
                     .unwrap_or(Phase::Idle);
                 match ph {
-                    Phase::Dma => (acc.0 + 1, acc.1, acc.2),
+                    // A compile is part of bringing a model up, as a load is.
+                    Phase::Dma | Phase::Compile => (acc.0 + 1, acc.1, acc.2),
                     Phase::Running => (acc.0, acc.1 + 1, acc.2),
                     _ => (acc.0, acc.1, acc.2 + 1),
                 }
