@@ -1745,7 +1745,7 @@ fn bus_ns(t: f64) -> u64 {
 /// [`changed_from`] with the bus overlay active: [`busy_world`], and once a
 /// second of the run (at the run's start, then every 30 frames) a
 /// `RequestsCompleted` on the pulsing model, read by the overlay at once.
-/// So a pulse ring is crossing a die for the whole run. The overlay is read
+/// So a pulse is lighting a PCIe connector for the whole run. The overlay is read
 /// with `read_bus` alone, as the data tick would, so the load calibration
 /// and history (which `update` also feeds) are as in [`changed_from`].
 fn changed_from_with_bus(boards: &[&str], t0: f64) -> usize {
@@ -1783,8 +1783,8 @@ fn changed_from_with_bus(boards: &[&str], t0: f64) -> usize {
 #[test]
 fn traffic_fronts_with_an_active_overlay_cost_little_more_than_the_sideways_sweep() {
     // The bound of `traffic_fronts_cost_little_more_than_the_sideways_sweep`
-    // with the overlay drawing (a fill, flags, GDDR rows and a pulse ring
-    // crossing a die all the time), against the sweep without it.
+    // with the overlay drawing (a fill, flags, GDDR rows and a pulse on a
+    // PCIe connector all the time), against the sweep without it.
     let mean = |with_bus: bool| -> usize {
         let counts: Vec<usize> = (0..8)
             .map(|k| {
@@ -1814,7 +1814,7 @@ fn traffic_fronts_with_an_active_overlay_cost_little_more_than_the_sideways_swee
 fn changed_cells_with_an_active_overlay_stay_within_the_task_16_budget() {
     // The Task 16 budget (`changed_cells_per_frame_are_at_most_half_of_before`)
     // with the overlay drawing. The window is the same (two seconds from 1 s,
-    // the sideways sweep); a pulse ring crosses a die all the time.
+    // the sideways sweep); a pulse lights a PCIe connector all the time.
     let _sweep = SidewaysSweep::on();
     for (what, boards, before) in [
         ("one board", &["p150"][..], CHANGED_BEFORE_ONE_BOARD),
@@ -1834,7 +1834,7 @@ fn changed_cells_with_an_active_overlay_stay_within_the_task_16_budget() {
 }
 
 /// [`inset_changed_cells`] with the overlay active as in
-/// [`changed_from_with_bus`]: the fill and a pulse ring, the inset's share.
+/// [`changed_from_with_bus`]: the fill and a pulse, the inset's share.
 fn inset_changed_cells_with_bus(cols: usize, rows: usize, boards: &[&str]) -> usize {
     let b = busy_fake(boards);
     let chips = boards.len();

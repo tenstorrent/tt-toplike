@@ -5430,7 +5430,9 @@ const DIE3D_EXPLAIN_TEXT: &[&str] = &[
     "/bg is a black background or the terminal's own.",
     "/theme (the whole app) sets the colours here too: grayskull",
     "is greys with one hot pink; the default is full colour.",
-    "/labels turns the chip flags (name and power) on or off.",
+    "/labels turns the chip flags on or off. A flag shows the",
+    "chip's name and power, and the model on the chip with its",
+    "phase and tokens/s (or load progress) and waiting requests.",
     "/clouds turns the clouds behind the board on or off. The",
     "clouds are decoration: their drift follows the total",
     "PCIe traffic (slow but never still with none) and their",
@@ -5442,6 +5444,35 @@ const DIE3D_EXPLAIN_TEXT: &[&str] = &[
     "ends with its latest power and latest temperature.",
     "These are real readings, taken once a second. It needs",
     "a terminal of at least 120 x 37.",
+    "",
+    "From the signal bus, when a model or the hardware reports it:",
+    "The model's text in a flag is coloured by its phase:",
+    "purple while it compiles or loads, teal when ready, red",
+    "on an alarm. A '~' before it marks an estimate, for",
+    "example the synthetic data of a mock run.",
+    "While a model compiles or loads, a purple fill spreads",
+    "from the DRAM edges toward the middle of its die, driven",
+    "by the phase and progress the model reports. With no",
+    "progress figure it is a band that sweeps inward again and",
+    "again; that sweep is decoration. When the model becomes",
+    "ready the whole die is filled and fades back in 2 s.",
+    "Each batch of requests completed lights the chip's PCIe",
+    "connector teal for about a second: a pulse, brighter for",
+    "more requests. The pulse marks a real event; its fade is",
+    "decoration.",
+    "Each GDDR block takes its colour from its own DRAM",
+    "channel's own temperature where the chip reports it per",
+    "channel (otherwise the hottest channel's, as before). A",
+    "harvested or disabled channel is dim. A rise in a",
+    "channel's ECC error count flashes its block red.",
+    "DRAM rows: channels 0-3 west, 4-7 east, shown in channel",
+    "order; the vertical position of a row is not measured.",
+    "A hivemind event (a log line, a kernel compile, a driver",
+    "message) on a chip makes a short spark over its back edge.",
+    "The spark marks a real event; its look is decoration.",
+    "With a bus that is not this process's own (attached or a",
+    "replay), the footer names it.",
+    "",
     "The footer names the board corner nearest you, as",
     "'view: front-right' (front is the PCIe edge, right the",
     "GDDR side), and both ends during a cut.",
@@ -5535,6 +5566,53 @@ mod die3d_text_tests {
     }
 
     #[test]
+    fn the_legend_and_explain_text_name_what_the_bus_draws() {
+        // The Die 3D design: every moving thing is read from hardware,
+        // marked as an estimate, or named as decoration in the legend and
+        // the explain text. The bus overlay added the model flag, the
+        // bring-up fill, pulses, per-channel GDDR rows, the ECC flash and
+        // sparks.
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+        for (what, text) in [("legend", &legend), ("explain", &explain)] {
+            for phrase in [
+                "model",
+                "fill",
+                "phase and progress",
+                "sweep",
+                "pulse",
+                "requests completed",
+                "own temperature",
+                "ECC",
+                "spark",
+                "hivemind",
+                "~",
+                "estimate",
+                "decoration",
+                "channels 0-3 west, 4-7 east",
+                "channel order",
+                "not measured",
+            ] {
+                assert!(text.contains(phrase), "{what} lacks {phrase:?}: {text}");
+            }
+            // The flag carries more than the name and power now.
+            assert!(
+                !text.contains("(name and power) on or off"),
+                "{what}: {text}"
+            );
+        }
+        let labels = crate::animation::die3d::commands::COMMANDS
+            .iter()
+            .find(|c| c.name == "labels")
+            .unwrap();
+        assert!(labels.help.contains("model"), "{}", labels.help);
+    }
+
+    #[test]
     fn the_legend_says_what_the_pcie_packets_are() {
         let legend = flat(
             die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
@@ -5588,7 +5666,24 @@ fn die3d_legend_lines(
         "              on a log scale (none below 1 kB/s)",
         "  camera cuts on activity: a load rise or PCIe burst",
         "  labels      a flag per chip (name and power): a pin on the",
-        "              die, a pole, and the text on open space",
+        "              die, a pole, and the text on open space; with",
+        "              a model on the chip, its name, phase and",
+        "              tokens/s in the phase colour (purple loading,",
+        "              teal ready, red alarm); '~' marks an estimate",
+        "              such as mock data",
+        "  fill        purple from the DRAM edges inward while a",
+        "              model loads, driven by its phase and progress;",
+        "              with no progress, a sweep (decoration)",
+        "  pulse       the PCIe connector glows teal on requests",
+        "              completed, fading over a second",
+        "  GDDR        each block coloured by its channel's own",
+        "              temperature; dim when harvested; a red flash",
+        "              when its ECC count rises. DRAM rows:",
+        "              channels 0-3 west, 4-7 east, shown in",
+        "              channel order; the vertical position of a",
+        "              row is not measured",
+        "  spark       a short spark over a chip's back edge for a",
+        "              hivemind event (log, compile, driver)",
         "  clouds      decoration behind the board: their drift",
         "              follows PCIe traffic, their brightness",
         "              follows chip load",

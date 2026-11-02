@@ -493,3 +493,66 @@ fn a_world_that_went_back_is_a_first_sight() {
     assert!(o.chips[0].pulses.is_empty());
     assert_eq!(st.seen_seq, Some(f.world.seq()));
 }
+
+#[test]
+fn an_estimated_progress_or_waiting_figure_marks_the_flag() {
+    // Every reading that puts text in the flag counts.
+    for (signal, value, phase_event) in [
+        (
+            tt_toplike_bus::signals::MODEL_PROGRESS,
+            Value::F64(0.4),
+            false,
+        ),
+        (tt_toplike_bus::signals::MODEL_WAITING, Value::U64(3), true),
+        (tt_toplike_bus::signals::MODEL_RUNNING, Value::U64(1), true),
+    ] {
+        let mut f = BusFixture::new();
+        let m = EntityKey::model("m");
+        if phase_event {
+            f.ready("m", "M", &[0], 10.0);
+        } else {
+            f.loading("m", &[0], None);
+        }
+        f.sample(&m, signal, value, Provenance::Estimated);
+        let o = once(&f, 5 * SEC_NS);
+        let flag = o.flag(0).unwrap();
+        // Running is not in the text, so it does not mark the flag.
+        let want = signal != tt_toplike_bus::signals::MODEL_RUNNING;
+        assert_eq!(flag.estimated, want, "{signal}: {:?}", flag.texts());
+        assert_eq!(flag.texts()[0].starts_with('~'), want, "{signal}");
+    }
+}
+
+#[test]
+fn an_ecc_counter_reset_rebaselines_without_a_flash() {
+    let ecc = |f: &mut BusFixture, v: u64| {
+        let e = EntityKey::dram_channel(&chip_key(0), 1);
+        f.sample(
+            &e,
+            crate::bus::signals::DRAM_ECC_CORR_RD,
+            Value::U64(v),
+            Provenance::Measured,
+        );
+    };
+    let flash = |o: &Overlay| o.chips[0].gddr[0].flash_ns;
+    let mut f = BusFixture::new();
+    let mut st = OverlayState::default();
+    let t0 = 5 * SEC_NS;
+    ecc(&mut f, 10);
+    Overlay::from_world(&f.view(t0), &two_chips(), t0, &mut st);
+    // A chip reset clears the counter: a lower count, no flash.
+    ecc(&mut f, 3);
+    let t1 = t0 + SEC_NS;
+    assert_eq!(
+        flash(&Overlay::from_world(&f.view(t1), &two_chips(), t1, &mut st)),
+        None
+    );
+    // The lower count is the new baseline: the next rise flashes, though
+    // it is still under the old count.
+    ecc(&mut f, 4);
+    let t2 = t1 + SEC_NS;
+    assert_eq!(
+        flash(&Overlay::from_world(&f.view(t2), &two_chips(), t2, &mut st)),
+        Some(t2)
+    );
+}

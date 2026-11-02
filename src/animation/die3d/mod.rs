@@ -1510,23 +1510,30 @@ impl Die3dView {
         if !self.chips.iter().any(|board| has_per_tile_data(board)) {
             status.push(ESTIMATE_LABEL.to_string());
         }
-        // An attached bus, a replay or a mismatch says so; a plain local
-        // bus adds nothing.
-        if let Some(label) = &self.bus_label {
-            status.push(label.clone());
-        }
         let width = self.cols.saturating_sub(BAR_WIDTH);
         // Priority on a narrow row: the scene name, the estimate label, the
-        // camera caption, then the note on devices not drawn. The caption
-        // goes in whole only when it fits after the first two, so it never
-        // pushes the estimate label into the cut. The note comes last and is
-        // the part `fit_width` shortens: seeing which side the camera looks
-        // from during a cut matters more than the full list of chips the
-        // view cannot draw.
+        // camera caption, the bus label, then the note on devices not drawn.
+        // The caption goes in whole only when it fits after the first two,
+        // so it never pushes the estimate label into the cut. The bus label
+        // (an attached bus, a replay or a mismatch; a plain local bus has
+        // none) comes after the caption, shortened to the room left and to
+        // at most `BUS_LABEL_MAX` characters (`short_bus_label`), so a long
+        // socket path never pushes the caption off the row. The note comes
+        // last and is the part `fit_width` shortens: seeing which side the
+        // camera looks from during a cut matters more than the full list of
+        // chips the view cannot draw.
         let mut status = status.join(SEP);
         let with_caption = format!("{status}{SEP}{}", self.caption(now));
         if with_caption.chars().count() <= width {
             status = with_caption;
+        }
+        if let Some(label) = &self.bus_label {
+            let room = width.saturating_sub(status.chars().count() + SEP.chars().count());
+            // At least `bus:` and an ellipsis, or nothing.
+            if room >= 5 {
+                let short = short_bus_label(label, room.min(BUS_LABEL_MAX));
+                status = format!("{status}{SEP}{short}");
+            }
         }
         if !self.undrawn.is_empty() {
             // The note goes in whole, or cut after at least one of its own
@@ -1984,3 +1991,26 @@ mod tests;
 
 #[cfg(test)]
 mod bus_tests;
+
+/// The most characters the bus label takes in the footer.
+const BUS_LABEL_MAX: usize = 24;
+
+/// `label` (`bus: <path> (status) ...`) in at most `max` characters. A
+/// label that fits stays whole. Otherwise the path loses its start, behind
+/// an ellipsis, so the status words in brackets stay. When even those do not
+/// fit, the label is cut at the end with an ellipsis.
+fn short_bus_label(label: &str, max: usize) -> String {
+    if label.chars().count() <= max {
+        return label.to_string();
+    }
+    let (prefix, rest) = label.split_at(label.find(": ").map_or(0, |i| i + 2));
+    let (path, status) = rest.split_at(rest.find(" (").unwrap_or(rest.len()));
+    let fixed = prefix.chars().count() + 1 + status.chars().count();
+    if fixed < max {
+        let keep = max - fixed;
+        let n = path.chars().count();
+        let tail: String = path.chars().skip(n.saturating_sub(keep)).collect();
+        return format!("{prefix}\u{2026}{tail}{status}");
+    }
+    fit_width(label.to_string(), max)
+}

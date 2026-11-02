@@ -80,7 +80,7 @@ pub const COMMANDS: &[CommandInfo] = &[
     CommandInfo {
         name: "labels",
         args: "[on|off]",
-        help: "a flag with name and power on each chip",
+        help: "a flag on each chip: name, power, and its model's phase and tokens/s",
     },
     CommandInfo {
         name: "clouds",

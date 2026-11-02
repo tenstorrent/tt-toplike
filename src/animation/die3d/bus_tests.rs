@@ -296,7 +296,8 @@ fn the_footer_names_the_bus_unless_it_is_plain_local() {
     let attached = footer(&v, 0.0);
     assert!(attached.contains(ESTIMATE_LABEL), "{attached}");
     assert!(
-        attached.contains("bus: /run/tt/bus.sock (replay)"),
+        // Shortened to 24 characters from the left of its path.
+        attached.contains("bus: \u{2026}/bus.sock (replay)"),
         "{attached}"
     );
     v.set_bus_label(None);
@@ -402,4 +403,35 @@ fn overlay_smoke_frames() {
             println!("{}", row.trim_end());
         }
     }
+}
+
+#[test]
+fn a_long_bus_label_never_pushes_the_camera_caption_off_the_row() {
+    let fake = two_dies();
+    let mut v = view_with(&fake, 100, 30, false, None);
+    v.set_bus_label(Some(
+        "bus: /run/user/1000/tt-toplike/very/long/path/bus.sock (other host) (reconnecting)",
+    ));
+    let status = text(&v.render(None, 0.0))[28].clone();
+    assert!(status.contains("view: "), "{status}");
+    assert!(status.contains(ESTIMATE_LABEL), "{status}");
+    assert!(status.chars().count() <= 100, "{status}");
+    // The label shows, shortened: the bus prefix is there.
+    assert!(status.contains("bus"), "{status}");
+}
+
+#[test]
+fn a_bus_label_is_shortened_from_the_left_of_its_path() {
+    // Short labels stay whole.
+    assert_eq!(short_bus_label("bus: replay", 24), "bus: replay");
+    // The path loses its start; the status words stay.
+    let s = short_bus_label("bus: /run/tt/very/long/bus.sock (reconnecting)", 24);
+    assert_eq!(s, "bus: \u{2026}ock (reconnecting)");
+    assert!(s.chars().count() <= 24);
+    let s = short_bus_label("bus: /run/tt/very/long/path/bus.sock", 24);
+    assert_eq!(s, "bus: \u{2026}long/path/bus.sock");
+    // Status words longer than the room: cut at the end.
+    let s = short_bus_label("bus: /a/b.sock (other host) (reconnecting)", 24);
+    assert!(s.chars().count() <= 24 && s.ends_with('\u{2026}'), "{s}");
+    assert!(s.starts_with("bus: "), "{s}");
 }

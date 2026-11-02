@@ -271,10 +271,14 @@ pub fn success() -> Color {
 /// Success background (not used in dark mode)
 pub const SUCCESS_BG: Color = Color::Rgb(0, 0, 0); // Black
 
+/// The error colour's RGB before any theme remap. Die 3D blends with it
+/// (an alarm flag, an ECC flash), so it needs the raw triple.
+pub const ERROR_RGB: [u8; 3] = [255, 100, 100];
+
 /// Error state color (brightened red for dark mode). Grayskull maps it to hot
 /// pink (red is the one "hot" hue that keeps saturation).
 pub fn error() -> Color {
-    rgb(255, 100, 100)
+    rgb(ERROR_RGB[0], ERROR_RGB[1], ERROR_RGB[2])
 }
 
 /// Error background (not used in dark mode)

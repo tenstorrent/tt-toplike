@@ -44,8 +44,16 @@ const GDDR_ROWS: [i32; 4] = [0, 3, 6, 9];
 
 /// The GDDR channel drawn at row `row` (an index into `GDDR_ROWS`) on the
 /// west (`east` false) or east side of a die: channels 0 to 3 down the west
-/// side, 4 to 7 down the east side, as the Blackhole DRAM columns hold them
-/// (die columns 0 and 16).
+/// side, 4 to 7 down the east side, top to bottom in channel order.
+///
+/// The side is documented: channels 0 to 3 sit on the west DRAM NoC column
+/// (x=0) and 4 to 7 on the east one (x=9), per Jira SYS-5391 and the
+/// tt-metal/tt-umd `blackhole_140_arch` soc descriptor. The order of the four
+/// rows within a side is not documented anywhere found: each channel is a
+/// bank of three NoC tiles spread over the column (bank 0 reaches both the
+/// top and the bottom of the west column, bank 3 sits in the middle). So the
+/// rows here are in channel order, and a row's vertical position is not a
+/// measured die position. The legend and the explain text say so.
 pub(super) fn gddr_channel(east: bool, row: usize) -> usize {
     usize::from(east) * GDDR_ROWS.len() + row
 }
@@ -814,8 +822,8 @@ pub(super) fn draw_die_tile(
     if front && (6..=10).contains(&gx) {
         let colour = lerp_rgb(ctx.pal.tile, ctx.pal.noc1, 0.7);
         match die.fx.map_or(0.0, |fx| fx.pulse) {
-            // Requests completed: the connector glows serving teal and
-            // stands a little taller, fading over a second (see `overlay`).
+            // Requests completed: the connector glows serving teal, fading
+            // over a second (see `overlay`).
             p if p > 0.0 => cube(
                 buf,
                 blocks(2.5),

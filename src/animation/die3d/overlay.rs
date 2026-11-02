@@ -54,12 +54,13 @@ use crate::bus::signals as sig;
 use std::collections::HashMap;
 use tt_toplike_bus::{EntityKey, Event, ModelPhase, ModelView, Provenance, Value, WorldRead};
 
-/// The workload colours of `activity_lanes`: load purple, serve teal, train
-/// amber, and the error red stalled work uses (`colors::error`).
-pub const LOAD_PURPLE: [u8; 3] = [180, 140, 230];
-pub const SERVE_TEAL: [u8; 3] = [79, 209, 197];
-pub const TRAIN_AMBER: [u8; 3] = [246, 188, 66];
-pub const ALARM_RED: [u8; 3] = [255, 100, 100];
+/// The workload colours, one definition shared with `activity_lanes`: load
+/// purple, serve teal, train amber, and the error red stalled work uses
+/// (`colors::ERROR_RGB`).
+pub const LOAD_PURPLE: [u8; 3] = crate::animation::activity_lanes::LOAD_RGB;
+pub const SERVE_TEAL: [u8; 3] = crate::animation::activity_lanes::SERVE_RGB;
+pub const TRAIN_AMBER: [u8; 3] = crate::animation::activity_lanes::TRAIN_RGB;
+pub const ALARM_RED: [u8; 3] = crate::ui::colors::ERROR_RGB;
 /// A model that is down: the palette's management grey.
 pub const DOWN_GREY: [u8; 3] = [112, 110, 128];
 
@@ -465,10 +466,14 @@ fn add_spark(prev: &mut OverlayState, chip: EntityKey, now: u64, seq: u64, rgb: 
 
 /// The flag of model `m`.
 fn flag_of(world: &dyn WorldRead, m: &ModelView) -> ModelFlag {
+    // Every reading that puts text in the flag: the label, the phase, the
+    // progress, tokens/s and the waiting count.
     let estimated = [
-        tt_toplike_bus::signals::MODEL_PHASE,
-        tt_toplike_bus::signals::MODEL_TOKENS_PER_S,
         tt_toplike_bus::signals::MODEL_LABEL,
+        tt_toplike_bus::signals::MODEL_PHASE,
+        tt_toplike_bus::signals::MODEL_PROGRESS,
+        tt_toplike_bus::signals::MODEL_TOKENS_PER_S,
+        tt_toplike_bus::signals::MODEL_WAITING,
     ]
     .iter()
     .filter_map(|s| world.reading(&m.key, s))
@@ -648,7 +653,7 @@ impl ChipFx {
                 .pulses
                 .iter()
                 .map(|p| {
-                    // Faded in whole levels: 1, 3/4, 1/2, 1/4, then gone.
+                    // Faded in whole levels: 1, then 1/2, then gone.
                     let left =
                         (left(p.start_ns, now, PULSE_NS) * PULSE_LEVELS).ceil() / PULSE_LEVELS;
                     (PULSE_WEIGHT * p.strength * left).min(0.95)
