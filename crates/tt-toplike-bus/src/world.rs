@@ -28,6 +28,18 @@ use std::io;
 /// How many events [`World::events`] keeps.
 pub const EVENT_WINDOW: usize = 512;
 
+/// How old (record time, ns) the newest reading or event mention of a
+/// churning entity must be before [`World::apply`] drops it. Churning kinds
+/// are processes, leases, training runs and models that are not announced.
+/// Chips, boards, tiles, DRAM channels, Ethernet ports and hosts are bounded
+/// by hardware and are never dropped: a quiet one stays visible and ages.
+pub const ENTITY_TTL_NS: u64 = 15 * 60 * 1_000_000_000;
+
+/// The sweep for stale churning entities runs when a record's monotonic time
+/// is at least this far (ns) past the previous sweep. It uses record time
+/// only, so replaying the same records prunes at the same points.
+pub const PRUNE_EVERY_NS: u64 = 60 * 1_000_000_000;
+
 /// The latest value of one signal and where it came from.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reading {
@@ -77,6 +89,10 @@ pub struct ModelView {
 }
 
 /// The current state of everything on the bus.
+///
+/// `PartialEq` compares every field, including the pruning bookkeeping
+/// (`touched`, `last_prune_ns`). Both are functions of the record stream, so
+/// two worlds built from the same records are equal.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct World {
     seq: u64,
@@ -86,6 +102,11 @@ pub struct World {
     resets: BTreeMap<EntityKey, u64>,
     raw: BTreeMap<String, RawFrame>,
     events: VecDeque<(u64, Event)>,
+    /// Record time (ns) of the newest reading or event mention of each
+    /// churning entity. Holds no hardware-bounded kinds.
+    touched: BTreeMap<EntityKey, u64>,
+    /// Record time (ns) of the last prune sweep.
+    last_prune_ns: u64,
 }
 
 impl World {
@@ -112,7 +133,7 @@ impl World {
                 }
             }
             Payload::Event(e) => {
-                self.apply_event(rec.seq, e);
+                self.apply_event(rec.seq, rec.t_mono_ns, e);
                 if self.events.len() == EVENT_WINDOW {
                     self.events.pop_front();
                 }
@@ -123,11 +144,41 @@ impl World {
             }
             Payload::Gap(_) => {}
         }
+        if rec.t_mono_ns.saturating_sub(self.last_prune_ns) >= PRUNE_EVERY_NS {
+            self.prune(rec.t_mono_ns);
+        }
+    }
+
+    /// Note that a churning entity was seen at `t`. Other kinds are not
+    /// tracked.
+    fn touch(&mut self, key: &EntityKey, t: u64) {
+        if is_churning(key.kind()) {
+            self.touched.insert(key.clone(), t);
+        }
+    }
+
+    /// Drop churning entities not seen for [`ENTITY_TTL_NS`]. Announced
+    /// models are kept. `readings` and `known` lose the same keys.
+    fn prune(&mut self, now: u64) {
+        self.last_prune_ns = now;
+        let models = &self.models;
+        let stale: Vec<EntityKey> = self
+            .touched
+            .iter()
+            .filter(|(k, t)| now.saturating_sub(**t) > ENTITY_TTL_NS && !models.contains_key(*k))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in stale {
+            self.touched.remove(&k);
+            self.readings.remove(&k);
+            self.known.remove(&k);
+        }
     }
 
     /// Store one reading and, for a model signal, update the model's view.
     fn set(&mut self, rec: &Record, entity: &EntityKey, signal: &str, v: &Value, prov: Provenance) {
         self.known.insert(entity.clone());
+        self.touch(entity, rec.t_mono_ns);
         let r = Reading {
             value: v.clone(),
             prov,
@@ -143,7 +194,17 @@ impl World {
             .insert(signal.to_string(), r);
     }
 
-    fn apply_event(&mut self, seq: u64, e: &Event) {
+    fn apply_event(&mut self, seq: u64, t: u64, e: &Event) {
+        match e {
+            Event::ModelLoading { model, .. }
+            | Event::ModelReady { model, .. }
+            | Event::ModelGone { model }
+            | Event::RequestsCompleted { model, .. } => self.touch(model, t),
+            Event::LeaseGranted { lease, .. } | Event::LeaseReleased { lease, .. } => {
+                self.touch(lease, t)
+            }
+            _ => {}
+        }
         match e {
             Event::ModelLoading {
                 model,
@@ -253,6 +314,14 @@ impl World {
     pub fn latest_raw(&self, source: &str) -> Option<&RawFrame> {
         self.raw.get(source)
     }
+}
+
+/// Kinds that come and go while the monitor runs.
+fn is_churning(k: EntityKind) -> bool {
+    matches!(
+        k,
+        EntityKind::Process | EntityKind::Lease | EntityKind::TrainingRun | EntityKind::Model
+    )
 }
 
 /// Number-like values as `f64`. Text is not a number.
@@ -801,6 +870,198 @@ mod tests {
                 .unwrap()
                 .value,
             Value::F64(99.0)
+        );
+    }
+
+    const SEC: u64 = 1_000_000_000;
+
+    #[test]
+    fn churning_entities_are_pruned_and_the_maps_stay_bounded() {
+        let mut w = World::new();
+        let c = chip(1);
+        w.apply(&rec(
+            1,
+            SEC,
+            "s",
+            sample(&c, "tdp", Value::F64(1.0), Provenance::Measured),
+        ));
+        // One new process per second of record time, 10,000 in all.
+        for i in 0..10_000u64 {
+            let p = EntityKey::process(i as u32, i);
+            w.apply(&rec(
+                2 + i,
+                (2 + i) * SEC,
+                "ps",
+                sample(&p, "cpu", Value::F64(1.0), Provenance::Measured),
+            ));
+        }
+        // 15 minutes of TTL is 900 s; the sweep runs at most every 60 s.
+        let bound = 1_000;
+        assert!(w.readings.len() <= bound, "readings {}", w.readings.len());
+        assert!(w.known.len() <= bound, "known {}", w.known.len());
+        assert_eq!(
+            w.readings.len() - 1,
+            w.entities(EntityKind::Process).count()
+        );
+        assert_eq!(w.known.len(), w.readings.len(), "maps agree after a prune");
+        assert!(w.touched.len() <= bound);
+        // The newest process is still there; an early one is gone.
+        assert!(w
+            .reading(&EntityKey::process(9_999, 9_999), "cpu")
+            .is_some());
+        assert!(w.reading(&EntityKey::process(0, 0), "cpu").is_none());
+    }
+
+    #[test]
+    fn quiet_chip_survives_an_hour_with_growing_age() {
+        let mut w = World::new();
+        let c = chip(1);
+        w.apply(&rec(
+            1,
+            SEC,
+            "s",
+            sample(&c, "tdp", Value::F64(42.0), Provenance::Measured),
+        ));
+        w.apply(&rec(
+            2,
+            SEC,
+            "s",
+            sample(
+                &EntityKey::host("h"),
+                "load",
+                Value::F64(1.0),
+                Provenance::Measured,
+            ),
+        ));
+        w.apply(&rec(
+            3,
+            SEC,
+            "s",
+            sample(
+                &EntityKey::tile(&c, 1, 1),
+                "a",
+                Value::U64(1),
+                Provenance::Measured,
+            ),
+        ));
+        // Another source talks for an hour.
+        for i in 0..60u64 {
+            let p = EntityKey::process(1, 1);
+            w.apply(&rec(
+                4 + i,
+                (60 + i * 60) * SEC,
+                "ps",
+                sample(&p, "cpu", Value::F64(1.0), Provenance::Measured),
+            ));
+        }
+        let r = w.reading(&c, "tdp").unwrap();
+        assert_eq!(r.value, Value::F64(42.0));
+        assert!(w.age_ms(&r, 3_600 * SEC) >= 3_500_000);
+        assert!(w.reading(&EntityKey::host("h"), "load").is_some());
+        assert_eq!(w.entities(EntityKind::Tile).count(), 1);
+    }
+
+    #[test]
+    fn process_updated_every_minute_is_never_pruned() {
+        let mut w = World::new();
+        let p = EntityKey::process(7, 7);
+        for i in 0..240u64 {
+            w.apply(&rec(
+                1 + i,
+                (i + 1) * 60 * SEC,
+                "ps",
+                sample(&p, "cpu", Value::U64(i), Provenance::Measured),
+            ));
+            assert!(w.reading(&p, "cpu").is_some(), "minute {i}");
+        }
+    }
+
+    #[test]
+    fn models_in_view_and_event_mentions_keep_entities_alive() {
+        let mut w = World::new();
+        let (m, l) = (model(), EntityKey::lease("L1"));
+        w.apply(&rec(
+            1,
+            SEC,
+            "s",
+            ev(Event::ModelReady {
+                model: m.clone(),
+                chips: vec![chip(1)],
+            }),
+        ));
+        w.apply(&rec(
+            2,
+            SEC,
+            "v",
+            sample(
+                &m,
+                signals::MODEL_RUNNING,
+                Value::U64(2),
+                Provenance::Measured,
+            ),
+        ));
+        w.apply(&rec(
+            3,
+            SEC,
+            "g",
+            sample(&l, "chips", Value::U64(1), Provenance::Measured),
+        ));
+        // The lease is mentioned by an event 10 minutes in, then an hour passes.
+        w.apply(&rec(
+            4,
+            600 * SEC,
+            "g",
+            ev(Event::LeaseGranted {
+                lease: l.clone(),
+                chips: vec![chip(1)],
+            }),
+        ));
+        w.apply(&rec(
+            5,
+            1_000 * SEC,
+            "x",
+            sample(&chip(2), "t", Value::U64(1), Provenance::Measured),
+        ));
+        assert!(
+            w.reading(&l, "chips").is_some(),
+            "event mention at 600 s keeps it at 1000 s"
+        );
+        w.apply(&rec(
+            6,
+            4_000 * SEC,
+            "x",
+            sample(&chip(2), "t", Value::U64(2), Provenance::Measured),
+        ));
+        assert!(w.reading(&l, "chips").is_none());
+        // The announced model keeps its view and readings however quiet.
+        assert_eq!(w.models()[0].running, Some(2));
+        assert!(w.reading(&m, signals::MODEL_RUNNING).is_some());
+    }
+
+    #[test]
+    fn replay_including_pruning_gives_an_equal_world() {
+        let mut recs = Vec::new();
+        for i in 0..3_000u64 {
+            let p = EntityKey::process((i % 500) as u32, i / 500);
+            recs.push(rec(
+                1 + i,
+                (1 + i) * 2 * SEC,
+                "ps",
+                sample(&p, "cpu", Value::U64(i), Provenance::Measured),
+            ));
+        }
+        let (mut a, mut b) = (World::new(), World::new());
+        for r in &recs {
+            a.apply(r);
+        }
+        for r in &recs {
+            b.apply(r);
+        }
+        assert_eq!(a, b);
+        assert!(
+            a.readings.len() < 500 * 6,
+            "some pruning happened: {}",
+            a.readings.len()
         );
     }
 
