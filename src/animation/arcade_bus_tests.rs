@@ -862,3 +862,34 @@ fn attached_the_duel_serves_the_hosts_stats_and_lunges_on_its_requests() {
         );
     })
 }
+
+/// Prints an arcade frame with something from the bus on each chip: a model
+/// loading at 40% on chip 0, one ready on chip 1 with a hit just begun, a
+/// spark and a compile. For a person to look at; asserts nothing. Run with
+/// `cargo test --locked --lib --features tui arcade_bus_smoke_frame -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints a frame for a person to look at"]
+fn arcade_bus_smoke_frame() {
+    tc(|| {
+        let t0 = 5 * SEC;
+        let mut f = Bus::new();
+        f.loading("load", &[0], Some(0.4))
+            .ready("serve", &[1], Some(42.0));
+        let (mut a, b) = arcade();
+        step(&mut a, &b, &f.view(t0));
+        f.requests("serve", 5)
+            .event(Event::Spark {
+                chip: Some(chip(1)),
+                kind: "vLLM.log".into(),
+            })
+            .event(Event::KernelCompiled {
+                chip: Some(chip(0)),
+                source: "ttnn".into(),
+            });
+        step(&mut a, &b, &f.view(t0 + TICK));
+        for line in a.render(&b) {
+            let s: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            println!("{s}");
+        }
+    })
+}

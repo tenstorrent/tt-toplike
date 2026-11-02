@@ -533,7 +533,7 @@ fn draw_gauge(co: &ChipFx, now: u64, cols: Range<usize>, row: usize, lines: &mut
             tint(lines, row, a..end.min(cols.end), LOAD_PURPLE, 1.0);
         }
         Gauge::Sweep { since_ns } => {
-            // Decoration: the band says the model is busy, not how far.
+            // Decoration: the band says the model is busy and does not say how far.
             let period = SWEEP_PERIOD_NS as f32 / NS_PER_S as f32;
             let phase = (stepped_secs(since_ns, now) / period).fract();
             let centre = phase * (1.0 + 2.0 * BAND_HALF) - BAND_HALF;
@@ -565,11 +565,14 @@ fn draw_gauge(co: &ChipFx, now: u64, cols: Range<usize>, row: usize, lines: &mut
 }
 
 /// The model's label, right-aligned in the slot with one column to spare,
-/// clear of the gauge row's own label. The longest of the flag's texts that
-/// fits; none when none fits.
+/// clear of the gauge row's own label and of the `▓▒░` that ends the rule.
+/// The longest of the flag's texts that fits; none when none fits.
 fn draw_label(flag: &ModelFlag, cols: Range<usize>, stage: &Stage, lines: &mut [Line<'static>]) {
     let start_min = cols.start.max(stage.label_cols + 1);
-    let end = cols.end.saturating_sub(1);
+    let end = cols
+        .end
+        .min(stage.width.saturating_sub(3))
+        .saturating_sub(1);
     let Some(text) = flag.texts().into_iter().find(|t| {
         let w = UnicodeWidthStr::width(t.as_str());
         end >= w && end - w >= start_min
