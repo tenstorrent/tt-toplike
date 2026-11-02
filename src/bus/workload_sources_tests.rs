@@ -723,11 +723,13 @@ fn service_label_and_key_are_redacted() {
     let text = serde_json::to_string(&out).unwrap();
     assert!(!text.contains("keysecret1"), "{text}");
     assert!(!text.contains("labelsecret1"), "{text}");
-    let m = EntityKey::model("svc HF_TOKEN=<redacted>");
-    assert!(events(&out).contains(&&Event::ModelReady {
-        model: m.clone(),
-        chips: vec![EntityKey::chip(A)]
-    }));
+    let keys = model_keys(&out);
+    assert_eq!(keys.len(), 1);
+    assert!(
+        keys[0].starts_with("model:svc HF_TOKEN=<redacted>#"),
+        "{keys:?}"
+    );
+    let m = EntityKey::model(keys[0].strip_prefix("model:").unwrap());
     match &sample(&out, &m, bsig::MODEL_LABEL).unwrap().value {
         Value::Text(t) => assert_eq!(t.chars().count(), MAX_TEXT),
         v => panic!("{v:?}"),
@@ -804,6 +806,86 @@ fn a_log_built_from_property_command_lines_never_contains_their_secrets() {
     for s in &secrets {
         assert!(!text.contains(s.as_str()), "{s} reached the log");
     }
+}
+
+// ---- Fix round 2 -------------------------------------------------------------
+
+fn model_keys(out: &[Payload]) -> Vec<String> {
+    events(out)
+        .into_iter()
+        .filter_map(|e| match e {
+            Event::ModelReady { model, .. } => Some(model.as_str().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn keys_that_differ_only_in_a_redacted_part_stay_distinct() {
+    let map = map_with(&[(0, A)]);
+    let mut src = InferenceSource::new(map);
+    src.feed(&[
+        state("svc --token aaa111", Phase::Ready, &[0]),
+        state("svc --token bbb222", Phase::Ready, &[0]),
+    ]);
+    let out = poll(&mut src);
+    let keys = model_keys(&out);
+    assert_eq!(keys.len(), 2, "{keys:?}");
+    assert_ne!(keys[0], keys[1]);
+    for k in &keys {
+        assert!(k.starts_with("model:svc --token <redacted>#"), "{k}");
+        assert_eq!(k.len(), "model:svc --token <redacted>#".len() + 8, "{k}");
+    }
+    let text = serde_json::to_string(&out).unwrap();
+    assert!(!text.contains("aaa111") && !text.contains("bbb222"));
+    // Fed again, the same keys come out: the suffix is stable.
+    src.feed(&[
+        state("svc --token aaa111", Phase::Ready, &[0]),
+        state("svc --token bbb222", Phase::Ready, &[0]),
+    ]);
+    assert!(events(&poll(&mut src)).is_empty());
+}
+
+#[test]
+fn keys_that_differ_only_after_the_clip_stay_distinct() {
+    let map = map_with(&[(0, A)]);
+    let mut src = InferenceSource::new(map);
+    let long = "x".repeat(600);
+    src.feed(&[
+        state(&format!("{long}A"), Phase::Ready, &[0]),
+        state(&format!("{long}B"), Phase::Ready, &[0]),
+    ]);
+    let keys = model_keys(&poll(&mut src));
+    assert_eq!(keys.len(), 2);
+    assert_ne!(keys[0], keys[1]);
+    // A key that redaction and clipping leave alone gets no suffix.
+    src.feed(&[state("plain", Phase::Ready, &[0])]);
+    assert_eq!(model_keys(&poll(&mut src)), vec!["model:plain".to_string()]);
+}
+
+#[test]
+fn chips_becoming_empty_clears_the_device_text() {
+    let map = map_with(&[(0, A)]);
+    let mut src = ProcessSource::new(map);
+    let mut p = ProcSnapshot {
+        pid: 9,
+        start_ticks: 9,
+        device_indices: vec![0],
+        ..Default::default()
+    };
+    src.feed(&[p.clone()]);
+    poll(&mut src);
+    p.device_indices.clear();
+    src.feed(&[p.clone()]);
+    let out = poll(&mut src);
+    let e = EntityKey::process(9, 9);
+    assert_eq!(
+        sample(&out, &e, sig::PROC_DEVICE).unwrap().value,
+        Value::Text(String::new())
+    );
+    // Cleared once; the next empty feed sends nothing.
+    src.feed(&[p]);
+    assert!(sample(&poll(&mut src), &e, sig::PROC_DEVICE).is_none());
 }
 
 // ---- Remote -----------------------------------------------------------------

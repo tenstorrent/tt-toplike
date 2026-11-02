@@ -358,7 +358,7 @@ const ALNUM: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789
 const UPPER: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 /// Number of secret-bearing shapes in [`shape`].
-pub(crate) const SHAPES: usize = 32;
+pub(crate) const SHAPES: usize = 47;
 
 /// One secret-bearing command fragment and the secret it carries.
 pub(crate) fn shape(i: usize, g: &mut Lcg) -> (String, String) {
@@ -398,7 +398,22 @@ pub(crate) fn shape(i: usize, g: &mut Lcg) -> (String, String) {
             return (format!("AKIA{k}"), k);
         }
         30 => format!("eyJ{s}.eyJ{s}.{s}"),
-        _ => format!("--client-secret={s}"),
+        31 => format!("--client-secret={s}"),
+        32 => format!("--apiToken {s}"),
+        33 => format!("--accessToken={s}"),
+        34 => format!("--authToken {s}"),
+        35 => format!("--auth {s}"),
+        36 => format!("--pass {s}"),
+        37 => format!("DB_PASS={s}"),
+        38 => format!("MYSQL_PWD={s}"),
+        39 => format!("https://u:pa/{s}@h.example/x"),
+        40 => format!("--api-key $(echo {s})"),
+        41 => format!("--token `cat {s}`"),
+        42 => format!("--cfg \"{{'api_key': '{s}'}}\""),
+        43 => format!("{{'token': '{s}'}}"),
+        44 => format!("--apiKey={s}"),
+        45 => format!("dbPassphrase={s}"),
+        _ => format!("-H \"X-Pass: {s}\""),
     };
     (frag, s)
 }
@@ -415,7 +430,18 @@ const FILLER: &[&str] = &[
     "--tensor-parallel-size 2",
 ];
 
-const STRAY: &[&str] = &["'", "\"", "don't", "it's", "say\"", "'x", "\"y"];
+const STRAY: &[&str] = &[
+    "'",
+    "\"",
+    "don't",
+    "it's",
+    "say\"",
+    "'x",
+    "\"y",
+    // Quotes inside an argument.
+    "--prompt=don't",
+    "--title=it's\"",
+];
 
 /// A command line holding 1 to 3 secret fragments among filler, with 1 to
 /// 3 stray quotes or apostrophes between arguments. Returns the line and its
@@ -488,4 +514,105 @@ fn a_mis_paired_quote_keeps_the_header_rule_working() {
     hidden(&out, &["abc777"]);
     let out = redact_cmdline("don't --api-key 'k888' x");
     hidden(&out, &["k888"]);
+}
+
+// ---- Fix round 2 -------------------------------------------------------------
+
+#[test]
+fn camel_case_and_short_flag_names_are_secret() {
+    for flag in [
+        "--apiToken",
+        "--accessToken",
+        "--authToken",
+        "--auth",
+        "--pass",
+        "--apiKey",
+        "--passphrase",
+        "--bearer",
+        "--client_pwd",
+        "--APIKey",
+        // Only the suffix rule catches these (one lowercase word).
+        "--apitoken",
+        "--dbpass",
+        // Only the case split catches these (the name ends in another word).
+        "--apiKeyId",
+        "--bearerValue",
+    ] {
+        for cmd in [
+            format!("app {flag} zq9w --port 8000"),
+            format!("app {flag}=zq9w --port 8000"),
+        ] {
+            let out = redact_cmdline(&cmd);
+            hidden(&out, &["zq9w"]);
+            assert!(out.ends_with(" --port 8000"), "{out}");
+        }
+    }
+    for cmd in [
+        "app --max-num-batched-tokens 8192 --tokenizer-mode auto",
+        "app --ssl-keyfile /etc/k.pem --compass-mode north --keep-alive 5",
+    ] {
+        assert_eq!(redact_cmdline(cmd), cmd);
+    }
+}
+
+#[test]
+fn new_words_apply_to_header_json_and_query_names() {
+    let out = redact_cmdline(
+        r#"curl -H "X-Pass: hp1" -H X-Bearer:hp2 http://h/v1?pwd=hp3&passphrase=hp4&n=1"#,
+    );
+    hidden(&out, &["hp1", "hp2", "hp3", "hp4"]);
+    assert!(out.ends_with("&n=1"), "{out}");
+    let out = redact_cmdline(r#"app -d {"passphrase":"hp5","userPass":"hp6","n":1}"#);
+    hidden(&out, &["hp5", "hp6"]);
+    assert!(out.contains(r#""n":1"#), "{out}");
+}
+
+#[test]
+fn env_names_with_pass_and_pwd_words_are_secret() {
+    let out = redact_cmdline(
+        "env DB_PASS=ep1 MYSQL_PWD=ep2 GPG_PASSPHRASE=ep3 dbPass=ep4 DBPASS=ep5 COMPASS_X=k3epx app",
+    );
+    hidden(&out, &["ep1", "ep2", "ep3", "ep4", "ep5"]);
+    assert!(out.contains("COMPASS_X=k3epx"), "{out}");
+}
+
+#[test]
+fn url_password_with_a_slash_is_masked() {
+    let out = redact_cmdline("git clone https://u:pa/ss1@host.example/r.git x");
+    hidden(&out, &["ss1", "pa/"]);
+    assert_eq!(out, "git clone https://<redacted>@host.example/r.git x");
+    let out = redact_cmdline("app --db='postgres://u:a/b/c2@h/d'");
+    hidden(&out, &["c2"]);
+    // An `@` later in the path without a colon before it is not userinfo.
+    let keep = "curl https://h.example/u?email=a@b.example";
+    assert_eq!(redact_cmdline(keep), keep);
+}
+
+#[test]
+fn single_quoted_dict_keys_and_values_are_masked() {
+    let out = redact_cmdline(r#"python x.py --cfg "{'api_key': 'sq1', 'model': 'llama'}""#);
+    hidden(&out, &["sq1"]);
+    assert!(out.contains("'model': 'llama'"), "{out}");
+    let out = redact_cmdline("python x.py {'token':'sq2'}");
+    hidden(&out, &["sq2"]);
+    let out = redact_cmdline("python x.py {'secret': 'sq3'}");
+    hidden(&out, &["sq3"]);
+}
+
+#[test]
+fn command_substitution_values_are_masked_through_the_close() {
+    for (cmd, secret) in [
+        ("app --api-key $(echo sub1 extra) --port 8000", "sub1"),
+        ("app --token `cat /run/sub2 x` --port 8000", "sub2"),
+        ("app --api-key=$(cat /run/sub3 y) --port 8000", "sub3"),
+        ("HF_TOKEN=$(cat /run/sub4 z) --port 8000", "sub4"),
+        ("app --api-key $(echo $(cat sub5) q) --port 8000", "sub5"),
+    ] {
+        let out = redact_cmdline(cmd);
+        hidden(&out, &[secret, "extra", " x`", " y)", " z)", " q)"]);
+        assert!(out.ends_with(" --port 8000"), "{out}");
+    }
+    // Unclosed: masked to the end.
+    let out = redact_cmdline("app --api-key $(echo sub6 tail");
+    hidden(&out, &["sub6", "tail"]);
 }

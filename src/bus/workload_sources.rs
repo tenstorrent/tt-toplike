@@ -144,6 +144,20 @@ fn clip(mut s: String) -> String {
     s
 }
 
+/// A service key safe to put in an entity key: redacted and clipped. When
+/// that changed the key, 8 hex digits of a hash of the raw key are added
+/// (`svc --token <redacted>#1a2b3c4d`), so two services whose keys differ
+/// only in a hidden or clipped part stay two entities. The raw key is never
+/// written. Note: a 32-bit hash of a short, guessable secret can be found
+/// by trying candidates; it does not reveal a long random one.
+fn safe_key(raw: &str) -> String {
+    let safe = clip(redact_cmdline(raw));
+    if safe == raw {
+        return safe;
+    }
+    format!("{safe}#{:08x}", hash_of(raw) as u32)
+}
+
 /// The phase as the world spells it.
 fn phase_text(p: Phase) -> &'static str {
     match p {
@@ -460,8 +474,9 @@ impl ModelTracker {
 
 /// Turns the inference monitor's `ServiceState` snapshots into model records.
 ///
-/// Per service, on entity `EntityKey::model(key)`, where the key and the
-/// label are passed through `redact_cmdline` and cut to [`MAX_TEXT`]
+/// Per service, on entity `EntityKey::model(key)`, where the key is made
+/// safe by `safe_key` (redacted, clipped, and given a hash suffix when that
+/// changed it) and the label is redacted and cut to [`MAX_TEXT`]
 /// characters:
 /// * `ModelLoading{chips, progress}` when the phase becomes Compiling or
 ///   Loading, `ModelReady{chips}` when it becomes Ready, each once per
@@ -510,7 +525,7 @@ fn snap_from_state(s: &ServiceState) -> ModelSnap {
         _ => None,
     };
     ModelSnap {
-        key: clip(redact_cmdline(&s.key)),
+        key: safe_key(&s.key),
         label: clip(redact_cmdline(&s.label)),
         phase: Some(s.phase),
         progress: s.progress,
@@ -807,8 +822,8 @@ impl From<&ProcRow> for ProcSnapshot {
 /// What [`ProcessSource`] remembers about one process between feeds.
 #[derive(Debug, Default)]
 struct ProcState {
-    /// Hash of the raw command line last redacted, and its redacted text.
-    /// The raw text itself is not kept.
+    /// Hash of the raw command line last sent. Only the hash is stored:
+    /// neither the raw nor the redacted text is kept.
     cmd_hash: Option<u64>,
     /// Hash of the raw name last sent.
     name_hash: Option<u64>,
@@ -923,7 +938,16 @@ impl ProcessSource {
             let (chips, missing) = resolve_chips(&self.map, &p.device_indices);
             hold_new(&self.map, self.source, &e, &missing, &mut st.held);
             if chips.is_empty() {
-                st.device = None;
+                // The chips went away: clear the text once with an empty value.
+                if st.device.take().is_some() {
+                    put(
+                        out,
+                        &e,
+                        sig::PROC_DEVICE,
+                        Value::Text(String::new()),
+                        Measured,
+                    );
+                }
             } else {
                 let text = chip_text(&chips);
                 if st.device.as_deref() != Some(text.as_str()) {
@@ -1056,7 +1080,7 @@ mod remote {
             _ => None,
         };
         ModelSnap {
-            key: clip(redact_cmdline(&r.key)),
+            key: safe_key(&r.key),
             label: clip(redact_cmdline(&r.label)),
             phase: parse_phase(&r.phase),
             progress: r.progress,

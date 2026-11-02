@@ -33,17 +33,23 @@ pub const REDACTED: &str = "<redacted>";
 /// Replace the secret values in a command line with [`REDACTED`].
 ///
 /// What is hidden (word rules, pass 1):
-/// * The value after a secret flag (`--api-key x`, `--token x`,
-///   `--password x`, `--secret x`, `--hf-token x`, `--client-secret=x`), in
-///   the spaced and `=` forms. A flag is secret when one of its dash- or
-///   underscore-separated words is `token`, `password`, `passwd`, `pwd`,
-///   `secret`, `apikey`, `credential(s)` or `key`, or it contains `api-key`.
-///   `--max-num-batched-tokens` and `--tokenizer-mode` do not match. The
-///   value is hidden even when it starts with `-` (`--password -Xy7`),
-///   unless it is a flag: `--anything` or a two-character `-x`.
+/// * The value after a secret flag, in the spaced and `=` forms. A name
+///   (flag, header, JSON key or query name) is secret when, split into
+///   words at `-`, `_` and case changes (`accessToken` is `access token`),
+///   one word is `token`, `password`, `passwd`, `pwd`, `pass`,
+///   `passphrase`, `secret`, `apikey`, `credential(s)`, `key`, `auth` or
+///   `bearer`, or it has the words `api key`, or its words joined end with
+///   `token`, `key`, `secret`, `password`, `passwd`, `auth`, `pass` or `pwd`.
+///   `--max-num-batched-tokens`, `--tokenizer-mode`, `--ssl-keyfile` and
+///   `--keep-alive` do not match. The value is hidden even when it starts
+///   with `-` (`--password -Xy7`), unless it is a flag: `--anything` or a
+///   two-character `-x`. A value that starts `$(` or with a backtick is
+///   hidden through its closing `)` or backtick, or to the end of the line.
 /// * `NAME=value` where `NAME` (any case) contains `TOKEN`, `KEY`, `SECRET`,
 ///   `PASSWORD`, `PASSWD`, `CREDENTIAL`, `AUTH`, `PRIVATE` or `COOKIE`, or
-///   has `PAT` as one of its `_`-separated words. Alone or as a flag's value
+///   has `PAT`, `PASS`, `PWD` or `PASSPHRASE` as a whole word (split at `_`
+///   and case changes), or its last word ends with `PASS`, `PWD` or
+///   `PASSPHRASE` (`DBPASS`). `PATH` and `COMPASS_X` are kept. Alone or as a flag's value
 ///   (`-e HF_TOKEN=x`, `--env=API_KEY=x`).
 /// * The value after `-p`, whatever it is, and an attached `-pVALUE`.
 ///   Kept: a port mapping (`8000:8000`, `127.0.0.1:80:80/tcp`) and the
@@ -58,12 +64,14 @@ pub const REDACTED: &str = "<redacted>";
 ///   `Authorization:Bearer x`, `x-api-key: x`, `Cookie: a=b`). A scheme word
 ///   (`Bearer`, `Basic`, `Token`, `Digest`) is kept and the next word hidden.
 /// * In a URL, the userinfo (`https://user:pass@host` becomes
-///   `https://<redacted>@host`) and query values whose name contains
+///   `https://<redacted>@host`; a password holding `/` runs to the last `@`
+///   when a `:` comes before it) and query values whose name contains
 ///   `token`, `key`, `secret`, `password`, `passwd`, `auth`, `sig` or
 ///   `credential`.
-/// * In JSON text, values for keys whose name contains `token`, `key`,
-///   `secret`, `password`, `passwd`, `auth` or `credential`, in one word or
-///   split across words.
+/// * In JSON text or a Python dict (either quote), values for keys whose
+///   name contains `token`, `key`, `secret`, `password`, `passwd`, `auth`
+///   or `credential`, or is a secret name as above, in one word or split
+///   across words.
 ///
 /// What is hidden anywhere (shape pass 2): `hf_` + 16 or more letters and
 /// digits, `sk-` + 16 or more, `ghp_`/`gho_`/`ghs_`/`ghu_`/`ghr_` + 20 or
@@ -98,6 +106,36 @@ enum Pending {
     UserPass,
     /// After a secret header name: keep a scheme word, else hide this word.
     HeaderValue,
+    /// Inside a secret `$( ... )` value: hide words until the parentheses
+    /// close. Holds the open depth.
+    SubstParen(i32),
+    /// Inside a secret backtick value: hide words until the closing one.
+    SubstTick,
+}
+
+/// Hide a secret value. A value that opens `$(` or a backtick and does not
+/// close in this word keeps hiding the following words until it closes (or
+/// the line ends).
+fn mask_value(v: &str) -> (String, Pending) {
+    let core = v.trim_start_matches(QUOTES);
+    let next = if core.starts_with("$(") {
+        let depth = paren_depth(v);
+        if depth > 0 {
+            Pending::SubstParen(depth)
+        } else {
+            Pending::None
+        }
+    } else if core.starts_with('`') && v.matches('`').count() == 1 {
+        Pending::SubstTick
+    } else {
+        Pending::None
+    };
+    (mask(v), next)
+}
+
+/// Opening minus closing parentheses.
+fn paren_depth(v: &str) -> i32 {
+    v.matches('(').count() as i32 - v.matches(')').count() as i32
 }
 
 /// Run the word rules over `s`. With `quotes`, whitespace inside quotes
@@ -140,6 +178,26 @@ fn mask(v: &str) -> String {
 
 /// Redact one word given what came before it.
 fn redact_word(tok: &str, pending: Pending) -> (String, Pending) {
+    match pending {
+        Pending::SubstParen(d) => {
+            let d = d + paren_depth(tok);
+            let next = if d > 0 {
+                Pending::SubstParen(d)
+            } else {
+                Pending::None
+            };
+            return (mask(tok), next);
+        }
+        Pending::SubstTick => {
+            let next = if tok.contains('`') {
+                Pending::None
+            } else {
+                Pending::SubstTick
+            };
+            return (mask(tok), next);
+        }
+        _ => {}
+    }
     let core = tok.trim_matches(QUOTES);
     if core.is_empty() {
         // A word of quotes only: nothing to hide, and the next word is
@@ -172,8 +230,8 @@ fn redact_word(tok: &str, pending: Pending) -> (String, Pending) {
     }
 
     match pending {
-        Pending::FlagValue if !is_flag_word(core) => return (mask(tok), Pending::None),
-        Pending::Secret => return (mask(tok), Pending::None),
+        Pending::FlagValue if !is_flag_word(core) => return mask_value(tok),
+        Pending::Secret => return mask_value(tok),
         Pending::Positional if !core.starts_with('-') => return (mask(tok), Pending::None),
         Pending::DashP if !core.starts_with('-') => {
             if is_port_mapping(core) {
@@ -197,7 +255,8 @@ fn redact_word(tok: &str, pending: Pending) -> (String, Pending) {
     if let Some((name, value)) = after.split_once('=') {
         if core.starts_with('-') && core.len() > 1 && !name.contains(char::is_whitespace) {
             if is_secret_flag(name) {
-                return (format!("{lead}{name}={}", mask(value)), Pending::None);
+                let (v, next) = mask_value(value);
+                return (format!("{lead}{name}={v}"), next);
             }
             if is_user_flag(name) {
                 return (format!("{lead}{name}={}", user_pass(value)), Pending::None);
@@ -207,7 +266,8 @@ fn redact_word(tok: &str, pending: Pending) -> (String, Pending) {
         }
         if is_identifier(name) {
             if is_secret_env(name) {
-                return (format!("{lead}{name}={}", mask(value)), Pending::None);
+                let (v, next) = mask_value(value);
+                return (format!("{lead}{name}={v}"), next);
             }
             let (v, next) = redact_word(value, Pending::None);
             return (format!("{lead}{name}={v}"), next);
@@ -323,29 +383,80 @@ fn user_pass(v: &str) -> String {
     format!("{user}:{}", mask(pass))
 }
 
-/// Is this flag (with its dashes) one whose value is a secret?
-fn is_secret_flag(flag: &str) -> bool {
-    let name = flag
-        .trim_start_matches('-')
-        .to_ascii_lowercase()
-        .replace('_', "-");
-    if name.contains("api-key") {
+/// The words of a name, lowercased. Split at every character that is not a
+/// letter or digit, and at case changes: `accessToken` is `access token`,
+/// `APIKey` is `api key`, `DB_PASS` is `db pass`.
+fn name_words(name: &str) -> Vec<String> {
+    let chars: Vec<char> = name.chars().collect();
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    for (i, &c) in chars.iter().enumerate() {
+        if !c.is_ascii_alphanumeric() {
+            if !cur.is_empty() {
+                words.push(std::mem::take(&mut cur));
+            }
+            continue;
+        }
+        if c.is_ascii_uppercase() && !cur.is_empty() {
+            let prev = chars[i - 1];
+            let next_lower = chars.get(i + 1).is_some_and(|n| n.is_ascii_lowercase());
+            if prev.is_ascii_lowercase()
+                || prev.is_ascii_digit()
+                || (prev.is_ascii_uppercase() && next_lower)
+            {
+                words.push(std::mem::take(&mut cur));
+            }
+        }
+        cur.push(c.to_ascii_lowercase());
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
+/// Words that make a flag, header, JSON key or query name secret.
+const SECRET_WORDS: &[&str] = &[
+    "token",
+    "password",
+    "passwd",
+    "pwd",
+    "pass",
+    "passphrase",
+    "secret",
+    "apikey",
+    "credential",
+    "credentials",
+    "key",
+    "auth",
+    "bearer",
+];
+
+/// Endings of the whole name, words joined, that make it secret
+/// (`xapitoken`, `dbpass`).
+const SECRET_SUFFIXES: &[&str] = &[
+    "token", "key", "secret", "password", "passwd", "auth", "pass", "pwd",
+];
+
+/// Is this flag, header, JSON key or query name a secret's name? True when
+/// one of its words is in [`SECRET_WORDS`], it has the words `api key`, or
+/// its words joined end with one of [`SECRET_SUFFIXES`]. `tokens`,
+/// `tokenizer`, `keyfile` and `keep` are not secret words.
+fn is_secret_name(name: &str) -> bool {
+    let words = name_words(name);
+    if words.iter().any(|w| SECRET_WORDS.contains(&w.as_str())) {
         return true;
     }
-    name.split('-').any(|w| {
-        matches!(
-            w,
-            "token"
-                | "password"
-                | "passwd"
-                | "pwd"
-                | "secret"
-                | "apikey"
-                | "credential"
-                | "credentials"
-                | "key"
-        )
-    })
+    if words.windows(2).any(|p| p[0] == "api" && p[1] == "key") {
+        return true;
+    }
+    let flat: String = words.concat();
+    SECRET_SUFFIXES.iter().any(|x| flat.ends_with(x))
+}
+
+/// Is this flag (with its dashes) one whose value is a secret?
+fn is_secret_flag(flag: &str) -> bool {
+    is_secret_name(flag.trim_start_matches('-'))
 }
 
 fn is_identifier(name: &str) -> bool {
@@ -370,8 +481,16 @@ fn is_secret_env(name: &str) -> bool {
     ]
     .iter()
     .any(|w| up.contains(w))
-        // `PAT` only as a whole word, so PATH and PYTHONPATH are kept.
-        || up.split('_').any(|w| w == "PAT")
+        || {
+            // PAT, PASS, PWD and PASSPHRASE only as whole words or at the
+            // end of the name, so PATH, PYTHONPATH and COMPASS_X are kept.
+            let words = name_words(name);
+            let short = ["pat", "pass", "pwd", "passphrase"];
+            words.iter().any(|w| short.contains(&w.as_str()))
+                || words
+                    .last()
+                    .is_some_and(|w| ["pass", "pwd", "passphrase"].iter().any(|x| w.ends_with(x)))
+        }
 }
 
 fn is_header_name(name: &str) -> bool {
@@ -386,6 +505,7 @@ fn is_secret_header(name: &str) -> bool {
     ["key", "token", "auth", "secret", "cookie"]
         .iter()
         .any(|w| n.contains(w))
+        || is_secret_name(name)
 }
 
 fn is_secret_json_key(name: &str) -> bool {
@@ -401,6 +521,7 @@ fn is_secret_json_key(name: &str) -> bool {
     ]
     .iter()
     .any(|w| n.contains(w))
+        || is_secret_name(name)
 }
 
 fn is_secret_query_name(name: &str) -> bool {
@@ -417,9 +538,10 @@ fn is_secret_query_name(name: &str) -> bool {
     ]
     .iter()
     .any(|w| n.contains(w))
+        || is_secret_name(name)
 }
 
-/// Hide JSON values of secret keys in `s`. Returns the text and whether `s`
+/// Hide JSON (or Python dict) values of secret keys in `s`. Returns the text and whether `s`
 /// ends just after a secret key's colon, so the value is the next word.
 fn mask_json(s: &str) -> (String, bool) {
     let b = s.as_bytes();
@@ -428,12 +550,19 @@ fn mask_json(s: &str) -> (String, bool) {
     let mut copied = 0; // bytes of `s` already in `out`
     let mut i = 0;
     while i < n {
-        if b[i] != b'"' {
+        // Keys and string values may use either quote (JSON or a Python
+        // dict); a string ends at the same quote it started with.
+        let q = b[i];
+        if q != b'"' && q != b'\'' {
             i += 1;
             continue;
         }
-        let Some(rel) = s[i + 1..].find('"') else {
-            break;
+        // A quote with no partner, or a quoted run that is not a key,
+        // may still hold a key further in: step one character on and look
+        // again.
+        let Some(rel) = s[i + 1..].find(q as char) else {
+            i += 1;
+            continue;
         };
         let name_end = i + 1 + rel;
         let name = &s[i + 1..name_end];
@@ -441,7 +570,11 @@ fn mask_json(s: &str) -> (String, bool) {
         while k < n && b[k] == b' ' {
             k += 1;
         }
-        if k >= n || b[k] != b':' || !is_secret_json_key(name) {
+        if k >= n || b[k] != b':' {
+            i += 1;
+            continue;
+        }
+        if !is_secret_json_key(name) {
             i = name_end + 1;
             continue;
         }
@@ -455,9 +588,10 @@ fn mask_json(s: &str) -> (String, bool) {
         }
         // The value: a string up to its closing quote, or anything up to
         // `,`, `}` or `]`.
-        let (start, end, closing) = if b[k] == b'"' {
+        let (start, end, closing) = if b[k] == b'"' || b[k] == b'\'' {
+            let vq = b[k];
             let mut e = k + 1;
-            while e < n && !(b[e] == b'"' && b[e - 1] != b'\\') {
+            while e < n && !(b[e] == vq && b[e - 1] != b'\\') {
                 e += 1;
             }
             (k + 1, e, e < n)
@@ -484,8 +618,19 @@ fn mask_url(s: &str) -> String {
     let mut from = 0;
     while let Some(rel) = s[from..].find("://") {
         let a = from + rel + 3;
-        let end = s[a..].find(['/', '?', '#']).map_or(s.len(), |e| a + e);
-        if let Some(at) = s[a..end].rfind('@') {
+        let authority_end = s[a..].find(['/', '?', '#']).map_or(s.len(), |e| a + e);
+        let url_end = s[a..]
+            .find(|c: char| c.is_whitespace() || c == '\'' || c == '"')
+            .map_or(s.len(), |e| a + e);
+        // An `@` in the authority ends the userinfo. A password may also
+        // hold `/`: then the userinfo runs to the last `@` in the URL, when
+        // a `:` comes before it.
+        let at = s[a..authority_end].rfind('@').or_else(|| {
+            s[a..url_end]
+                .rfind('@')
+                .filter(|at| s[a..a + at].contains(':'))
+        });
+        if let Some(at) = at {
             s.replace_range(a..a + at, REDACTED);
             from = a + REDACTED.len() + 1;
         } else {

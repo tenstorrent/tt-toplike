@@ -124,7 +124,7 @@ pub const PROC_RSS_BYTES: &str = "toplike.proc.rss_bytes";
 pub const PROC_NAME: &str = "toplike.proc.name";
 /// Process command line (text). Always passed through `redact_cmdline` first.
 pub const PROC_CMDLINE: &str = "toplike.proc.cmdline";
-/// The chips the process holds open, as comma-separated chip keys (text). Not sent while none resolve.
+/// The chips the process holds open, as comma-separated chip keys (text). Sent when it changes; an empty text means the process no longer holds a resolved chip.
 pub const PROC_DEVICE: &str = "toplike.proc.device";
 /// 1 when the remote host says the process uses Tenstorrent hardware, else 0 (remote source only).
 pub const PROC_USES_TT: &str = "toplike.proc.uses_tt";
