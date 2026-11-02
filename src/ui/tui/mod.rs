@@ -39,6 +39,7 @@ pub(crate) mod proc_scan;
 pub(crate) mod reset_status;
 pub mod throttle;
 pub use throttle::ThrottleState;
+mod grid_bus;
 mod hivemind_bus;
 mod hivemind_view;
 pub(crate) mod inference_bus;
