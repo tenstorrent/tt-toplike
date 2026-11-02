@@ -38,6 +38,35 @@ struct TrailPosition {
     age: u32, // Frames since creation
 }
 
+/// Blackhole core voltage (V) under which the hero shows `%`.
+///
+/// 0.75 V is Blackhole's nominal VDD, not a minimum: an idle p300c chip reads
+/// 0.715 to 0.73 V, so a 0.75 V floor flagged every idle chip. The board
+/// reports a `vdd_min` of 0.70 V and the firmware clamps it to at least 0.65 V;
+/// 0.65 V leaves about 65 mV under the lowest idle reading we have seen.
+const BLACKHOLE_UNDERVOLT_V: f32 = 0.65;
+
+/// Blackhole's idle AI clock in MHz. A chip at or below it is idle, and a
+/// chip at its normal idle voltage must never show `%`.
+const BLACKHOLE_IDLE_AICLK_MHZ: u32 = 800;
+
+/// Whether the hero shows `%` (undervolt) for a chip.
+///
+/// Blackhole: voltage under [`BLACKHOLE_UNDERVOLT_V`], and not idle when the
+/// clock is known (an unknown clock does not hide a voltage that low). Other
+/// architectures keep the old 0.75 V floor, because there are no sourced
+/// numbers for them yet.
+fn is_undervolt(arch: crate::models::Architecture, volts: Option<f32>, aiclk: Option<u32>) -> bool {
+    let Some(v) = volts else {
+        return false;
+    };
+    if arch == crate::models::Architecture::Blackhole {
+        let busy = aiclk.map_or(true, |c| c > BLACKHOLE_IDLE_AICLK_MHZ);
+        return v < BLACKHOLE_UNDERVOLT_V && busy;
+    }
+    v < 0.75
+}
+
 /// Arcade visualization combining all three modes with hero character
 pub struct ArcadeVisualization {
     width: usize,
@@ -68,7 +97,7 @@ pub struct ArcadeVisualization {
     hero_throttled: bool,        // throttler register non-zero
     hero_faulted: bool,          // faults register non-zero
     hero_arc_stalled: bool,      // heartbeat == 0
-    hero_undervolt: bool,        // vcore < 0.75 V
+    hero_undervolt: bool,        // vcore under the floor for its architecture, see `is_undervolt`
     hero_harvested: bool,        // harvesting_state > 0 (some cores disabled)
     hero_gddr_temp: Option<f32>, // max GDDR temp — drives trail color separately from ASIC
 
@@ -612,7 +641,8 @@ impl ArcadeVisualization {
                     .map(|f| f != "0x0" && f != "0" && !f.is_empty())
                     .unwrap_or(false);
                 self.hero_arc_stalled = telemetry.heartbeat.map(|h| h == 0).unwrap_or(false);
-                self.hero_undervolt = telemetry.voltage.map(|v| v < 0.75).unwrap_or(false);
+                self.hero_undervolt =
+                    is_undervolt(device.architecture, telemetry.voltage, telemetry.aiclk);
                 self.hero_gddr_temp = smbus.and_then(|s| s.max_gddr_temp);
                 self.hero_harvested = smbus
                     .and_then(|s| s.harvesting_state)
@@ -1167,7 +1197,7 @@ impl ArcadeVisualization {
     ///
     /// ## Hero character meaning
     /// - `@` — healthy, normal operation
-    /// - `%` — undervolt (vcore < 0.75 V)
+    /// - `%` — undervolt (Blackhole: vcore under 0.65 V while the clock is above idle)
     /// - `!` — throttled or faulted (thermal / power limit hit)
     /// - `?` — ARC firmware stalled (heartbeat == 0)
     /// - `(` / `)` — harvested cores (some Tensix columns disabled); alternates by frame
@@ -1308,6 +1338,49 @@ fn clamp_spans_to_width(spans: Vec<Span<'static>>, max_cols: usize) -> Vec<Span<
         }
     }
     out
+}
+
+#[cfg(test)]
+mod undervolt_tests {
+    use super::is_undervolt;
+    use crate::models::Architecture::{Blackhole, Wormhole};
+
+    /// The readings seen on a QuietBox 2 at idle (0.715 to 0.728 V, 800 MHz)
+    /// never show `%`.
+    #[test]
+    fn an_idle_blackhole_chip_never_shows_percent() {
+        for v in [0.715, 0.727, 0.728, 0.75] {
+            assert!(!is_undervolt(Blackhole, Some(v), Some(800)), "{v}");
+        }
+    }
+
+    #[test]
+    fn a_busy_blackhole_chip_shows_percent_only_under_the_floor() {
+        assert!(is_undervolt(Blackhole, Some(0.64), Some(1340)));
+        assert!(!is_undervolt(Blackhole, Some(0.65), Some(1340)));
+        assert!(!is_undervolt(Blackhole, Some(0.70), Some(1340)));
+    }
+
+    /// A chip at the idle clock is not undervolted even at a low reading, and
+    /// an unknown clock does not hide a reading under the floor.
+    #[test]
+    fn the_idle_clock_gates_percent_and_an_unknown_clock_does_not() {
+        assert!(!is_undervolt(Blackhole, Some(0.60), Some(800)));
+        assert!(is_undervolt(Blackhole, Some(0.60), None));
+    }
+
+    /// Other architectures keep the old floor until they have sourced numbers.
+    #[test]
+    fn other_architectures_keep_the_old_floor() {
+        assert!(is_undervolt(Wormhole, Some(0.74), Some(800)));
+        assert!(!is_undervolt(Wormhole, Some(0.76), Some(1000)));
+    }
+
+    #[test]
+    fn no_voltage_reading_shows_no_percent() {
+        assert!(!is_undervolt(Blackhole, None, Some(1000)));
+        assert!(!is_undervolt(Wormhole, None, None));
+    }
 }
 
 #[cfg(test)]

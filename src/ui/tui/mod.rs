@@ -398,7 +398,7 @@ const ROTATE_LINGER_IDLE: Duration = Duration::from_secs(10);
 /// The unattended rotation (`--rotate`, or `R` in-app).
 ///
 /// Unlike the `v` cycle this deliberately includes the entry-key-only views
-/// (`i`, `~`, `t`) — the whole point is to surface everything, including the
+/// (`i`, `~`, `t`, `3`) — the whole point is to surface everything, including the
 /// screens a passer-by would never know to press a key for.
 ///
 /// `Grid` is the one deliberate omission. It is not a distinct view but an
@@ -412,6 +412,7 @@ const ROTATION: &[DisplayMode] = &[
     DisplayMode::Starfield,
     DisplayMode::MemoryCastle,
     DisplayMode::Arcade,
+    DisplayMode::Die3d,
     DisplayMode::Defrag,
     DisplayMode::InferenceMonitor,
     DisplayMode::HivemindSweeper,
@@ -434,12 +435,15 @@ const ROTATE_PROBE_EVERY: Duration = Duration::from_secs(3);
 
 /// Whether the rotation stops at `mode`. Training and the Inference Monitor are
 /// about a workload, so they are visited only while one exists: a model
-/// starting or serving, or a training run. Every other view draws live
-/// telemetry and is always visited.
-fn rotation_visits(mode: DisplayMode, training: bool, inference: bool) -> bool {
+/// starting or serving, or a training run. Die 3D draws Blackhole boards only,
+/// so it is visited only when the box has one (`die3d`); on any other box it
+/// would show a hint line. Every other view draws live telemetry and is always
+/// visited.
+fn rotation_visits(mode: DisplayMode, training: bool, inference: bool, die3d: bool) -> bool {
     match mode {
         DisplayMode::Training => training,
         DisplayMode::InferenceMonitor => inference,
+        DisplayMode::Die3d => die3d,
         _ => true,
     }
 }
@@ -447,10 +451,15 @@ fn rotation_visits(mode: DisplayMode, training: bool, inference: bool) -> bool {
 /// The next view in the rotation that [`rotation_visits`] accepts. Insights is
 /// always accepted, so this ends within one lap. A view that is not in
 /// `ROTATION` starts the rotation again, as `next_rotation_mode` does.
-fn next_rotation_mode_for(m: DisplayMode, training: bool, inference: bool) -> DisplayMode {
+fn next_rotation_mode_for(
+    m: DisplayMode,
+    training: bool,
+    inference: bool,
+    die3d: bool,
+) -> DisplayMode {
     let mut next = next_rotation_mode(m);
     for _ in 0..ROTATION.len() {
-        if rotation_visits(next, training, inference) {
+        if rotation_visits(next, training, inference, die3d) {
             return next;
         }
         next = next_rotation_mode(next);
@@ -1788,6 +1797,7 @@ fn run_app(
                         display_mode,
                         rotation_activity.wants_training(),
                         rotation_activity.inference,
+                        has_blackhole_chip(backend.devices()),
                     );
                     force_redraw = true;
                 }
@@ -9607,18 +9617,16 @@ mod display_mode_tests {
         assert_eq!(mode, DisplayMode::Insights);
     }
 
+    /// The unattended rotation (`--rotate`, `R`) visits Die 3D, the `v` cycle
+    /// does not: `v` stays a short manual loop and `3` is the way in.
     #[test]
-    fn die3d_is_not_in_the_v_rotation() {
-        // Neither the unattended rotation nor the `v` cycle may reach Die3d:
-        // it is entered with `3` only.
-        assert!(!ROTATION.contains(&DisplayMode::Die3d));
+    fn die3d_is_in_the_unattended_rotation_but_not_the_v_cycle() {
+        assert!(ROTATION.contains(&DisplayMode::Die3d));
         let mut m = DisplayMode::Insights;
         for _ in 0..12 {
             m = next_display_mode(m);
             assert_ne!(m, DisplayMode::Die3d, "`v` must not cycle into Die3d");
         }
-        // `next_rotation_mode` from Die3d (not listed) restarts the rotation.
-        assert_eq!(next_rotation_mode(DisplayMode::Die3d), ROTATION[0]);
     }
 
     #[test]
@@ -9864,6 +9872,7 @@ mod display_mode_tests {
             DisplayMode::MemoryCastle,
             DisplayMode::MemoryFlow,
             DisplayMode::Arcade,
+            DisplayMode::Die3d,
             DisplayMode::Defrag,
             DisplayMode::InferenceMonitor,
             DisplayMode::HivemindSweeper,
@@ -9903,11 +9912,11 @@ mod display_mode_tests {
         let lap = |training: bool, inference: bool| -> Vec<DisplayMode> {
             // One lap: from Insights until the rotation comes back to it.
             let mut seen = vec![DisplayMode::Insights];
-            let mut m = next_rotation_mode_for(DisplayMode::Insights, training, inference);
+            let mut m = next_rotation_mode_for(DisplayMode::Insights, training, inference, true);
             while m != DisplayMode::Insights {
                 seen.push(m);
                 assert!(seen.len() <= ROTATION.len(), "a lap never ends: {seen:?}");
-                m = next_rotation_mode_for(m, training, inference);
+                m = next_rotation_mode_for(m, training, inference, true);
             }
             seen
         };
@@ -9921,6 +9930,7 @@ mod display_mode_tests {
             DisplayMode::Starfield,
             DisplayMode::MemoryCastle,
             DisplayMode::Arcade,
+            DisplayMode::Die3d,
             DisplayMode::Defrag,
             DisplayMode::HivemindSweeper,
         ] {
@@ -10019,7 +10029,7 @@ mod display_mode_tests {
         a.probe(before, &view(11 * SEC), || false);
         assert!(!a.training, "the local scan found nothing");
         assert_eq!(
-            next_rotation_mode_for(before, a.wants_training(), a.inference),
+            next_rotation_mode_for(before, a.wants_training(), a.inference, true),
             DisplayMode::Training,
             "the host's run earns Training a visit"
         );
@@ -10027,7 +10037,7 @@ mod display_mode_tests {
         // The same world a minute later: the run's step reading is stale.
         a.probe(before, &view(71 * SEC), || false);
         assert_ne!(
-            next_rotation_mode_for(before, a.wants_training(), a.inference),
+            next_rotation_mode_for(before, a.wants_training(), a.inference, true),
             DisplayMode::Training
         );
     }
@@ -10080,9 +10090,12 @@ mod display_mode_tests {
             DisplayMode::Defrag,
             DisplayMode::HivemindSweeper,
         ] {
-            let next = next_rotation_mode_for(m, false, false);
+            let next = next_rotation_mode_for(m, false, false, true);
             assert_ne!(next, m, "{m:?} must advance");
-            assert!(rotation_visits(next, false, false), "{m:?} -> {next:?}");
+            assert!(
+                rotation_visits(next, false, false, true),
+                "{m:?} -> {next:?}"
+            );
             assert!(
                 ROTATION.contains(&next),
                 "{m:?} -> {next:?} is in the rotation"
@@ -10091,9 +10104,37 @@ mod display_mode_tests {
         // Every other view is always visited, whatever is going on.
         for &m in ROTATION {
             if !matches!(m, DisplayMode::Training | DisplayMode::InferenceMonitor) {
-                assert!(rotation_visits(m, false, false), "{m:?}");
+                assert!(rotation_visits(m, false, false, true), "{m:?}");
             }
         }
+    }
+
+    /// Die 3D draws Blackhole boards only, so the rotation stops there only
+    /// when the box has one. On any other box it would show a hint line.
+    #[test]
+    fn the_rotation_visits_die3d_only_with_a_blackhole_chip() {
+        use super::next_rotation_mode_for;
+        let lap = |die3d: bool| -> Vec<DisplayMode> {
+            let mut seen = vec![DisplayMode::Insights];
+            let mut m = next_rotation_mode_for(DisplayMode::Insights, true, true, die3d);
+            while m != DisplayMode::Insights {
+                seen.push(m);
+                assert!(seen.len() <= ROTATION.len(), "a lap never ends: {seen:?}");
+                m = next_rotation_mode_for(m, true, true, die3d);
+            }
+            seen
+        };
+        assert!(lap(true).contains(&DisplayMode::Die3d));
+        assert!(!lap(false).contains(&DisplayMode::Die3d));
+        // It follows the Arcade and precedes Defrag.
+        assert_eq!(
+            next_rotation_mode_for(DisplayMode::Arcade, true, true, true),
+            DisplayMode::Die3d
+        );
+        assert_eq!(
+            next_rotation_mode_for(DisplayMode::Arcade, true, true, false),
+            DisplayMode::Defrag
+        );
     }
 
     /// A view missing from `ROTATION` must restart the cycle, never wedge.

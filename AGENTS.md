@@ -1454,6 +1454,13 @@ Copilot's review, each claim checked against the code before acting:
 - Docs: the PR title said 0.14.2 while the code said 0.14.3 (release metadata is the version).
 - Tests that used 0 W as a chip's idle now use 37 W: no powered chip reads under a watt.
 
+### Version history: 0.15.2 (Nov 2 2026)
+
+0.15.2 puts the remaining views on the signal bus (`src/animation/{starfield,memory_flow,castle,defrag,train}_bus.rs`,
+`bus_intake.rs`, `src/ui/tui/grid_bus.rs`), adds Die 3D to the unattended rotation (`ROTATION`, gated on a
+Blackhole chip by `rotation_visits`), and replaces the arcade hero's 0.75 V undervolt floor with
+`is_undervolt` (Blackhole 0.65 V and a busy clock). `WorldRead::entities(kind)` is new in the bus crate.
+
 ### Version history: 0.15.1 (Nov 2 2026)
 
 0.15.1 puts arcade (`src/animation/arcade_bus.rs`) and the `~` view (`src/ui/tui/hivemind_bus.rs`) on

@@ -17,6 +17,20 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.15.2
+- Starfield, Memory Flow, Memory Castle, Defrag, Grid, the Insights chip panels and Training read the
+  signal bus, each in its own style: model bring-up that follows load progress, a hit or comet for each
+  completed request, tokens per second, ECC and reset flashes, and the `~` mark on estimated values. With
+  an empty world each draws what it drew before. Training can show a run seen on a headless host and a
+  model serving on the same chips. Defrag clears a chip's blocks when its model goes down.
+- `--rotate` and `R` visit Die 3D when the box has a Blackhole chip. The `v` cycle does not.
+- The arcade hero's `%` mark needs a Blackhole core voltage under 0.65 V and a clock above the 800 MHz
+  idle clock. The old 0.75 V floor is Blackhole's nominal voltage, so every idle chip showed `%`. Other
+  architectures keep the 0.75 V floor.
+- Tests that waited on the wall clock or raced a thread now use a fixed clock or no time bound.
+- Limits: not run on real hardware, in a live terminal, or attached to a headless host. The intake rules
+  exist in three copies (arcade, Die 3D, `bus_intake`). Explain text for Insights is cut off at 44 rows.
+
 ### 0.15.1
 - Arcade reads the signal bus: a bring-up gauge that follows load progress, a hit for each completed
   request, a hero pace that follows tokens per second, particles for sparks and kernel compiles, a

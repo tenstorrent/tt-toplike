@@ -1,3 +1,27 @@
+tt-toplike (0.15.2) noble; urgency=medium
+
+  * The rest of the views read the signal bus. Starfield shows a cluster for
+    each model coming up, a comet for each completed request and a flare for
+    an ECC rise. Memory Flow streams a loading model's weights to its
+    channels. Memory Castle lights a tower for a model, and Defrag fills its
+    blocks from the model's load progress and clears them when it goes down.
+    Grid portraits and the Insights chip panels show the model, its phase and
+    its tokens per second. The Training view can show a run seen on a
+    headless host, and shows a model serving on the same chips.
+  * The --rotate rotation and R now visit Die 3D when the box has a
+    Blackhole chip. The v cycle does not.
+  * The % mark on the arcade hero no longer shows on an idle Blackhole chip.
+    It needs a core voltage under 0.65 V (the old floor was 0.75 V, the
+    nominal voltage) and a clock above the 800 MHz idle clock. Other
+    architectures keep the 0.75 V floor.
+  * Fix: tests that waited on the wall clock or raced a thread failed on a
+    loaded machine. They now use a fixed clock or no time bound.
+  * Not yet run on real hardware, in a live terminal, or attached to a
+    headless host. The three copies of the bus intake rules (arcade, Die 3D
+    and the new shared module) are not yet one.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 17:00:00 -0800
+
 tt-toplike (0.15.1) noble; urgency=medium
 
   * Arcade reads the signal bus. A model coming up fills a gauge on the chip's
