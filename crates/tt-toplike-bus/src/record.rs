@@ -31,9 +31,10 @@
 //!
 //! A missing reading has no representation: the source emits no sample.
 //! JSON cannot carry NaN or infinity, so a non-finite `F64` is not a valid
-//! value. Sources must not emit one, and [`Payload::sanitize`] enforces it:
-//! it drops non-finite readings and rejects malformed sweeps before a record
-//! is logged.
+//! value. Sources must not emit one. [`crate::Bus::publish`] enforces it by
+//! running every payload through [`Payload::sanitize`], which drops
+//! non-finite readings and rejects malformed sweeps, so neither reaches the
+//! log.
 //!
 //! `serde_json` escapes every control character inside strings, so a line
 //! never contains a raw newline even when text or a raw body does.

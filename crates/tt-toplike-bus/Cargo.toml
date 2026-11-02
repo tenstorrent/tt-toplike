@@ -11,3 +11,5 @@ repository = "https://github.com/tenstorrent/tt-toplike"
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# Compression for closed segments. See the module doc of src/segment.rs.
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
