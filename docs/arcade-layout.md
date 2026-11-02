@@ -6,7 +6,7 @@ draws the layout it has always had.
 
 ## Where the config lives
 
-The layout is set in `~/.config/tt-toplike/config.toml`, the one config file tt-toplike
+The layout is set in `~/.config/tt-toplike/config.toml`, the only config file tt-toplike
 reads. The other settings in it (`sensitivity`, `max_particles_scale`, `tt_smi_reset_behavior`)
 work as before. No file in the working directory is read, so a repository you check out cannot
 change tt-toplike.
