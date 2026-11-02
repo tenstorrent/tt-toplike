@@ -89,8 +89,8 @@ impl BackdropKind {
     pub fn follows(self) -> &'static str {
         match self {
             BackdropKind::Scene => "model phase, tokens/s, KV cache and requests",
-            BackdropKind::Sky => "training step time; its stars are decoration",
-            BackdropKind::Clouds => "PCIe (drift) and chip load (light); decoration",
+            BackdropKind::Sky => "training step time; stars and aurora are decoration",
+            BackdropKind::Clouds => "PCIe (drift), load (light); shape is decoration",
         }
     }
 }
@@ -224,12 +224,22 @@ pub struct BackdropConfig {
 
 impl BackdropConfig {
     /// The backdrop `view` starts with: its `[backdrop.views]` entry, else
-    /// its own backdrop ([`builtin`]), else `default`, else off.
+    /// its own backdrop ([`builtin`]), else `default` when the view takes
+    /// it, else off.
     pub fn choice(&self, view: &str) -> Choice {
         if let Some((_, c)) = self.views.iter().rev().find(|(v, _)| *v == view) {
             return *c;
         }
-        builtin(view).or(self.default.flatten())
+        builtin(view).or(self.default_for(view))
+    }
+
+    /// The `default` kind as `view` takes it: none when the view refuses
+    /// it (the Starfield and a default of scene or sky), so the view stays
+    /// off. `crate::config` notes it.
+    pub fn default_for(&self, view: &str) -> Choice {
+        self.default
+            .flatten()
+            .filter(|k| refusal(view, *k).is_none())
     }
 }
 

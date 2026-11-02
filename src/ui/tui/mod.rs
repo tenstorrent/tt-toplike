@@ -1201,10 +1201,11 @@ fn run_app(
     // so it works from every mode without mode-specific plumbing.
     let mut cmd_mode = false;
     let mut cmd_buf = String::new();
-    let mut cmd_message: Option<(String, bool)> = crate::config::status_message(loaded_config); // (text, is_error)
-                                                                                                // The view `cmd_message` belongs to, if it belongs to one, and the
-                                                                                                // animation clock its lifetime runs on: the nominal frame time of each
-                                                                                                // tick, so a stalled loop does not age it.
+    // (text, is_error)
+    let mut cmd_message: Option<(String, bool)> = crate::config::status_message(loaded_config);
+    // The view `cmd_message` belongs to, if it belongs to one, and the
+    // animation clock its lifetime runs on: the nominal frame time of each
+    // tick, so a stalled loop does not age it.
     let mut cmd_message_view: Option<ViewMessage> = None;
     let mut message_clock_s = 0.0f64;
 
@@ -2346,7 +2347,7 @@ fn run_app(
 
                     // The shared backdrop, in the blank cells the view left.
                     let backdrop_area = backdrop_bus::area(f.area(), STATUS_BAR_ROWS as u16);
-                    shared_backdrop.draw(f.buffer_mut(), backdrop_area);
+                    shared_backdrop.draw(f.buffer_mut(), backdrop_area, view_name(display_mode));
 
                     // ── Global status bar (all modes) ─────────────────────────
                     render_global_statusbar(
@@ -4529,7 +4530,11 @@ fn render_command_bar(f: &mut Frame, cmd_buf: &str, msg: Option<(&str, bool)>) {
         height: bar_h,
     };
 
-    // Clear the bar rows with a dark background, then render text.
+    // Clear the bar rows, then give them a dark background, then render
+    // text. A `Block` style only recolours a cell and keeps its symbol, so
+    // without the `Clear` a backdrop glyph laid in these rows (the shared
+    // backdrop draws before the bar) showed to the right of each line.
+    f.render_widget(ratatui::widgets::Clear, bar_area);
     f.render_widget(
         Block::default().style(Style::default().bg(colors::rgb(15, 20, 30))),
         bar_area,
@@ -8279,6 +8284,14 @@ fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
     };
 
     f.render_widget(Clear, dialog_rect);
+    // A background of its own: the shared backdrop is laid after the view
+    // and fills only blank cells (a space on the canvas black or Reset), so
+    // a dialog left at Reset would take backdrop glyphs between its lines.
+    f.render_widget(
+        ratatui::widgets::Block::default()
+            .style(Style::default().bg(crate::ui::colors::rgb(8, 14, 22))),
+        dialog_rect,
+    );
 
     let content_w = (DIALOG_W.saturating_sub(1)) as usize; // ║ takes 1 col
     let name_short = truncate(&kc.name, 14);
@@ -10354,6 +10367,72 @@ mod display_mode_tests {
             arcade.as_ref().unwrap().backdrop().kind(),
             Some(BackdropKind::Clouds)
         );
+    }
+
+    /// The shared backdrop does not show inside the Insights kill dialog,
+    /// which the view draws itself, nor to the right of a multi-line
+    /// command-bar message, which is drawn after the backdrop (review S3).
+    #[test]
+    fn the_backdrop_stays_out_of_the_kill_dialog_and_the_command_bar() {
+        use super::{render_command_bar, render_kill_dialog, KillConfirmState};
+        use crate::animation::backdrop::{Backdrop, BackdropKind, BackdropSignals};
+        use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+        let mut b = Backdrop::new(Some(BackdropKind::Clouds));
+        for i in 0..40 {
+            b.observe(&BackdropSignals {
+                now_s: i as f64 / 4.0,
+                pcie_bps: Some(4e9),
+                load: Some(1.0),
+                ..Default::default()
+            });
+        }
+        let glyph = |c: &str| ["░", "▒", "▓"].contains(&c);
+        let (w, h) = (100u16, 40u16);
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let kc = KillConfirmState {
+            pid: 42,
+            name: "python".into(),
+            device_idx: 0,
+        };
+        t.draw(|f| {
+            let area = f.area();
+            render_kill_dialog(f, area, &kc);
+            b.layer_buffer(f.buffer_mut(), area);
+        })
+        .unwrap();
+        let buf = t.backend().buffer().clone();
+        // The dialog is 42x8, centred.
+        let d = Rect::new((w - 42) / 2, (h - 8) / 2, 42, 8);
+        let mut outside = 0;
+        for y in 0..h {
+            for x in 0..w {
+                let inside = d.contains((x, y).into());
+                let g = glyph(buf[(x, y)].symbol());
+                assert!(
+                    !(inside && g),
+                    "a backdrop glyph at ({x},{y}) in the dialog"
+                );
+                outside += usize::from(g && !inside);
+            }
+        }
+        assert!(outside > 0, "the backdrop draws around the dialog");
+        // A three-line message over a laid backdrop.
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| {
+            let area = f.area();
+            b.layer_buffer(f.buffer_mut(), area);
+            render_command_bar(f, "", Some(("one\ntwo lines\nthree", false)));
+        })
+        .unwrap();
+        let buf = t.backend().buffer().clone();
+        for y in h - 3..h {
+            for x in 0..w {
+                assert!(
+                    !glyph(buf[(x, y)].symbol()),
+                    "a backdrop glyph at ({x},{y}) in the command bar"
+                );
+            }
+        }
     }
 
     /// A layout message belongs to the arcade: it goes when the arcade is

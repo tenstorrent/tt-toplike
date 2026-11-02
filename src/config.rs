@@ -608,6 +608,30 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
                 });
             };
             parse_backdrop(item, &mut backdrop, &mut backdrop_report);
+            // A default a view refuses leaves that view off; say so.
+            if let Some(k) = backdrop.default.flatten() {
+                use crate::animation::backdrop::{builtin, refusal, VIEWS};
+                let line = item
+                    .as_table_like()
+                    .and_then(|t| t.get("default"))
+                    .and_then(|v| v.span())
+                    .map(|sp| line_of(text, sp.start));
+                for v in VIEWS {
+                    let set = backdrop.views.iter().any(|(x, _)| *x == v);
+                    if builtin(v).is_none() && !set {
+                        if let Some(why) = refusal(v, k) {
+                            out.notes.push(ConfigProblem {
+                                file: path.clone(),
+                                line,
+                                message: format!(
+                                    "backdrop default {}: {v} refuses it ({why}) and stays off",
+                                    k.name()
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
         }
         // This file's problems in line order.
         out.problems[first_problem..].sort_by_key(|p| p.line.unwrap_or(0));
@@ -1980,6 +2004,38 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
         let none = load(&[]);
         assert_eq!(none.backdrop, Default::default());
         assert_eq!(none.backdrop.choice("die3d"), CLOUDS);
+    }
+
+    /// A `default` of scene or sky leaves the Starfield off (its stars are
+    /// cores), with a note; `--check-config` still passes (review S1).
+    #[test]
+    fn a_default_the_starfield_refuses_leaves_it_off_with_a_note() {
+        for kind in ["scene", "sky"] {
+            let l = load(&[("c.toml", &format!("[backdrop]\ndefault = \"{kind}\"\n"))]);
+            assert!(l.problems.is_empty(), "{:?}", l.problems);
+            assert_eq!(l.backdrop.choice("starfield"), None, "{kind}");
+            assert_eq!(
+                crate::animation::backdrop::choice_name(l.backdrop.choice("castle")),
+                kind
+            );
+            let n: Vec<String> = l.notes.iter().map(|p| p.to_string()).collect();
+            assert_eq!(
+                n,
+                vec![format!("c.toml:2: backdrop default {kind}: starfield refuses it (its stars are Tensix cores, and this backdrop draws stars too) and stays off")]
+            );
+            let mut out = Vec::new();
+            assert_eq!(write_check_report(&l, &mut out), 0);
+        }
+        // Clouds it takes; a views entry for it means no note.
+        let l = load(&[("c.toml", "[backdrop]\ndefault = \"clouds\"\n")]);
+        assert!(l.notes.is_empty());
+        assert_eq!(l.backdrop.choice("starfield"), CLOUDS);
+        let l = load(&[(
+            "c.toml",
+            "[backdrop]\ndefault = \"sky\"\n[backdrop.views]\nstarfield = \"clouds\"\n",
+        )]);
+        assert!(l.notes.is_empty(), "{:?}", l.notes);
+        assert_eq!(l.backdrop.choice("starfield"), CLOUDS);
     }
 
     #[test]

@@ -100,10 +100,15 @@ impl SharedBackdrop {
         self.fed = Some(view);
     }
 
-    /// Lay the backdrop into `area` of the drawn frame. Nothing when the
-    /// view draws its own or has none.
-    pub(crate) fn draw(&self, buf: &mut Buffer, area: Rect) {
-        self.backdrop.layer_buffer(buf, area);
+    /// Lay the backdrop into `area` of the drawn frame for `view`, the view
+    /// on screen. Nothing when the view draws its own or has none, nor when
+    /// the last update fed another view: a key that switches views draws
+    /// once before the next update, and that frame must not carry the old
+    /// view's backdrop.
+    pub(crate) fn draw(&self, buf: &mut Buffer, area: Rect, view: &str) {
+        if self.fed == Some(view) {
+            self.backdrop.layer_buffer(buf, area);
+        }
     }
 
     /// Whether the last signals held an estimate (for the legend's `~`).
@@ -192,6 +197,30 @@ mod tests {
         // has the chip's idle.
         b.update(&s, "castle", false, |_| idle(30.0));
         assert_eq!(b.backdrop().cloud_intensity(), Clouds::intensity(0.0));
+    }
+
+    /// A frame drawn for a view the last update did not feed lays nothing
+    /// (review M2).
+    #[test]
+    fn draw_lays_only_the_backdrop_of_the_view_it_was_fed() {
+        let mut s = BackdropSettings::new(BackdropConfig::default());
+        s.set("castle", CLOUDS).unwrap();
+        let mut b = SharedBackdrop::default();
+        for i in 0..20 {
+            b.update(&s, "castle", false, |_| BackdropSignals {
+                now_s: i as f64 / 4.0,
+                pcie_bps: Some(4e9),
+                load: Some(1.0),
+                ..Default::default()
+            });
+        }
+        let area = Rect::new(0, 0, 60, 20);
+        let mut castle = Buffer::empty(area);
+        b.draw(&mut castle, area, "castle");
+        assert_ne!(castle, Buffer::empty(area), "the castle's own backdrop");
+        let mut other = Buffer::empty(area);
+        b.draw(&mut other, area, "inference");
+        assert_eq!(other, Buffer::empty(area), "nothing for another view");
     }
 
     #[test]

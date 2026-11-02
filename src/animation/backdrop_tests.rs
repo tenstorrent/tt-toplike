@@ -263,8 +263,54 @@ fn the_buffer_layer_fills_only_blank_cells() {
                 }
             }
             assert!(filled > 0, "{kind:?} drew nothing");
+            // Asserted on the fixture, so the blank rule itself is checked
+            // (review S5): the panel row and the reversed row are the
+            // view's, and so is its text.
+            for x in 0..110u16 {
+                for y in [10u16, 12] {
+                    assert_eq!(before[(x, y)], buf[(x, y)], "{kind:?} ({x},{y})");
+                }
+            }
+            for y in (1..31u16).step_by(3) {
+                // The letters stay; the spaces between words are blank.
+                for (i, ch) in "drawn by the view".chars().enumerate() {
+                    let x = 2 + i as u16;
+                    if ch != ' ' {
+                        assert_eq!(before[(x, y)], buf[(x, y)], "{kind:?} text ({x},{y})");
+                    }
+                }
+            }
         }
     })
+}
+
+/// A cell is blank only when it is a space on Reset or black with no
+/// reverse, underline or strike-through. Each case fails when the rule is
+/// reduced to "is a space".
+#[test]
+fn a_blank_cell_is_a_plain_space_on_the_canvas_black() {
+    use ratatui::buffer::Cell;
+    let cell = |sym: &str, bg: Color, m: Modifier| {
+        let mut c = Cell::default();
+        c.set_symbol(sym);
+        c.set_bg(bg);
+        c.modifier = m;
+        c
+    };
+    let none = Modifier::empty();
+    for bg in [Color::Reset, Color::Black, Color::Rgb(0, 0, 0)] {
+        assert!(is_blank(&cell(" ", bg, none)), "{bg:?}");
+    }
+    for (c, why) in [
+        (cell("x", Color::Reset, none), "a glyph"),
+        (cell(" ", Color::Blue, none), "a panel colour"),
+        (cell(" ", Color::Rgb(8, 14, 22), none), "a dialog colour"),
+        (cell(" ", Color::Reset, Modifier::REVERSED), "reversed"),
+        (cell(" ", Color::Black, Modifier::UNDERLINED), "underlined"),
+        (cell(" ", Color::Black, Modifier::CROSSED_OUT), "struck"),
+    ] {
+        assert!(!is_blank(&c), "{why}");
+    }
 }
 
 // ---- Each kind is its painter --------------------------------------------
