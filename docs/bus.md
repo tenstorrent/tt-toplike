@@ -563,8 +563,10 @@ The `world` object in a snapshot has these fields.
 * `kind`, `host`, `backend` and `mode` on the snapshot line say what the server is. `host` is
   the host name plus a hash of the machine id (`name/<16 hex digits>`). The raw machine id is
   never sent. Older servers send none of these four fields.
-* Models, readings and entities of a summary that a client keeps current from a subscription
-  are not pruned the way the server's world is. A fresh snapshot is.
+* A client that keeps a summary current from a subscription prunes it by the server's rule:
+  every 60 seconds of record time it drops processes, leases, training runs and models never
+  announced that no record has mentioned for 15 minutes (`SummaryPruner`). Chips, boards, DRAM
+  channels, Ethernet ports, tiles and hosts stay.
 
 ### The Rust client
 
@@ -625,7 +627,11 @@ With the unit running, a TUI started by the same user attaches to it by itself (
 directory lock, the new one exits 1 and systemd tries again after `RestartSec`.
 
 A `--headless` host also records processes and model servers on the box and runs the gozer
-status source (for real backends only). `--headless --serve [BIND:PORT]` additionally
+status source (for real backends only). It scans the box's processes and model servers every
+2 seconds, the TUI's cadence, while the chips are read every `--interval`. It records only the
+processes that hold a `/dev/tenstorrent` device or match an inference runtime, as the TUI
+does. A model's samples are recorded when their value changes, and all of them again every
+5 minutes. `--headless --serve [BIND:PORT]` additionally
 broadcasts the `/telemetry` frames that tt-station and `--remote` consume (section 11).
 
 ---

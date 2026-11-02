@@ -270,6 +270,10 @@ struct Tracked {
     progress: Option<f32>,
     /// Fingerprint of the last scrape whose completed delta was considered.
     last_fp: Option<String>,
+    /// Each sample sent for this model in the last feed, by signal: its
+    /// value and provenance. A sample equal to its entry here is not sent
+    /// again (see [`ModelTracker::process`]).
+    last_samples: HashMap<String, (Value, Provenance)>,
 }
 
 /// Turns service snapshots into model events and samples.
@@ -278,7 +282,7 @@ struct ModelTracker {
     map: Arc<IdentityMap>,
     tracked: HashMap<String, Tracked>,
     /// Set by `resend_all`: the next snapshot announces every model in an
-    /// announcing phase again, changed or not.
+    /// announcing phase again and sends all of its samples, changed or not.
     resend: bool,
 }
 
@@ -314,7 +318,8 @@ impl ModelTracker {
     }
 
     /// Process one full snapshot. Order per service: the announcing event
-    /// (when the phase or chips changed), then samples, then
+    /// (when the phase or chips changed), then the samples that changed
+    /// since the last feed (all of them after `resend_all`), then
     /// `RequestsCompleted`. Then `ModelGone` for announced services that
     /// left. A service that was never announced sends nothing.
     fn process(&mut self, snaps: &[ModelSnap], out: &mut dyn FnMut(Payload)) {
@@ -353,8 +358,29 @@ impl ModelTracker {
                 continue;
             }
 
-            // 2. Samples.
-            Self::samples(&model, s, out);
+            // 2. Samples, only those whose value or provenance changed since
+            // the last feed for this model. The first feed has nothing to
+            // compare with and sends them all; so does the feed after
+            // `resend_all` (every 5 minutes from the host), which keeps
+            // every reading inside the log's retention window. A signal
+            // missing from this feed is forgotten, so if it comes back with
+            // its old value it is sent again.
+            let mut now: Vec<Sample> = Vec::new();
+            Self::samples(&model, s, &mut |p| {
+                if let Payload::Sample(x) = p {
+                    now.push(x);
+                }
+            });
+            let mut kept = HashMap::with_capacity(now.len());
+            for x in now {
+                let cur = (x.value.clone(), x.prov);
+                let same = !resend && t.last_samples.get(&x.signal) == Some(&cur);
+                kept.insert(x.signal.clone(), cur);
+                if !same {
+                    out(Payload::Sample(x));
+                }
+            }
+            t.last_samples = kept;
 
             // 3. Completed requests. Nothing on the first scrape seen, and
             // nothing when the same scrape is fed again.
@@ -532,7 +558,10 @@ impl ModelTracker {
 /// * Samples: label, phase (Alarm and Down are a phase sample and no event),
 ///   progress, CPU, RSS, kernel and shard counts, and either the serving
 ///   fields (tokens/s, running, waiting, KV cache, TTFT) or the media fields
-///   (jobs in progress, generations per minute).
+///   (jobs in progress, generations per minute). Each sample is sent when
+///   its value or provenance differs from the last feed for that model: all
+///   of them on the first feed and on the feed after `resend_all`, and only
+///   the changed ones otherwise. A steady model costs no records per feed.
 /// * `RequestsCompleted{n}` from the scrape's completed delta. Not on the
 ///   first scrape seen, and not when the same scrape is fed again (the
 ///   stats, counters included, compare equal).
@@ -612,8 +641,8 @@ impl Source for InferenceSource {
             None => self.tracker.recheck(out),
         }
     }
-    /// The next snapshot announces each loading or ready model again. Its
-    /// label already goes out with every snapshot.
+    /// The next snapshot announces each loading or ready model again and
+    /// sends every one of its samples, changed or not.
     fn resend_all(&mut self) {
         self.tracker.resend = true;
     }

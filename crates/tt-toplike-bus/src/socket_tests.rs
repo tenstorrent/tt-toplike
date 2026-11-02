@@ -1307,3 +1307,40 @@ fn dropping_a_remote_world_on_a_hung_host_is_bounded() {
     let took = t.elapsed();
     assert!(took < Duration::from_millis(900), "{took:?}");
 }
+
+// ---------------------------------------------------------------------
+// Final fix wave (I2): an attached reader's copy is pruned
+// ---------------------------------------------------------------------
+
+/// A process the server last saw more than 15 minutes ago (record time)
+/// leaves a connected `RemoteWorld`'s view without a new snapshot; a quiet
+/// chip stays.
+#[test]
+fn remote_world_prunes_a_quiet_process_without_a_resnapshot() {
+    let clock = ManualClock::new(1_000_000);
+    let bus = Bus::open_with_world(BusConfig {
+        clock: clock.clone(),
+        ..BusConfig::default()
+    })
+    .unwrap();
+    let (_d, path) = sock("prune");
+    let _server = SocketServer::spawn(bus.clone(), &path).unwrap();
+    let rw = RemoteWorld::connect(&path).unwrap();
+    let p = EntityKey::process(77, 1);
+    bus.publish("t", sample(&chip(1), "temp", Value::F64(50.0)));
+    bus.publish("t", sample(&p, "cpu", Value::F64(1.0)));
+    assert!(wait_for(5, || rw.latest().seq == bus.head()));
+    assert!(rw.latest().world.entities.contains(&p));
+    // 16 minutes later another entity speaks; the sweep that record
+    // triggers drops the process.
+    clock.advance(Duration::from_secs(16 * 60));
+    bus.publish("t", sample(&chip(2), "temp", Value::F64(40.0)));
+    assert!(wait_for(5, || rw.latest().seq == bus.head()));
+    let v = rw.latest();
+    assert!(!v.world.entities.contains(&p), "{:?}", v.world.entities);
+    assert!(v.world.reading(&p, "cpu").is_none());
+    assert!(
+        v.world.reading(&chip(1), "temp").is_some(),
+        "the chip stays"
+    );
+}

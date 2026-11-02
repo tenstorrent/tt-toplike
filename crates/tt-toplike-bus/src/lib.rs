@@ -54,7 +54,7 @@ pub use replay::{Hole, HoleKind, ManualPlayClock, PlayClock, RealClock, Replay};
 #[cfg(unix)]
 pub use socket::{ServerOptions, SocketServer};
 pub use summary::{
-    EventSummary, RawSummary, ReadingSummary, RemoteSnapshot, ResetSummary, WorldSummary,
-    SUMMARY_EVENTS,
+    EventSummary, RawSummary, ReadingSummary, RemoteSnapshot, ResetSummary, SummaryPruner,
+    WorldSummary, SUMMARY_EVENTS,
 };
 pub use world::{ModelPhase, ModelView, Reading, Snapshot, World};

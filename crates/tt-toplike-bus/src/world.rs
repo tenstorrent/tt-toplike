@@ -126,6 +126,13 @@ impl World {
     /// Fold one record in. Records must arrive in log order.
     pub fn apply(&mut self, rec: &Record) {
         self.seq = rec.seq;
+        let t = rec.t_mono_ns;
+        let touched = &mut self.touched;
+        mentions(rec, |k| {
+            if is_churning(k.kind()) {
+                touched.insert(k.clone(), t);
+            }
+        });
         match &rec.payload {
             Payload::Sample(s) => self.set(rec, &s.entity, &s.signal, &s.value, s.prov),
             Payload::Sweep(s) => {
@@ -136,7 +143,7 @@ impl World {
                 }
             }
             Payload::Event(e) => {
-                self.apply_event(rec.seq, rec.t_mono_ns, e);
+                self.apply_event(rec.seq, e);
                 if self.events.len() == EVENT_WINDOW {
                     self.events.pop_front();
                 }
@@ -152,14 +159,6 @@ impl World {
         }
     }
 
-    /// Note that a churning entity was seen at `t`. Other kinds are not
-    /// tracked.
-    fn touch(&mut self, key: &EntityKey, t: u64) {
-        if is_churning(key.kind()) {
-            self.touched.insert(key.clone(), t);
-        }
-    }
-
     /// Drop churning entities not seen for [`ENTITY_TTL_NS`]. Announced
     /// models are kept. `readings` and `known` lose the same keys.
     fn prune(&mut self, now: u64) {
@@ -168,7 +167,7 @@ impl World {
         let stale: Vec<EntityKey> = self
             .touched
             .iter()
-            .filter(|(k, t)| now.saturating_sub(**t) > ENTITY_TTL_NS && !models.contains_key(*k))
+            .filter(|(k, t)| expired(k, **t, now, models.contains_key(*k)))
             .map(|(k, _)| k.clone())
             .collect();
         for k in stale {
@@ -181,7 +180,6 @@ impl World {
     /// Store one reading and, for a model signal, update the model's view.
     fn set(&mut self, rec: &Record, entity: &EntityKey, signal: &str, v: &Value, prov: Provenance) {
         self.known.insert(entity.clone());
-        self.touch(entity, rec.t_mono_ns);
         let r = Reading {
             value: v.clone(),
             prov,
@@ -197,17 +195,7 @@ impl World {
             .insert(signal.to_string(), r);
     }
 
-    fn apply_event(&mut self, seq: u64, t: u64, e: &Event) {
-        match e {
-            Event::ModelLoading { model, .. }
-            | Event::ModelReady { model, .. }
-            | Event::ModelGone { model }
-            | Event::RequestsCompleted { model, .. } => self.touch(model, t),
-            Event::LeaseGranted { lease, .. } | Event::LeaseReleased { lease, .. } => {
-                self.touch(lease, t)
-            }
-            _ => {}
-        }
+    fn apply_event(&mut self, seq: u64, e: &Event) {
         match e {
             Event::ModelLoading {
                 model,
@@ -345,7 +333,39 @@ impl World {
 }
 
 /// Kinds that come and go while the monitor runs.
-fn is_churning(k: EntityKind) -> bool {
+/// Call `f` with every entity `rec` counts as a sighting of, for the
+/// pruning rule: the entity of a sample or sweep, the model of a model
+/// event, and the lease of a lease event. [`World::apply`] and
+/// [`crate::summary::SummaryPruner`] both use it, so the server's world and
+/// an attached reader's copy see an entity at the same record times.
+pub(crate) fn mentions(rec: &Record, mut f: impl FnMut(&EntityKey)) {
+    match &rec.payload {
+        Payload::Sample(s) => f(&s.entity),
+        Payload::Sweep(s) => f(&s.entity),
+        Payload::Event(
+            Event::ModelLoading { model, .. }
+            | Event::ModelReady { model, .. }
+            | Event::ModelGone { model }
+            | Event::RequestsCompleted { model, .. },
+        ) => f(model),
+        Payload::Event(Event::LeaseGranted { lease, .. } | Event::LeaseReleased { lease, .. }) => {
+            f(lease)
+        }
+        _ => {}
+    }
+}
+
+/// The pruning rule, shared by [`World`] and
+/// [`crate::summary::SummaryPruner`]: a churning entity (process, lease,
+/// training run, model) that is not an announced model and was last seen
+/// more than [`ENTITY_TTL_NS`] before `now` (record time) is dropped.
+/// Hardware-bounded kinds (chips, boards, tiles, DRAM channels, Ethernet
+/// ports, hosts) never are.
+pub(crate) fn expired(key: &EntityKey, last_seen_ns: u64, now: u64, announced: bool) -> bool {
+    is_churning(key.kind()) && !announced && now.saturating_sub(last_seen_ns) > ENTITY_TTL_NS
+}
+
+pub(crate) fn is_churning(k: EntityKind) -> bool {
     matches!(
         k,
         EntityKind::Process | EntityKind::Lease | EntityKind::TrainingRun | EntityKind::Model

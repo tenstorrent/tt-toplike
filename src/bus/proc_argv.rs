@@ -6,9 +6,9 @@
 //! command line the bus cannot tell two `python` processes apart. The host
 //! fills both in here for the processes it hands to `ProcessSource`.
 //!
-//! Only the rows it is given are read: the process panel's rows, which are
-//! the processes that hold a `/dev/tenstorrent` device or matched an
-//! inference runtime. At most [`MAX_ENRICHED`] are read per call, and at
+//! Only the rows it is given are read. Callers pass the rows that hold a
+//! `/dev/tenstorrent` device or matched an inference runtime, through
+//! [`tt_snapshots_from_rows`] and its filter [`is_tt_row`]. At most [`MAX_ENRICHED`] are read per call, and at
 //! most [`MAX_CMDLINE_BYTES`] of each command line (whole arguments only).
 //!
 //! # Redaction and argument boundaries
@@ -82,6 +82,24 @@ pub fn snapshots_from_rows(rows: &[ProcRow]) -> Vec<ProcSnapshot> {
     {
         rows.iter().map(ProcSnapshot::from).collect()
     }
+}
+
+/// Whether a process row belongs on the bus: it holds a `/dev/tenstorrent`
+/// device or matched an inference runtime. Other processes on the box (a
+/// browser, a compiler, a shell) are never recorded. The TUI and the
+/// headless host both filter with this before [`tt_snapshots_from_rows`]
+/// reads anything from `/proc`.
+pub fn is_tt_row(r: &ProcRow) -> bool {
+    r.tt.is_some() || r.inference.is_some()
+}
+
+/// [`snapshots_from_rows`] for the rows that pass [`is_tt_row`] only. The
+/// process monitor's rows are the busiest processes on the box, most of
+/// them unrelated to Tenstorrent hardware; this keeps their names and
+/// command lines out of the bus and its log, and skips their `/proc` reads.
+pub fn tt_snapshots_from_rows(rows: &[ProcRow]) -> Vec<ProcSnapshot> {
+    let tt: Vec<ProcRow> = rows.iter().filter(|r| is_tt_row(r)).cloned().collect();
+    snapshots_from_rows(&tt)
 }
 
 /// [`snapshots_from_rows`] reading `<root>/<pid>/{stat,cmdline}`. Tests

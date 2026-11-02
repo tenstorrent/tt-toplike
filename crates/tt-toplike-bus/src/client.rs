@@ -29,15 +29,18 @@
 //! * A line from the server longer than 16 MiB is a decode error and ends
 //!   the connection.
 //!
-//! # Limits
+//! # Pruning
 //!
-//! * The view does not prune quiet churning entities the way `World` does
-//!   (see [`crate::summary`]); a reconnect with a snapshot does.
+//! Records are folded in through a [`SummaryPruner`], which drops quiet
+//! churning entities (processes, leases, training runs, models never
+//! announced) by the rule `World` uses, so a view kept current for days
+//! stays about as large as the server's world. Each snapshot starts a new
+//! pruner.
 
 use crate::record::{HeaderKind, Record};
 use crate::replay::{PlayClock, RealClock};
 use crate::socket::{ErrorLine, RawReply, SubscribedLine};
-use crate::summary::{EventSummary, ReadingSummary, RemoteSnapshot, WorldSummary};
+use crate::summary::{EventSummary, ReadingSummary, RemoteSnapshot, SummaryPruner, WorldSummary};
 use crate::world::ModelView;
 use crate::EntityKey;
 use std::fmt;
@@ -421,6 +424,8 @@ struct ViewState {
     /// Local time at which `view.world.now_mono_ns` was last set, so ages
     /// keep growing while the server is quiet.
     learned: Instant,
+    /// Prunes `view.world` as records are applied.
+    pruner: SummaryPruner,
 }
 
 struct RemoteShared {
@@ -529,6 +534,7 @@ impl RemoteWorld {
         let shared = Arc::new(RemoteShared {
             path: path.to_path_buf(),
             state: Mutex::new(ViewState {
+                pruner: SummaryPruner::for_snapshot(&snap.world),
                 view: RemoteView::from(snap),
                 learned: Instant::now(),
             }),
@@ -736,7 +742,8 @@ fn drain(shared: &RemoteShared, s: &mut RemoteSubscription) -> Option<bool> {
                     return Some(true);
                 }
                 let before = st.view.world.now_mono_ns;
-                st.view.world.apply(&rec);
+                let ViewState { view, pruner, .. } = &mut *st;
+                pruner.apply(&mut view.world, &rec);
                 st.view.seq = rec.seq;
                 if st.view.world.now_mono_ns != before {
                     st.learned = Instant::now();
@@ -758,6 +765,7 @@ fn drain(shared: &RemoteShared, s: &mut RemoteSubscription) -> Option<bool> {
 fn resnapshot(shared: &RemoteShared) -> io::Result<RemoteSubscription> {
     let (snap, sub) = open(&shared.path, REPLY_TIMEOUT)?;
     let mut st = shared.state();
+    st.pruner = SummaryPruner::for_snapshot(&snap.world);
     st.view = RemoteView::from(snap);
     st.learned = Instant::now();
     Ok(sub)

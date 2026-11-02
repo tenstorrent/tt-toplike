@@ -1000,7 +1000,9 @@ mod remote_tests {
         src.feed(Some(&[ri("warming", None)]), None);
         let out = poll(&mut src);
         let m = EntityKey::model("svc");
-        assert!(sample(&out, &m, bsig::MODEL_LABEL).is_some(), "{out:?}");
+        // The label did not change, so it is not sent again (an unchanged
+        // sample is skipped); the phase is unknown, so no phase sample.
+        assert!(sample(&out, &m, bsig::MODEL_LABEL).is_none(), "{out:?}");
         assert!(events(&out).is_empty());
         assert!(sample(&out, &m, bsig::MODEL_PHASE).is_none());
     }
@@ -1058,4 +1060,89 @@ fn resend_all_re_announces_a_steady_model() {
     assert_eq!(kinds(&out).first().map(String::as_str), Some("ready"));
     src.feed(&snap);
     assert!(!kinds(&poll(&mut src)).contains(&"ready".to_string()));
+}
+
+// ---- Unchanged model samples (final fix wave, I1c) ---------------------------
+
+/// The samples a payload list holds for `m`, by signal name.
+fn model_samples(v: &[Payload], m: &EntityKey) -> Vec<String> {
+    let mut names: Vec<String> = v
+        .iter()
+        .filter_map(|p| match p {
+            Payload::Sample(s) if s.entity == *m => Some(s.signal.clone()),
+            _ => None,
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// A second identical snapshot sends no model samples. A changed value
+/// sends only the changed sample. `resend_all` sends every sample again.
+#[test]
+fn unchanged_model_samples_are_not_sent_again() {
+    let map = map_with(&[(0, A)]);
+    let mut src = InferenceSource::new(map);
+    let m = EntityKey::model("svc");
+    let mut st = state("svc", Phase::Ready, &[0]);
+    st.serving = Some(serving(10, 0, 20.0));
+    let first = {
+        src.feed(std::slice::from_ref(&st));
+        poll(&mut src)
+    };
+    let all = model_samples(&first, &m);
+    assert!(
+        all.len() >= 10,
+        "the first feed sends every sample: {all:?}"
+    );
+
+    // The same snapshot again: no samples at all.
+    src.feed(std::slice::from_ref(&st));
+    let out = poll(&mut src);
+    assert!(model_samples(&out, &m).is_empty(), "{out:?}");
+
+    // One value changes: only that sample.
+    st.cpu_pct = 50.0;
+    src.feed(std::slice::from_ref(&st));
+    let out = poll(&mut src);
+    assert_eq!(
+        model_samples(&out, &m),
+        vec![sig::MODEL_CPU_PCT.to_string()]
+    );
+    assert_eq!(
+        sample(&out, &m, sig::MODEL_CPU_PCT).unwrap().value,
+        Value::F64(50.0)
+    );
+
+    // After resend_all, the same snapshot sends the whole set again.
+    src.resend_all();
+    src.feed(std::slice::from_ref(&st));
+    assert_eq!(model_samples(&poll(&mut src), &m), all);
+
+    // And the feed after that is quiet again.
+    src.feed(std::slice::from_ref(&st));
+    assert!(model_samples(&poll(&mut src), &m).is_empty());
+}
+
+/// A sample that drops out of one feed and comes back with its old value is
+/// sent again: the world still holds the old reading, but a reader must not
+/// miss that it returned.
+#[test]
+fn a_sample_that_returns_with_its_old_value_is_sent_again() {
+    let map = map_with(&[(0, A)]);
+    let mut src = InferenceSource::new(map);
+    let m = EntityKey::model("svc");
+    let mut st = state("svc", Phase::Loading, &[0]);
+    st.progress = Some(0.5);
+    src.feed(std::slice::from_ref(&st));
+    poll(&mut src);
+    st.progress = None;
+    src.feed(std::slice::from_ref(&st));
+    assert!(model_samples(&poll(&mut src), &m).is_empty());
+    st.progress = Some(0.5);
+    src.feed(std::slice::from_ref(&st));
+    assert_eq!(
+        model_samples(&poll(&mut src), &m),
+        vec![bsig::MODEL_PROGRESS.to_string()]
+    );
 }

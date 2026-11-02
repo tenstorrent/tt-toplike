@@ -595,3 +595,170 @@ fn local_workloads_only_for_real_backends_or_on_request() {
     );
     assert!(!uses_local_workloads(true, false, false), "relay");
 }
+
+// ---- Workload cadence and the TT row filter (final fix wave, I1) -------------
+
+/// A clock that moves only when the loop sleeps, and raises `stop` after
+/// `ticks` sleeps.
+struct FakeClock {
+    now: Instant,
+    sleeps: u64,
+    ticks: u64,
+    stop: Arc<AtomicBool>,
+}
+
+impl LoopClock for FakeClock {
+    fn now(&mut self) -> Instant {
+        self.now
+    }
+    fn sleep(&mut self, d: Duration, _stop: &AtomicBool) {
+        self.now += d;
+        self.sleeps += 1;
+        if self.sleeps >= self.ticks {
+            self.stop.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+fn row(pid: i32, name: &str, tt: bool) -> ProcRow {
+    ProcRow {
+        pid,
+        name: name.into(),
+        cpu_pct: 1.0,
+        mem_bytes: 4096,
+        inference: None,
+        active: false,
+        tt: tt.then(|| crate::workload::host_processes::TtProcInfo {
+            device_indices: vec![0],
+            hugepages_1g: 0,
+            hugepages_2m: 0,
+        }),
+    }
+}
+
+/// A steady model server, as the inference monitor reports one.
+fn steady_service(key: &str) -> ServiceState {
+    use crate::workload::inference_server::{Phase, Readiness, ServingStats};
+    let mut serving = ServingStats::zeroed();
+    serving.generation_tps = 20.0;
+    serving.requests_running = 1;
+    serving.kv_cache_usage = 0.25;
+    serving.ttft_avg_s = 0.05;
+    ServiceState {
+        key: key.into(),
+        label: format!("{key} label"),
+        phase: Phase::Ready,
+        cpu_pct: 12.5,
+        rss_bytes: 1_000,
+        rss_delta: 0,
+        kernel_count: 40,
+        kernel_delta: 0,
+        loaded_count: 3,
+        loaded_delta: 0,
+        safetensors_fds: 0,
+        readiness: Readiness::NotReady,
+        top_proc: None,
+        last_log: None,
+        progress: None,
+        flat_ticks: 0,
+        serving: Some(serving),
+        media: None,
+        port: Some(8000),
+        chips: vec![0],
+    }
+}
+
+/// 64 process rows, 2 of them TT (pids that do not exist, so nothing is
+/// read from `/proc` for them), and two steady model servers. Counts polls.
+struct BusyBox {
+    polls: u64,
+}
+
+const NON_TT_NAME: &str = "browser-not-tt";
+
+impl Workloads for BusyBox {
+    fn poll(&mut self) -> WorkloadSnapshot {
+        self.polls += 1;
+        let mut procs = vec![
+            row(i32::MAX - 1, "tt-worker-a", true),
+            row(i32::MAX - 2, "tt-worker-b", true),
+        ];
+        for i in 0..62 {
+            procs.push(row(i32::MAX - 100 - i, NON_TT_NAME, false));
+        }
+        WorkloadSnapshot {
+            procs,
+            inference: vec![steady_service("svc-a"), steady_service("svc-b")],
+        }
+    }
+}
+
+/// Run `ticks` loop passes of 100 ms on the fake clock into `log`.
+fn run_fake(log: &Path, ticks: u64, w: &mut BusyBox) -> HeadlessReport {
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut clock = FakeClock {
+        now: Instant::now(),
+        sleeps: 0,
+        ticks,
+        stop: stop.clone(),
+    };
+    let c = HeadlessConfig {
+        interval: Duration::from_millis(100),
+        ..cfg(Some(log.to_path_buf()), None)
+    };
+    let mut b = mock(2);
+    run_headless_with(&mut b, w, c, None, &stop, &mut clock).unwrap()
+}
+
+/// 60 s of 100 ms ticks: the host ticks 600 times, the workload monitors are
+/// polled once per 2 s (30 times), and the log stays under a fixed bound.
+#[test]
+fn workloads_are_polled_every_two_seconds_and_the_record_rate_is_bounded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let log = tmp.path().join("bus");
+    let mut w = BusyBox { polls: 0 };
+    let report = run_fake(&log, 600, &mut w);
+    assert_eq!(report.ticks, 600);
+    assert_eq!(w.polls, 30, "one poll at start, then one per 2 s");
+    assert_eq!(report.workload_polls, 30);
+    assert!(report.flushed);
+    // What the log holds per source, for the message.
+    let mut per: std::collections::BTreeMap<String, u64> = Default::default();
+    for r in Replay::open(&log).unwrap().records() {
+        *per.entry(r.source.clone()).or_default() += 1;
+    }
+    let total: u64 = per.values().sum();
+    // The bound: the backend's chip records (about 35 per tick for two mock
+    // chips, whose values change every tick: about 21,000) plus, per poll,
+    // one sweep per TT process and the model samples that changed. Before
+    // this fix the same run also wrote 64 process sweeps and about 24 model
+    // samples on every tick (about 74,000 in all).
+    assert!(total < 25_000, "{total} records in 60 s: {per:?}");
+    let workload =
+        per.get("processes").copied().unwrap_or(0) + per.get("inference").copied().unwrap_or(0);
+    assert!(
+        workload < 200,
+        "{workload} workload records in 60 s: {per:?}"
+    );
+}
+
+/// A process that holds no TT device and is no inference runtime is never
+/// recorded by a headless host.
+#[test]
+fn a_non_tt_process_is_never_recorded_in_headless_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let log = tmp.path().join("bus");
+    run_fake(&log, 30, &mut BusyBox { polls: 0 });
+    let mut names = Vec::new();
+    for r in Replay::open(&log).unwrap().records() {
+        if let tt_toplike_bus::Payload::Sample(s) = &r.payload {
+            if s.signal == crate::bus::signals::PROC_NAME {
+                names.push(s.value.clone());
+            }
+        }
+    }
+    assert!(!names.is_empty(), "the TT processes are recorded");
+    let text = format!("{names:?}");
+    assert!(text.contains("tt-worker-a"), "{text}");
+    assert!(!text.contains(NON_TT_NAME), "{text}");
+}

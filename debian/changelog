@@ -19,8 +19,10 @@ tt-toplike (0.15.0) noble; urgency=medium
     a different host identity or a mock backend.
   * --headless runs the host with no screen, for systemd (Restart=on-failure,
     no root). It takes a lock on the log directory and on the socket, so two
-    hosts cannot write one log. --mock-workloads adds invented models and
-    runs to a mock host. --bus-dir DIR sets the log directory.
+    hosts cannot write one log. --bus-dir DIR sets the log directory.
+    --mock-workloads makes a --headless --mock host also scan this box's
+    real processes and model servers and record them against the mock
+    chips, so its log holds real process and model names.
   * Sources: the chip backend, the inference monitor, training runs,
     hivemind, the process scan, --remote scrapes and gozer leases. Gozer
     leases are read with gozer's read-only commands, and the governor only

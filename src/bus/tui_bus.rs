@@ -64,7 +64,7 @@
 use crate::backend::TelemetryBackend;
 use crate::bus::gozer::GozerSource;
 use crate::bus::host::BusHost;
-use crate::bus::proc_argv::snapshots_from_rows;
+use crate::bus::proc_argv::tt_snapshots_from_rows;
 use crate::bus::view::{BusView, ReadCache, ReadView};
 use crate::workload::host_processes::ProcRow;
 use crate::workload::inference_server::ServiceState;
@@ -531,7 +531,7 @@ impl TuiBus {
     /// this bus (not for a `--remote` relay or a plain `--mock` run) and
     /// only the TT-relevant ones (a row holding a TT device or matched as
     /// an inference runtime), with command lines read through
-    /// [`snapshots_from_rows`]. `inference` and `training` are what the
+    /// [`tt_snapshots_from_rows`]. `inference` and `training` are what the
     /// views show: under `--mock` the synthetic roster and run.
     pub fn feed_workloads(
         &mut self,
@@ -544,12 +544,7 @@ impl TuiBus {
             return;
         };
         if local {
-            let rows: Vec<ProcRow> = procs
-                .iter()
-                .filter(|r| r.tt.is_some() || r.inference.is_some())
-                .cloned()
-                .collect();
-            host.feed_processes(&snapshots_from_rows(&rows));
+            host.feed_processes(&tt_snapshots_from_rows(procs));
         }
         if let Some(inf) = inference {
             host.feed_inference(inf);

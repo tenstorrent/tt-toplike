@@ -5,9 +5,13 @@
 //!
 //! 1. calls `backend.update()` (a failure is logged and the loop goes on,
 //!    as the old `--serve` loop did: clients keep the last frame);
-//! 2. reads the workload monitors through a [`Workloads`] (the real one is
-//!    [`LocalWorkloads`]; tests pass their own) and feeds the host. A
-//!    `--remote` relay feeds the remote frame's extension instead: the
+//! 2. every [`WORKLOAD_EVERY`] (2 s, the TUI's process-scan cadence),
+//!    reads the workload monitors through a [`Workloads`] (the real one is
+//!    [`LocalWorkloads`]; tests pass their own) and feeds the host. Only
+//!    the TT-relevant process rows are fed ([`tt_snapshots_from_rows`]), as
+//!    in the TUI. A full process scan costs tens of milliseconds and many
+//!    `/proc` reads, so it does not run at the tick interval. A `--remote`
+//!    relay feeds the remote frame's extension each tick instead: the
 //!    local processes would name local `/dev/tenstorrent` indexes against
 //!    the remote box's chips;
 //! 3. runs [`BusHost::tick`];
@@ -18,6 +22,9 @@
 //!    byte for byte) for a `--remote` relay. Nothing is sent before the
 //!    first `tt-smi` raw frame is on the bus;
 //! 5. waits `interval`, checking the stop flag at least every 50 ms.
+//!
+//! The loop reads time through a [`LoopClock`]; tests pass one that only
+//! moves when the loop sleeps.
 //!
 //! When the stop flag is raised (SIGTERM or SIGINT through
 //! [`install_stop_signals`], or a test) the loop ends, the bus is flushed,
@@ -32,7 +39,7 @@
 use crate::backend::TelemetryBackend;
 use crate::bus::gozer::GozerSource;
 use crate::bus::host::BusHost;
-use crate::bus::proc_argv::snapshots_from_rows;
+use crate::bus::proc_argv::tt_snapshots_from_rows;
 use crate::workload::host_processes::ProcRow;
 use crate::workload::inference_server::ServiceState;
 use std::io;
@@ -50,6 +57,32 @@ const FLUSH_WAIT: Duration = Duration::from_secs(5);
 
 /// Longest single sleep between stop-flag checks.
 const STOP_POLL: Duration = Duration::from_millis(50);
+
+/// Time between workload monitor polls in [`run_headless`]. The same as the
+/// TUI's process scan.
+pub const WORKLOAD_EVERY: Duration = Duration::from_secs(2);
+
+/// Where [`run_headless`] reads the time and how it waits.
+pub trait LoopClock {
+    /// The time now.
+    fn now(&mut self) -> Instant;
+    /// Wait `d`, or less when `stop` is raised.
+    fn sleep(&mut self, d: Duration, stop: &AtomicBool);
+}
+
+/// The real clock: [`Instant::now`] and a sleep that checks the stop flag
+/// at least every 50 ms.
+#[derive(Debug, Default)]
+pub struct RealClock;
+
+impl LoopClock for RealClock {
+    fn now(&mut self) -> Instant {
+        Instant::now()
+    }
+    fn sleep(&mut self, d: Duration, stop: &AtomicBool) {
+        sleep_unless_stopped(d, stop);
+    }
+}
 
 /// Settings for [`run_headless`] and [`run_headless_replay`].
 #[derive(Debug, Clone)]
@@ -172,6 +205,9 @@ pub fn uses_local_workloads(relay: bool, synthetic: bool, mock_workloads: bool) 
 pub struct HeadlessReport {
     /// Ticks run (0 for a replay).
     pub ticks: u64,
+    /// Workload monitor polls (one per [`WORKLOAD_EVERY`]; 0 for a relay
+    /// and a replay).
+    pub workload_polls: u64,
     /// The bus head at shutdown.
     pub head: u64,
     /// Frames handed to the broadcast sink.
@@ -310,8 +346,20 @@ pub fn run_headless(
     backend: &mut dyn TelemetryBackend,
     workloads: &mut dyn Workloads,
     cfg: HeadlessConfig,
+    broadcast: Option<&mut dyn FnMut(String)>,
+    stop: &AtomicBool,
+) -> io::Result<HeadlessReport> {
+    run_headless_with(backend, workloads, cfg, broadcast, stop, &mut RealClock)
+}
+
+/// [`run_headless`] with the time read from `clock`.
+pub fn run_headless_with(
+    backend: &mut dyn TelemetryBackend,
+    workloads: &mut dyn Workloads,
+    cfg: HeadlessConfig,
     mut broadcast: Option<&mut dyn FnMut(String)>,
     stop: &AtomicBool,
+    clock: &mut dyn LoopClock,
 ) -> io::Result<HeadlessReport> {
     let gozer = if cfg.gozer {
         GozerSource::with_command()
@@ -330,25 +378,30 @@ pub fn run_headless(
     host.set_synthetic(cfg.synthetic);
     let server = serve_socket(host.bus(), cfg.socket.as_deref())?;
     let mut report = HeadlessReport::default();
+    // The last workload snapshot, kept between polls for the `/telemetry`
+    // frame's extension, and when it was taken.
+    let mut snap = WorkloadSnapshot::default();
+    let mut last_poll: Option<Instant> = None;
 
     while !stop.load(Ordering::SeqCst) {
         if let Err(e) = backend.update() {
             log::warn!("headless: backend update failed: {e}");
         }
-        let snap = if cfg.relay {
+        let now = clock.now();
+        if cfg.relay {
             #[cfg(feature = "remote")]
             host.feed_remote(
                 backend.remote_inference().as_deref(),
                 backend.remote_processes().as_deref(),
             );
-            WorkloadSnapshot::default()
-        } else {
-            let snap = workloads.poll();
-            host.feed_processes(&snapshots_from_rows(&snap.procs));
+        } else if last_poll.is_none_or(|t| now.saturating_duration_since(t) >= WORKLOAD_EVERY) {
+            last_poll = Some(now);
+            snap = workloads.poll();
+            host.feed_processes(&tt_snapshots_from_rows(&snap.procs));
             host.feed_inference(&snap.inference);
-            snap
-        };
-        host.tick(backend, Instant::now());
+            report.workload_polls += 1;
+        }
+        host.tick(backend, now);
         report.ticks += 1;
 
         if let Some(send) = broadcast.as_deref_mut() {
@@ -357,7 +410,7 @@ pub fn run_headless(
                 report.frames += 1;
             }
         }
-        sleep_unless_stopped(cfg.interval, stop);
+        clock.sleep(cfg.interval, stop);
     }
 
     report.head = host.bus().head();
@@ -407,6 +460,7 @@ pub fn run_headless_replay(
     }
     let report = HeadlessReport {
         ticks: 0,
+        workload_polls: 0,
         head: host.bus().head(),
         frames: 0,
         flushed: host.bus().flush(FLUSH_WAIT),

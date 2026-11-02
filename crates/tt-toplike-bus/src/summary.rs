@@ -51,17 +51,23 @@
 //!   world describes its own chips. Older servers send none of the three;
 //!   they read as empty strings.
 //!
-//! # What `apply` does not copy from `World`
+//! # Pruning
 //!
 //! `World` drops churning entities (processes, leases, runs, models that
-//! were never announced) after [`crate::world::ENTITY_TTL_NS`] of silence. A
-//! summary kept current by `apply` does not prune. A fresh snapshot (for
-//! example after a reconnect) does reflect the pruning.
+//! were never announced) after [`crate::world::ENTITY_TTL_NS`] of silence.
+//! `apply` alone does not prune. A reader that keeps a summary current for
+//! a long time (an attached TUI) folds records in through a
+//! [`SummaryPruner`], which applies the same rule at the same cadence
+//! (every [`crate::world::PRUNE_EVERY_NS`] of record time), so the copy
+//! stays about as large as the server's world.
 
 use crate::entity::EntityKey;
 use crate::record::{Event, HeaderKind, Payload, Provenance, Record, Value};
-use crate::world::{update_view, ModelPhase, ModelView, World};
+use crate::world::{
+    expired, is_churning, mentions, update_view, ModelPhase, ModelView, World, PRUNE_EVERY_NS,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// How many of the newest events a summary carries.
 pub const SUMMARY_EVENTS: usize = 64;
@@ -357,6 +363,82 @@ impl WorldSummary {
     }
 }
 
+/// Keeps a [`WorldSummary`] pruned the way [`World`] prunes itself (see the
+/// module doc). It remembers, for each churning entity, the record time it
+/// was last seen ([`crate::world::mentions`]), and every
+/// [`PRUNE_EVERY_NS`] of record time drops the entities the shared rule
+/// ([`crate::world::expired`]) calls stale: their readings and their entry
+/// in `entities`. Chips, boards, DRAM channels, Ethernet ports, tiles and
+/// hosts are never dropped.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SummaryPruner {
+    touched: BTreeMap<EntityKey, u64>,
+    last_prune_ns: u64,
+}
+
+impl SummaryPruner {
+    /// A pruner for a summary that came from a snapshot. Each churning
+    /// entity counts as last seen at its newest reading's time, or at the
+    /// snapshot's `now_mono_ns` when it has no reading (the server knew it
+    /// recently enough to keep it). The first prune runs one
+    /// [`PRUNE_EVERY_NS`] after the snapshot's time.
+    pub fn for_snapshot(w: &WorldSummary) -> SummaryPruner {
+        let mut touched: BTreeMap<EntityKey, u64> = BTreeMap::new();
+        for r in &w.readings {
+            if is_churning(r.entity.kind()) {
+                let t = touched.entry(r.entity.clone()).or_insert(0);
+                *t = (*t).max(r.t_mono_ns);
+            }
+        }
+        for e in &w.entities {
+            if is_churning(e.kind()) {
+                touched.entry(e.clone()).or_insert(w.now_mono_ns);
+            }
+        }
+        SummaryPruner {
+            touched,
+            last_prune_ns: w.now_mono_ns,
+        }
+    }
+
+    /// Fold `rec` into `w` ([`WorldSummary::apply`]), note the churning
+    /// entities it mentions, and prune when a sweep is due.
+    pub fn apply(&mut self, w: &mut WorldSummary, rec: &Record) {
+        let t = rec.t_mono_ns;
+        mentions(rec, |k| {
+            if is_churning(k.kind()) {
+                self.touched.insert(k.clone(), t);
+            }
+        });
+        w.apply(rec);
+        if t.saturating_sub(self.last_prune_ns) >= PRUNE_EVERY_NS {
+            self.prune(w, t);
+        }
+    }
+
+    /// Entities with remembered last-seen times (for tests and sizing).
+    pub fn tracked(&self) -> usize {
+        self.touched.len()
+    }
+
+    fn prune(&mut self, w: &mut WorldSummary, now: u64) {
+        self.last_prune_ns = now;
+        let announced: BTreeSet<&EntityKey> = w.models.iter().map(|m| &m.key).collect();
+        let stale: BTreeSet<EntityKey> = self
+            .touched
+            .iter()
+            .filter(|(k, t)| expired(k, **t, now, announced.contains(k)))
+            .map(|(k, _)| k.clone())
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        self.touched.retain(|k, _| !stale.contains(k));
+        w.readings.retain(|r| !stale.contains(&r.entity));
+        w.entities.retain(|e| !stale.contains(e));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,5 +595,154 @@ mod tests {
         s.set_now(3_000_000_000);
         assert_eq!(s.reading(&chip(1), "x").unwrap().age_ms, 2_000);
         assert_eq!(s.reading(&chip(1), "x").unwrap().value, Value::U64(1));
+    }
+
+    // ---- Pruning an applied summary (final fix wave, I2) -------------------
+
+    const SEC: u64 = 1_000_000_000;
+
+    fn at(seq: u64, t: u64, p: Payload) -> Record {
+        Record {
+            seq,
+            t_mono_ns: t,
+            t_wall_ms: 0,
+            source: "t".into(),
+            payload: p,
+        }
+    }
+
+    /// 10,000 processes, each seen once, one per second (about 2.8 hours of
+    /// record time). The client's copy holds at most the last 15 minutes of
+    /// them plus one prune interval: under 1,000 entities and readings.
+    #[test]
+    fn ten_thousand_short_lived_processes_keep_the_summary_bounded() {
+        let mut w = WorldSummary::default();
+        let mut p = SummaryPruner::for_snapshot(&w);
+        let mut seq = 0;
+        for i in 0..10_000u64 {
+            seq += 1;
+            let e = EntityKey::process(i as u32 + 1, 7);
+            p.apply(
+                &mut w,
+                &at(seq, i * SEC, sample(&e, "cpu", Value::F64(1.0))),
+            );
+        }
+        // 900 s of live entities plus up to 60 s since the last sweep.
+        let bound = 1_000;
+        assert!(w.entities.len() < bound, "{} entities", w.entities.len());
+        assert!(w.readings.len() < bound, "{} readings", w.readings.len());
+        assert!(p.tracked() < bound, "{} tracked", p.tracked());
+    }
+
+    /// A chip that went quiet is never pruned: it stays and its age grows.
+    /// A process updated every minute stays too.
+    #[test]
+    fn a_quiet_chip_and_a_process_seen_every_minute_stay() {
+        let mut w = WorldSummary::default();
+        let mut p = SummaryPruner::for_snapshot(&w);
+        let proc_key = EntityKey::process(42, 1);
+        let gone = EntityKey::process(43, 1);
+        let mut seq = 1;
+        p.apply(
+            &mut w,
+            &at(seq, 0, sample(&chip(1), "temp", Value::F64(50.0))),
+        );
+        seq += 1;
+        p.apply(&mut w, &at(seq, 0, sample(&gone, "cpu", Value::F64(1.0))));
+        for minute in 1..=60u64 {
+            seq += 1;
+            let r = at(
+                seq,
+                minute * 60 * SEC,
+                sample(&proc_key, "cpu", Value::F64(2.0)),
+            );
+            p.apply(&mut w, &r);
+        }
+        assert!(w.reading(&chip(1), "temp").is_some(), "the chip stays");
+        assert!(w.entities.contains(&chip(1)));
+        w.set_now(w.now_mono_ns);
+        assert_eq!(w.reading(&chip(1), "temp").unwrap().age_ms, 3_600_000);
+        assert!(
+            w.reading(&proc_key, "cpu").is_some(),
+            "the busy process stays"
+        );
+        assert!(w.reading(&gone, "cpu").is_none(), "the quiet process went");
+        assert!(!w.entities.contains(&gone));
+    }
+
+    /// The client's pruned copy keeps exactly the entities and readings a
+    /// fresh snapshot of the server's world would show at the same record.
+    #[test]
+    fn a_pruned_summary_matches_a_fresh_snapshot_at_the_same_cut() {
+        let mut world = World::new();
+        let mut w = WorldSummary::default();
+        let mut p = SummaryPruner::for_snapshot(&w);
+        let m = EntityKey::model("llama");
+        let unannounced = EntityKey::model("ghost");
+        let lease = EntityKey::lease("L1");
+        let mut seq = 0;
+        let mut push = |t: u64, pl: Payload, world: &mut World, w: &mut WorldSummary| {
+            seq += 1;
+            let r = at(seq, t, pl);
+            world.apply(&r);
+            p.apply(w, &r);
+        };
+        push(
+            0,
+            sample(&unannounced, "x", Value::U64(1)),
+            &mut world,
+            &mut w,
+        );
+        push(
+            SEC,
+            Payload::Event(Event::ModelReady {
+                model: m.clone(),
+                chips: vec![chip(1)],
+            }),
+            &mut world,
+            &mut w,
+        );
+        push(
+            2 * SEC,
+            Payload::Event(Event::LeaseGranted {
+                lease: lease.clone(),
+                chips: vec![chip(1)],
+            }),
+            &mut world,
+            &mut w,
+        );
+        for i in 0..3_000u64 {
+            let t = 3 * SEC + i * SEC;
+            let e = EntityKey::process((i % 1_500) as u32 + 1, 0);
+            push(
+                t,
+                sample(&e, "cpu", Value::F64(i as f64)),
+                &mut world,
+                &mut w,
+            );
+            if i % 120 == 0 {
+                push(
+                    t,
+                    sample(&chip(2), "temp", Value::F64(40.0)),
+                    &mut world,
+                    &mut w,
+                );
+                push(t, sample(&m, "tps", Value::F64(5.0)), &mut world, &mut w);
+            }
+        }
+        let fresh = WorldSummary::from_world(&world, w.now_mono_ns);
+        assert_eq!(w.entities, fresh.entities);
+        let keys = |s: &WorldSummary| -> Vec<(EntityKey, String)> {
+            s.readings
+                .iter()
+                .map(|r| (r.entity.clone(), r.signal.clone()))
+                .collect()
+        };
+        assert_eq!(keys(&w), keys(&fresh));
+        // The run did prune: the unannounced model is gone and the
+        // announced model stays.
+        assert!(!w.entities.contains(&unannounced));
+        assert!(w.entities.contains(&m));
+        assert!(w.entities.len() < 1_100, "{}", w.entities.len());
     }
 }

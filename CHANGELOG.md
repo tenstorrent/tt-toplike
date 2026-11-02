@@ -28,8 +28,10 @@ list is a summary and is not kept for every release.
   following and replay. A TUI on the same machine attaches to a live host with the same chips.
   `--bus-attach SOCKET` attaches on request and `--no-bus-attach` turns the start-up probe off.
 - `--headless` runs the host with no screen, for systemd. It locks the log directory and the
-  socket, so two hosts cannot write one log. `--bus-dir DIR` sets the directory, and
-  `--mock-workloads` adds invented models and runs to a mock host.
+  socket, so two hosts cannot write one log. `--bus-dir DIR` sets the directory.
+  `--mock-workloads` makes a `--headless --mock` host also scan this box's real processes and
+  model servers and record them against the mock chips, so its log holds real process names
+  and model names.
 - Sources: the chip backend, the inference monitor, training runs, hivemind, the process scan,
   `--remote` scrapes and gozer leases. The gozer governor permits only what the lease list shows.
   It can be up to 60 seconds stale after a failed refresh.
