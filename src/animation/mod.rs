@@ -22,6 +22,7 @@ pub mod activity_lanes;
 pub mod arcade;
 pub mod arcade_bus;
 pub mod arcade_layout;
+pub mod arcade_presets;
 pub mod atmosphere;
 pub mod backdrop;
 #[cfg(test)]
