@@ -1790,8 +1790,9 @@ review, and most tasks needed one to three fix rounds.
 * **Redaction.** Any new free-text field a source writes (a name, label, command line, `who`,
   service key) goes through `redact_cmdline` and is clipped (`MAX_TEXT` 512). The raw text
   never reaches a record, a log line or the socket. `redact.rs` lists the known false
-  positives and residual leaks. The final fix wave was meant to close the nested-object leak
-  and salt the key hash. Check `docs/bus.md` section 9 for what is still open.
+  positives and residual leaks. The hardening pass closed the nested-object leak and salted the key
+  hash (per process, so a log that spans a host restart has two keys for one redacted service).
+  Check `docs/bus.md` section 9 for what is still open.
 * **Governor.** A source that opens a chip on its own account must call
   `Governor::permit(chip)` first and emit nothing for the tick when it is denied. The existing
   sources (hwmon, sysfs, `tt-smi -s`, `/proc`, metrics scrapes) open no chip and need no

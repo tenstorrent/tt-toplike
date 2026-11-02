@@ -239,7 +239,7 @@ contract and the `tt-station-agentd` coordination notes.
 ## Signal bus: record, replay and share what tt-toplike sees
 
 Every source (chip telemetry, inference servers, training, hivemind, processes, gozer
-leases) writes to one ordered stream, the signal bus. Die 3D reads it, other programs can
+leases) writes to one ordered stream, the signal bus. Die 3D and, on an attached TUI, the `i` view read it, other programs can
 read it over a Unix socket, and it is recorded to disk so a run can be inspected and
 replayed later. Every sample says whether it is `measured`, `derived`, `estimated` or
 `decoration`. Full details: [docs/bus.md](docs/bus.md).
@@ -262,7 +262,10 @@ tt-toplike-tui --bus-attach /tmp/tt-toplike-$UID/replay.sock    # a TUI that rea
   `<redacted>`. The matcher has known gaps, listed in `docs/bus.md`.
 * Limits of this release: no hardware run yet, the Die 3D tile glow is still an estimate, the
   per-tile counter sidecar is not included (a live reader on a chip blocks gozer reset and
-  release), and the order of DRAM rows within a side is not documented.
+  release), and the order of DRAM rows within a side is not documented. An attached TUI's `i`
+  view still has gaps: the arcade hero duel reads the local monitor, models show dashes for the
+  TTFT breakdowns and prefix hit rate, and the rotation keeps dwelling on a lost host's last
+  rows. The list is in `docs/bus.md` section 13.
 
 ---
 

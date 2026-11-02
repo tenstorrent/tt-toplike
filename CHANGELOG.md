@@ -44,6 +44,7 @@ list is a summary and is not kept for every release.
   per-tile counter sidecar is not included, because a live reader on a chip blocks gozer reset
   and release. The order of DRAM rows within a side is not documented. Deferred review findings
   are in `docs/bus.md` section 13.
+- A socket replay at speed 1 shortens pauses longer than 1 second to 1 second.
 - The new crate `tt-toplike-bus` is at 0.1.0. CI now runs its tests and clippy, and the
   `tui_panic_hook` integration test.
 

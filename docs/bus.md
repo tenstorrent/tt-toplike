@@ -47,13 +47,13 @@ The rule for the data is to record the full stream at the rate each source produ
 Every other use is a slice of it, and a past that was not recorded cannot be recovered.
 
 In this release Die 3D reads the bus (model flags, bring-up fill, request pulses, per-channel
-GDDR rows, hivemind sparks). The other views read what they read before. The `i` view has not
-moved to the bus yet.
+GDDR rows, hivemind sparks). The `i` view reads it when the TUI is attached to a `--headless`
+host (section 8). The other views read what they read before.
 
 ```
   sources                         the bus                       readers
   --------------                  ------------------------      ------------------
-  backend (hwmon, sysfs,          one writer assigns            Die 3D (in process)
+  backend (hwmon, sysfs,          one writer assigns            Die 3D, `i` view (in process)
     tt-smi)                       sequence numbers              socket clients
   inference monitor               in-memory window              bus inspect, replay
   training monitor                segment files on disk         tt-station frames
@@ -339,11 +339,23 @@ The log is a directory of segment files.
   have mode 0600. A directory that already exists keeps its mode. The log holds process
   command lines (after redaction), model names and raw tt-smi snapshots.
 * **Locks.** One process at a time writes a directory. The bus takes a non-blocking exclusive
-  lock on `<dir>/.lock`. A second process gets `log directory is in use by another process`
-  and the host exits with status 1. The lock is released when the process exits, including
+  lock on `<dir>/.lock`. A second process gets `this log directory is already open (another
+  process, or a bus in this process that is still shutting down)` and the host exits with
+  status 1. The lock is released when the process exits, including
   when it dies. A filesystem that cannot lock (for example an NFS home mounted `nolock`) makes
   the bus refuse to open, with a suggestion to use `--bus-dir` on a local filesystem. The
   socket has its own lock file at `<socket path>.lock`.
+* **One kind of log per directory.** A directory whose newest segment header names a different
+  `mode` (live, mock, replay) or a different backend class is refused when the bus opens, with
+  `log directory holds a <class>/<mode> log; use another --bus-dir or remove it`. The classes
+  are `mock`, `remote` and `local-hardware`. Every other backend (sysfs, hybrid, json, luwen,
+  host) is local-hardware, so a change from one local backend to another is accepted. That
+  matters for a systemd host whose `--backend auto` falls back between `hybrid` and `json`. A
+  missing tag, an untagged older log and an unreadable header are accepted. When the lock could
+  not be taken at open and is taken later, the check runs again at that point. A refusal then
+  switches the disk off for the rest of the run: the bus keeps serving from memory, publishes one
+  gap record with the reason and counts the records it did not write. The same late lock removes
+  a header-only last segment that an earlier run left, so the new segment does not collide with it.
 * **Memory.** The newest 65,536 records stay in memory. Older records are read back from the
   segment files.
 * **Disk errors.** The disk never holds up a publisher. If the directory is not writable or
@@ -488,8 +500,10 @@ This replays recorded data from the server's own segment files to this client on
 published back into the bus, and records keep their recorded sequence numbers and timestamps.
 Every field is optional (`from_ts_ms` 0, `speed` 1, no filter). Records whose `t_wall_ms` is
 below `from_ts_ms` are skipped. The pause before a record is the difference of recorded
-monotonic times divided by `speed`, except that a pause of more than 60 seconds of recorded
-time is replayed as a 1 second wait. `speed` must be between 0.01 and 1000. The filters work
+monotonic times divided by `speed`, and each pause is capped at 1 second after that division.
+At speed 1, a pause of more than 1 second in the recording is therefore shortened to 1 second.
+The cap applies to the socket `replay` op only. `--replay` on a host keeps the original
+spacing divided by `--speed`. `speed` must be between 0.01 and 1000. The filters work
 as in `bus inspect`: an entity filter keeps samples and sweeps of those entities and the events
 that name one. A signal filter keeps samples of those signals, trims sweeps to them, and drops
 events. With either filter set, raw frames and gaps are dropped. A bus with no log directory
@@ -520,7 +534,8 @@ An error is a single line, and the server closes the connection after it.
 * A subscriber whose socket has not accepted a write for 100 ms while it is more than 4096
   records behind is cut (`too_slow`). A client that reads steadily is never cut, even while it
   works through a backlog.
-* `replay` speed is limited to 0.01 through 1000.
+* `replay` speed is limited to 0.01 through 1000, and each wait between records is at most 1
+  second.
 * A client reading the server accepts lines up to 16 MiB.
 
 ### The snapshot summary
@@ -555,7 +570,9 @@ The `world` object in a snapshot has these fields.
 
 The `tt-toplike-bus` crate has a `SocketClient` (snapshot, raw, subscribe) and a `RemoteWorld`
 that keeps a snapshot current on a background thread. It takes a fresh snapshot on every
-reconnect, retrying after 1, 2, 4 and 8 seconds and then every 10 seconds.
+reconnect, retrying after 1, 2, 4 and 8 seconds and then every 10 seconds. Two snapshot requests
+start at least 250 ms apart, so a server that ends every subscription at once is not asked in a
+tight loop.
 
 ---
 
@@ -563,6 +580,9 @@ reconnect, retrying after 1, 2, 4 and 8 seconds and then every 10 seconds.
 
 `tt-toplike-tui --headless` hosts the bus with no screen. It runs until SIGTERM or SIGINT,
 flushes the log, removes its socket file and exits 0. A second SIGTERM or SIGINT exits at once.
+The second signal removes the socket file only when this process has bound it and only when the
+file at that path still has the device and inode that this process bound. A second signal during
+a slow start-up therefore leaves another host's socket in place.
 Failures before the loop starts (the backend, a log directory or socket another process holds,
 a socket directory that is not private) print one line and exit with status 1. A failed
 telemetry update inside the loop is logged and the loop continues.
@@ -614,8 +634,8 @@ broadcasts the `/telemetry` frames that tt-station and `--remote` consume (secti
 
 At start-up a TUI tries the default socket path once, with a 250 ms timeout. When a `--headless`
 host answers and its world describes this machine's chips, the TUI reads that host's bus and
-hosts none of its own. Chip telemetry still comes from the TUI's own backend. The views that
-read the bus (Die 3D) read the attached world, limited to the chips the TUI has.
+hosts none of its own. Chip telemetry still comes from the TUI's own backend. Die 3D reads the attached world,
+limited to the chips the TUI has. The `i` view draws the host's models.
 
 The probe attaches only when all of these hold:
 
@@ -638,6 +658,27 @@ seconds). It attaches even when the host does not match, and the status bar says
 adds `(reconnecting)`, then `(disconnected)` once a reconnect has failed. Treat a warning in
 that label as a sign that the overlays on screen come from another machine or from synthetic
 data. An attached TUI cannot publish on the host's bus, so `ViewChanged` events are not sent.
+
+### The `i` view on an attached TUI
+
+When the TUI is attached, the `i` view builds its rows from the host's world
+(`attached_rows`, using `world_to_service_states`) and does not use the local inference
+monitor. It lists every model the host knows, including models on chips this TUI does not have.
+A chip key becomes a `/dev/tenstorrent/N` index only when the host's origin matches this
+machine. The rotation's dwell on `i` (the `v` key) and the arcade activity lanes use the same
+rows.
+
+When the link to the host is lost, the view keeps the last world it received. It shows
+`(reconnecting)` or `(host disconnected)` above the roster and draws the roster dim. The
+creature under the roster is not dimmed.
+
+A model gets `~` in front of its label when one of its label, phase, progress, tokens per
+second or waiting readings is `estimated` or `decoration`. One helper makes this decision for both
+the `i` view and Die 3D, so both mark the same models. Every model of a `--mock` host is marked.
+A real host's model is marked while it compiles or loads with a progress figure.
+
+The `i` view keeps the local monitor when the TUI hosts its own bus. Section 13 lists what an
+attached `i` view does not show.
 
 A TUI that records (`--record`) or serves (`--bus-socket`) refuses a backend switch (the `b`
 key and `/remote`), because the log header names one backend and mode for the whole run. A
@@ -664,21 +705,28 @@ and the files with 0600.
 * `NAME=value` where `NAME` contains `TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `PASSWD`,
   `CREDENTIAL`, `AUTH`, `PRIVATE` or `COOKIE`, or has `PAT`, `PASS`, `PWD` or `PASSPHRASE` as a
   whole word. `PATH` is kept.
-* The value after `-p` and an attached `-pVALUE`, except port mappings (`8000:8000`) and the
+* The value after `-p` and an attached `-pVALUE` (including an attached password that begins
+  with a secret word, such as `-pwdXy7`), except port mappings (`8000:8000`) and the
   compiler flags `-pthread`, `-pedantic`, `-pipe`, `-pie` and `-pg`.
 * The password in `-u user:pass` and `--user user:pass`.
 * The word after `login`, and the word after `Bearer`.
 * Header values for header names containing `key`, `token`, `auth`, `secret` or `cookie`.
 * In a URL, the userinfo (`https://user:pass@host` becomes `https://<redacted>@host`) and query
   values whose name looks secret.
-* Values for secret keys in JSON text or a Python dict.
+* Values for secret keys in JSON text or a Python dict. A value that is a nested object or array
+  is masked as a balanced unit, with brackets inside quoted strings ignored and `{` matched only
+  by `}` and `[` only by `]`. A value whose brackets do not match, or that nests more than 64
+  levels, is masked to the end of the line.
 * Anywhere in the text: `hf_` plus 16 or more characters, `sk-` plus 16 or more, GitHub token
   prefixes (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_`), `glpat-`, Slack token
   prefixes (`xoxb-`, `xoxp-`, `xoxa-`), `AKIA` access key ids, and JWTs.
 
 A hidden value is replaced with `<redacted>`. Quotes around it are kept. A service key that
 changed during redaction gets an 8-digit hash suffix so two services whose keys differ only in
-the hidden part stay two entities.
+the hidden part stay two entities. The hash is salted with a random number drawn once per
+process, so the suffix cannot be matched against hashes of guessed secrets, and it differs from
+one host run to the next. A replay or `--bus-inspect` of a log that spans a host restart shows
+the old and the new key as two entities.
 
 ### Known false positives
 
@@ -688,7 +736,11 @@ Redaction hides more than it has to. These harmless values are hidden:
   contains `key`) and the environment variable `COMPASS=x`. `--compass-mode` is kept.
 * Environment names such as `TOKENIZERS_PARALLELISM` or `AUTHOR`.
 * `ssh -p 2222` and `docker -p 8000` (a bare port after `-p`), the word after `docker login`,
-  and any `-p...` word not on the keep list above.
+  and any `-p...` word not on the keep list above. `-pass` and `-passin` show as
+  `-p<redacted>`.
+* A secret value that is a nested object or array hides every word up to the closing bracket. A
+  stray quote after the opening bracket, brackets that do not match, or more than 64 levels hide
+  the rest of the line, so later arguments of that process can be missing from the record.
 * A URL such as `https://h:8000/u?e=a@b` loses its host and path.
 
 ### Known residual leaks
@@ -698,10 +750,6 @@ Redaction is a pattern matcher. These shapes are known to get through:
 * A secret that contains whitespace and sits among mis-paired quotes: the second word is not
   hidden.
 * `HF_TOKEN = S` with spaces around the `=`.
-* A secret key whose value is a nested object (`{'auth': {'k': 'S'}}`) leaks the inner value.
-* The 8-digit hash suffix on a redacted service key is an unsalted 32-bit hash of the raw key.
-  A short, guessable secret that appears in a service key can be found by trying candidates. A
-  long random secret is not revealed by it.
 * A `--remote` relay records the origin's raw frame as it arrives. That frame carries process
   names and model labels that the origin already redacted. This host does not redact them
   again.
@@ -887,7 +935,6 @@ Until the sidecar exists, the Die 3D tile glow stays an estimate and says so.
   NoC tiles spread over its column. That the tt-smi channel index equals the bank index is
   inferred. It is not documented. A hardware check would settle it: read DRAM tile NIU counters
   at the bank endpoints during a workload pinned to one bank. That check has not been run.
-* The `i` (inference monitor) view does not read the bus yet.
 * Training amber is not reachable in Die 3D: the model phases have no training phase, and a
   training run is a `run:` entity.
 
@@ -900,7 +947,7 @@ Until the sidecar exists, the Die 3D tile glow stays an estimate and says so.
 * Records lost from the end of a log (a deleted last segment) cannot be detected.
 * A compress error repeats at every rotation. Retention does not run on a segment whose
   metadata cannot be read.
-* The sequence restarts at 1 if the log directory cannot be prepared.
+* The sequence restarts at 1 if the open cannot list the log directory.
 * `events_since` returns at most the newest 64 events, with no overflow indicator.
 * Process entities are never retired by an event. The world drops them after 15 minutes
   without a reading. Process names, command lines and model announcements are sent when they
@@ -910,19 +957,28 @@ Until the sidecar exists, the Die 3D tile glow stays an estimate and says so.
   `toplike.eth.live_mask` has all of it.
 * A reducer panic is caught and the bus keeps running. A quiet panic hook keeps the message
   off a raw-mode terminal. It must be installed after the TUI's own hook.
+  CI runs the `tui_panic_hook` integration test that guards this order.
 
 ### Socket
 
 * A subscriber costs two threads. A snapshot copies the whole world, raw bodies included,
   under the publish lock.
-* A replay at speed 0.01 of a 59-second recorded gap waits 5,900 seconds while the client
-  stays connected.
+* A socket replay at speed 1 plays a pause longer than 1 second as 1 second, and a replay at
+  speed 0.01 of a 59-second recorded gap waits 1 second.
 * The client's start-up probe uses a blocking connect with no timeout of its own. A full
   listen backlog can stall it.
-* A second Ctrl-C during a slow backend start-up can remove another running host's socket on
-  the default path.
-* A directory that holds a log of one backend or mode can be reused for another, and
-  `--bus-inspect` prints only the first segment's header.
+* The socket is marked as this process's after a successful bind and unmarked before the server
+  finishes its shutdown. A second signal in either small window can leave a stale socket file.
+  The next start replaces a stale socket.
+* `--bus-inspect` prints only the first segment's header. Directories are refused when the
+  mode or the backend class changes, so one directory holds one mode and class. The refusal
+  counts an unrecognised backend tag as local-hardware, and a refusal after a late lock lasts
+  for the rest of the run.
+* A `--remote` relay of a mock box is recorded as backend `remote`, mode `live`, measured.
+* A replay or inspect of a log that spans a host restart shows the old and the new salted key of
+  a redacted service as two entities.
+* Retention can drop the process text of an old segment. The host sends it again every 5
+  minutes.
 
 ### Attach and views
 
@@ -930,9 +986,23 @@ Until the sidecar exists, the Die 3D tile glow stays an estimate and says so.
 * The host identity is an unsalted FNV-1a hash of the machine id.
 * An attached TUI that switches to the mock backend with `b` gets mock chip keys that can
   collide with real PCI addresses.
+* The hero duel in the arcade view still reads the local monitor's serving stats when the TUI is
+  attached.
+* When the host is lost, the rotation keeps dwelling on the host's last rows.
+* An attached model shows dashes for the TTFT breakdowns (queue, prefill, decode, per-token) and
+  for the prefix hit rate. The bus carries only the mean time to first token.
+* An estimated running count shows without `~` in the `i` roster line. The mark follows the label,
+  phase, progress, tokens per second and waiting readings, and the running count is not one of
+  them.
+* The `i` view keeps the local monitor when the TUI hosts its own bus.
+* The TUI's bus label can be dropped at very narrow widths (the label is dropped when fewer than
+  5 characters remain after the camera caption), so a mismatch warning such as `(other host)` can go silent.
+* The Die 3D legend and explain text list three phase colours and omit Down (grey).
+* Die 3D cannot tell a restarted host from the old one when the new sequence number is already
+  past the old one, because `WorldRead` carries no instance id.
 * After a memory-only backend switch, readings for signals the new backend no longer emits keep
   the old provenance until they age out.
-* A view that comes back on screen can show up to 64 old events as new pulses or sparks.
+* Re-entering Die 3D after a long absence can show up to 64 old events as fresh pulses or sparks.
 * A model whose chips are all foreign (in an attached world) appears with an empty chip list.
   Views skip it.
 

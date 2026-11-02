@@ -25,10 +25,12 @@
 //!    serve it on `--bus-socket` when given.
 //!
 //! An attached TUI still reads chip telemetry from its own backend. Only
-//! the views that read the bus (so far Die 3D) read the attached world, and [`TuiBus::read`] limits it to the local chips
+//! Die 3D reads the attached world, and [`TuiBus::read`] limits it to the local chips
 //! ([`ReadView::only_chips`]), so overlays never land on another machine's
-//! chips. An explicit `--bus-attach` attaches even when the origin does not
-//! match, and the label says why: `bus: <path> (other host)`, `(mock)`,
+//! chips. The `i` view reads the attached world through
+//! [`TuiBus::read_unfiltered`] (see `ui::tui::inference_bus`), and keeps the
+//! local inference monitor when this TUI hosts its own bus. An explicit
+//! `--bus-attach` attaches even when the origin does not match, and the label says why: `bus: <path> (other host)`, `(mock)`,
 //! `(replay)` or `(no matching chips)`. A lost connection adds
 //! `(reconnecting)`, then `(disconnected)` once a reconnect has failed.
 //!
