@@ -194,7 +194,7 @@ The rules the sidecar follows:
 - Exit within seconds when the lease is released or a reset is requested (the bus publishes the
   `Reset` and `LeaseReleased` events the sidecar watches for), because a live reader blocks the
   supported reset and release.
-- Start after a server is ready. A cold bring-up with the reader attached completed in the one trial
+- Start after a server is ready. A cold bring-up with the reader attached completed in the single trial
   run, which is not enough evidence to make that the default.
 - Detach before any chip reset or server restart. A restart without a reset can fail on an
   Ethernet core timeout whether or not a reader is present.
