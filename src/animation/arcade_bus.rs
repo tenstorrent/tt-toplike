@@ -538,17 +538,26 @@ pub(crate) fn left(start: u64, now: u64, dur_ns: u64) -> f32 {
     (1.0 - stepped_secs(start, now) / (dur_ns as f32 / NS_PER_S as f32)).max(0.0)
 }
 
-/// Where on the arcade's lines the bus effects go.
+/// Where on the arcade's lines the bus effects go. The arcade fills it from
+/// its layout (`ArcadeVisualization::draw_bus`): see "Where things go with a
+/// configured layout" in `docs/bus.md`.
 #[derive(Debug, Clone)]
 pub struct Stage {
     pub width: usize,
-    /// The gauge row: the starfield's separator.
-    pub gauge_row: usize,
+    /// The gauge row: the rule above the gauge panel (the starfield's in the
+    /// default layout). `None` when no panel is shown: then no gauge, label
+    /// or flash is drawn.
+    pub gauge_row: Option<usize>,
+    /// The gauge panel's columns, cut into the chips' slots.
+    pub gauge_cols: Range<usize>,
     /// Columns at the start of the gauge row that hold its label; the model
     /// label never covers them.
     pub label_cols: usize,
-    /// The starfield rows below the lanes, where particles rise.
+    /// The starfield rows below the lanes, where particles rise. Empty when
+    /// the layout has no starfield: then particles are not drawn.
     pub sky: Range<usize>,
+    /// The starfield panel's columns, cut into the chips' slots.
+    pub sky_cols: Range<usize>,
     /// The hero's cell, and the first row it may use (below the lanes).
     pub hero: (f32, f32),
     pub top_row: usize,
@@ -560,6 +569,12 @@ pub(crate) fn slot_cols(slot: usize, slots: usize, width: usize) -> Range<usize>
     (slot * width / n)..((slot + 1) * width / n)
 }
 
+/// The columns of slot `slot` of `slots` across the columns `cols`.
+fn slot_in(cols: &Range<usize>, slot: usize, slots: usize) -> Range<usize> {
+    let r = slot_cols(slot, slots, cols.len());
+    (cols.start + r.start)..(cols.start + r.end)
+}
+
 /// Draw `fx` at bus time `now` onto `lines`. Arithmetic on `fx` only. An
 /// empty `fx` changes nothing.
 pub fn draw(fx: &ArcadeFx, now: u64, stage: &Stage, lines: &mut [Line<'static>]) {
@@ -567,21 +582,22 @@ pub fn draw(fx: &ArcadeFx, now: u64, stage: &Stage, lines: &mut [Line<'static>])
         return;
     }
     for co in &fx.chips {
-        let cols = slot_cols(co.slot, fx.slots, stage.width);
-        if cols.is_empty() {
-            continue;
+        let cols = slot_in(&stage.gauge_cols, co.slot, fx.slots);
+        if let (Some(row), false) = (stage.gauge_row, cols.is_empty()) {
+            draw_gauge(co, now, cols.clone(), row, lines);
+            if co.flash_ns.is_some_and(|t| left(t, now, FLASH_NS) > 0.0) {
+                restyle(lines, row, cols.clone(), |s| {
+                    s.add_modifier(Modifier::REVERSED)
+                });
+            }
+            if let Some(flag) = &co.flag {
+                draw_label(flag, &co.label_texts, cols.clone(), row, stage, lines);
+            }
         }
-        draw_gauge(co, now, cols.clone(), stage.gauge_row, lines);
-        if co.flash_ns.is_some_and(|t| left(t, now, FLASH_NS) > 0.0) {
-            restyle(lines, stage.gauge_row, cols.clone(), |s| {
-                s.add_modifier(Modifier::REVERSED)
-            });
-        }
-        if let Some(flag) = &co.flag {
-            draw_label(flag, &co.label_texts, cols.clone(), stage, lines);
-        }
+        // Particles need the starfield; an empty sky draws none.
+        let sky_cols = slot_in(&stage.sky_cols, co.slot, fx.slots);
         for p in &co.particles {
-            draw_particle(p, now, cols.clone(), &stage.sky, lines);
+            draw_particle(p, now, sky_cols.clone(), &stage.sky, lines);
         }
     }
     for h in &fx.hits {
@@ -641,6 +657,7 @@ fn draw_label(
     flag: &ModelFlag,
     texts: &[String],
     cols: Range<usize>,
+    row: usize,
     stage: &Stage,
     lines: &mut [Line<'static>],
 ) {
@@ -660,19 +677,13 @@ fn draw_label(
         // model, so an estimate keeps its `~`, alone at the label's right
         // end, when that one column is free.
         if flag.estimated && end > start_min {
-            crate::animation::ArcadeVisualization::splice_char(
-                lines,
-                stage.gauge_row,
-                end - 1,
-                '~',
-                style,
-            );
+            crate::animation::ArcadeVisualization::splice_char(lines, row, end - 1, '~', style);
         }
         return;
     };
     // One span for the whole label: the row is rebuilt once per frame.
     let col = end - UnicodeWidthStr::width(text.as_str());
-    splice_str(lines, stage.gauge_row, col, text, style);
+    splice_str(lines, row, col, text, style);
 }
 
 /// Write `text` in `style` over row `row` from display column `col`, as one

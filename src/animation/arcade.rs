@@ -6,10 +6,15 @@
 //! Combines all three visualizations (Starfield, Memory Castle, Memory Flow) into a single
 //! all-encompassing view with a roguelike hero character that moves based on real telemetry.
 //!
-//! Layout:
-//! - Top 30%: Starfield (stars = Tensix cores, planets = memory hierarchy)
-//! - Middle 40%: Memory Castle (DDR channels, L2 cache, L1 SRAM, particles flowing upward)
+//! Layout: rows of panels from the `[arcade]` config section (see
+//! `arcade_layout` and `docs/arcade-layout.md`). The default, with no config:
+//! - Top 40%: Starfield (stars = Tensix cores, planets = memory hierarchy)
+//! - Middle 30%: Memory Castle (55% of the width) beside Defrag
 //! - Bottom 30%: Memory Flow (NoC particles, DDR perimeter, heat map center)
+//!
+//! Die 3D, Training and the inference server can be panels too. Each panel's
+//! view is built at its panel's size when the arcade is made, and the arcade
+//! is made again on a resize, so the frame path does no layout work.
 //!
 //! Hero Character (@):
 //! - Vertical position driven by power consumption (low power = bottom, high = top)
@@ -19,6 +24,7 @@
 //! - BOLD white character for maximum visibility
 
 use crate::animation::arcade_bus::{self, ArcadeBusState, ArcadeFx};
+use crate::animation::arcade_layout::{self, ArcadeConfig, Layout, Panel, View};
 use crate::animation::{
     bbs_rule, hsv_to_rgb, lerp, temp_to_hue, AdaptiveBaseline, BoardTopology, DefragVis, DuelState,
     HardwareStarfield, MemoryCastle, MemoryFlowVis,
@@ -72,16 +78,43 @@ pub struct ArcadeVisualization {
     width: usize,
     height: usize,
 
-    // Sub-visualizations (public for direct access in UI)
-    pub starfield: HardwareStarfield,
-    pub memory_castle: MemoryCastle,
-    pub memory_flow: MemoryFlowVis,
-    /// Defrag block map rendered side-by-side with Memory Castle.
-    defrag: DefragVis,
-    /// Width of the left (castle) column in the split section.
-    castle_col_w: usize,
-    /// Width of the right (defrag) column in the split section.
-    defrag_col_w: usize,
+    // Sub-visualizations, one per panel the layout shows (`None` for a view
+    // the layout leaves out). Each is built at its panel's size.
+    pub starfield: Option<HardwareStarfield>,
+    pub memory_castle: Option<MemoryCastle>,
+    pub memory_flow: Option<MemoryFlowVis>,
+    defrag: Option<DefragVis>,
+    /// The Die 3D panel: the full Die 3D view at the panel's size, so its
+    /// scene and bus overlay are the Die 3D mode's own.
+    die3d: Option<crate::animation::Die3dView>,
+    /// The Training panel: the Training view at the panel's size.
+    train: Option<crate::animation::TrainView>,
+    /// The inference panel: the `i` view's serving snake.
+    snake: Option<crate::animation::Snake>,
+
+    /// Where every panel goes, worked out once at construction.
+    layout: Layout,
+    /// The config the layout came from.
+    config: ArcadeConfig,
+    /// Whether the atmosphere backdrop is drawn behind the whole arcade.
+    cloudfield: bool,
+    /// The backdrop the cloudfield draws, following the featured inference
+    /// service as the `i` view's backdrop does.
+    atmosphere: crate::animation::atmosphere::Atmosphere,
+    /// The inference service rows of this tick, for the inference panel and
+    /// the cloudfield.
+    services: Vec<crate::workload::inference_server::ServiceState>,
+    /// The training run of this tick, for the Training panel.
+    train_state: Option<crate::workload::train::TrainState>,
+    /// Seconds of view time for the Die 3D panel, set by the TUI each update
+    /// (`set_clock`). `None` uses the frame count at 60 frames a second,
+    /// which keeps tests on a fixed clock.
+    clock_s: Option<f64>,
+    /// The bus time the Die 3D panel draws its overlay at; `None` without a
+    /// bus.
+    die3d_bus_now: Option<u64>,
+    /// Whether `set_bus` has updated the Die 3D panel since the last update.
+    die3d_fed: bool,
 
     // Hero character state
     hero_x: f32,
@@ -104,14 +137,6 @@ pub struct ArcadeVisualization {
     // Animation state
     frame: u32,
     baseline: AdaptiveBaseline,
-
-    // Region boundaries (in rows)
-    starfield_start: usize,
-    starfield_end: usize,
-    castle_start: usize,
-    castle_end: usize,
-    flow_start: usize,
-    flow_end: usize,
 
     /// Board topology — used to render the header topology diagram line.
     board_topology: Option<BoardTopology>,
@@ -143,62 +168,71 @@ pub struct ArcadeVisualization {
 }
 
 impl ArcadeVisualization {
-    /// Create new Arcade visualization with btop++-inspired layout
+    /// An arcade with the default layout (the one it has always had).
     pub fn new(width: usize, height: usize) -> Self {
-        // Budget: height rows total.
-        //   Row 0:         title bar
-        //   Row 1:         topology diagram (or blank)
-        //   Row 2:         "✧ STARFIELD" separator
-        //   Rows 3…3+sf:   starfield content
-        //   Row 3+sf+1:    "🏰 MEMORY CASTLE │ ▓ DEFRAG" separator
-        //   Rows …:        castle/defrag content
-        //   Row …+1:       "🌊 MEMORY FLOW" separator
-        //   Rows …:        flow content
-        //   Last row:      legend/status bar (overwritten by command-bar overlay)
-        // 2 header + 3 separators + 1 footer = 6 fixed rows; rest is content.
-        let content_height = height.saturating_sub(6);
+        Self::with_config(width, height, &ArcadeConfig::default())
+    }
 
-        // Starfield 40%, Castle+Defrag 30%, Flow 30%.
-        let starfield_height = (content_height as f32 * 0.40) as usize;
-        let bottom_height = content_height.saturating_sub(starfield_height);
-        let castle_height = bottom_height / 2;
-        let flow_height = bottom_height - castle_height;
-
-        // Castle column gets 55% of width, defrag gets the rest.
-        // The │ divider between them costs 1 col, so both columns together
-        // must be width - 1 to keep total display width == width.
-        let castle_col_w = (width as f32 * 0.55) as usize;
-        let defrag_col_w = width.saturating_sub(castle_col_w).saturating_sub(1);
-
-        // Row boundaries for hero overlay (0-indexed into the line vec).
-        let starfield_start = 2; // after title + topology
-        let starfield_end = starfield_start + starfield_height;
-        let castle_start = starfield_end + 1; // +1 separator
-        let castle_end = castle_start + castle_height;
-        let flow_start = castle_end + 1;
-        let flow_end = flow_start + flow_height;
+    /// An arcade laid out by `config` on a `width` x `height` terminal.
+    ///
+    /// The rows (see `arcade_layout`):
+    ///   Row 0:         title bar
+    ///   Row 1:         telemetry strip, topology diagram or the duel
+    ///   then per configured row: a `╔══[ LABEL ]` rule and its content
+    ///   Last row:      legend/status bar (overwritten by command-bar overlay)
+    pub fn with_config(width: usize, height: usize, config: &ArcadeConfig) -> Self {
+        let layout = arcade_layout::layout(&config.rows, width, height);
+        let rect = |v: View| layout.find(v).map(|p| p.rect);
 
         // Embedded sub-visualizations render with chrome OFF: each one drops its
         // own per-device W/°C header so the composite view isn't printing the
         // same telemetry ~3×.  Arcade renders ONE shared telemetry strip (Row 1)
         // instead.  Standalone modes keep chrome on (their default).
-        let mut starfield = HardwareStarfield::new(width, starfield_height);
-        starfield.set_chrome(false);
-        let mut memory_castle =
-            MemoryCastle::new_with_density(castle_col_w, castle_height, 200, 10);
-        memory_castle.set_chrome(false);
-        let mut memory_flow = MemoryFlowVis::new_with_density(width, flow_height, 100);
-        memory_flow.set_chrome(false);
+        let starfield = rect(View::Starfield).map(|r| {
+            let mut sf = HardwareStarfield::new(r.w, r.h);
+            sf.set_chrome(false);
+            sf
+        });
+        let memory_castle = rect(View::Castle).map(|r| {
+            let mut c = MemoryCastle::new_with_density(r.w, r.h, 200, 10);
+            c.set_chrome(false);
+            c
+        });
+        let memory_flow = rect(View::Flow).map(|r| {
+            let mut f = MemoryFlowVis::new_with_density(r.w, r.h, 100);
+            f.set_chrome(false);
+            f
+        });
+        let defrag = rect(View::Defrag).map(|r| DefragVis::new(r.w, r.h));
+        // The same settings the TUI gives the Die 3D view (`new_die3d_view`).
+        let die3d = rect(View::Die3d).map(|r| {
+            crate::animation::Die3dView::new(r.w, r.h)
+                .with_transparent(colors::canvas_transparent())
+                .with_theme(colors::current_theme())
+                .with_cell_mode(crate::animation::die3d::cellmode::CellMode::Auto)
+        });
+        let train = rect(View::Training).map(|r| crate::animation::TrainView::new(r.w, r.h));
+        let snake = rect(View::Inference).map(|_| crate::animation::Snake::new());
 
         Self {
             width,
             height,
             starfield,
             memory_castle,
-            defrag: DefragVis::new(defrag_col_w, castle_height),
-            castle_col_w,
-            defrag_col_w,
+            defrag,
             memory_flow,
+            die3d,
+            train,
+            snake,
+            layout,
+            config: config.clone(),
+            cloudfield: config.cloudfield,
+            atmosphere: crate::animation::atmosphere::Atmosphere::new(),
+            services: Vec::new(),
+            train_state: None,
+            clock_s: None,
+            die3d_bus_now: None,
+            die3d_fed: false,
             hero_x: width as f32 / 2.0,
             hero_y: height as f32 / 2.0,
             hero_target_x: width as f32 / 2.0,
@@ -214,12 +248,6 @@ impl ArcadeVisualization {
             hero_gddr_temp: None,
             frame: 0,
             baseline: AdaptiveBaseline::new(),
-            starfield_start,
-            starfield_end,
-            castle_start,
-            castle_end,
-            flow_start,
-            flow_end,
             board_topology: None,
             serving: None,
             activities: Vec::new(),
@@ -230,6 +258,57 @@ impl ArcadeVisualization {
             bus_state: ArcadeBusState::default(),
             bus_now: 0,
         }
+    }
+
+    /// Row `i` of the layout as the old region fields gave it: its rule and
+    /// its content rows (`starfield_start .. starfield_end` for row 0 of the
+    /// default layout).
+    #[cfg(test)]
+    fn region(&self, i: usize) -> std::ops::Range<usize> {
+        let r = &self.layout.rows[i];
+        r.rule_y..r.rule_y + r.height
+    }
+
+    /// Where every panel goes.
+    pub fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
+    /// The config this arcade was laid out from.
+    pub fn config(&self) -> &ArcadeConfig {
+        &self.config
+    }
+
+    /// Whether the cloudfield (the atmosphere backdrop) is drawn.
+    pub fn cloudfield(&self) -> bool {
+        self.cloudfield
+    }
+
+    /// Switch the cloudfield on or off from the next frame.
+    pub fn set_cloudfield(&mut self, on: bool) {
+        self.cloudfield = on;
+    }
+
+    /// Hand the arcade this tick's inference service rows (the rows the `i`
+    /// view draws, from `inference_bus::attached_rows` when attached). They
+    /// feed the inference panel and the cloudfield.
+    pub fn set_services(&mut self, rows: Vec<crate::workload::inference_server::ServiceState>) {
+        self.services = rows;
+    }
+
+    /// Hand the arcade this tick's training run, for the Training panel.
+    pub fn set_train_state(&mut self, st: Option<crate::workload::train::TrainState>) {
+        self.train_state = st;
+    }
+
+    /// Set the Die 3D panel's view time, in seconds.
+    pub fn set_clock(&mut self, secs: f64) {
+        self.clock_s = Some(secs);
+    }
+
+    /// The Die 3D panel's view time.
+    fn now_s(&self) -> f64 {
+        self.clock_s.unwrap_or(self.frame as f64 / 60.0)
     }
 
     /// Hand the arcade the signal bus's world (`TuiBus::read`), once per
@@ -258,10 +337,25 @@ impl ArcadeVisualization {
                 self.bus_fx =
                     ArcadeFx::from_world(w, &chips, devices.len(), now, &mut self.bus_state);
                 self.bus_now = now;
+                // The Die 3D and Training panels read the world as their
+                // own modes do.
+                let secs = self.now_s();
+                if let Some(d) = self.die3d.as_mut() {
+                    d.update(backend, Some(w), secs);
+                    self.die3d_fed = true;
+                    self.die3d_bus_now = Some(now);
+                }
+                if let Some(t) = self.train.as_mut() {
+                    t.set_bus(Some(w), backend);
+                }
             }
             None => {
                 self.bus_fx = ArcadeFx::default();
                 self.bus_state = ArcadeBusState::default();
+                self.die3d_bus_now = None;
+                if let Some(t) = self.train.as_mut() {
+                    t.set_bus(None, backend);
+                }
             }
         }
     }
@@ -282,14 +376,17 @@ impl ArcadeVisualization {
 
     /// Rows the lanes take from the top of the starfield region: up to 2, and 0
     /// unless the starfield has at least 6 rows so it stays readable.
+    ///
+    /// The lanes go in the starfield panel; a layout with no starfield shows
+    /// none.
     pub fn lane_rows(&self) -> usize {
         const MIN_STARFIELD_ROWS: usize = 6;
-        if self.activities.is_empty()
-            || self.starfield_end.saturating_sub(self.starfield_start) < MIN_STARFIELD_ROWS
-        {
-            return 0;
+        match self.layout.find(View::Starfield) {
+            Some(p) if !self.activities.is_empty() && p.rect.h >= MIN_STARFIELD_ROWS => {
+                self.activities.len().min(2)
+            }
+            _ => 0,
         }
-        self.activities.len().min(2)
     }
 
     /// The tint for the most urgent activity: red stalled, violet loading, warm
@@ -329,15 +426,41 @@ impl ArcadeVisualization {
         }
         let ids: Vec<&str> = self.activities.iter().map(|a| a.id.as_str()).collect();
         self.last_pulse.retain(|id, _| ids.contains(&id.as_str()));
-        for _ in 0..flares {
-            self.starfield.pulse();
+        if let Some(sf) = self.starfield.as_mut() {
+            for _ in 0..flares {
+                sf.pulse();
+            }
         }
     }
 
-    /// First row index (in the whole render) below the lanes, used to keep the
-    /// hero off them. The header, Row 1 and the separator come first.
-    fn lanes_end_row(&self) -> usize {
-        3 + self.lane_rows()
+    /// The first row the hero's hit rings may use: the first content row,
+    /// or below the lanes when they are in the top row. With the default
+    /// layout this is the old `3 + lane_rows()`.
+    fn top_row(&self) -> usize {
+        let first = arcade_layout::HEADER_ROWS + 1;
+        match self.layout.find(View::Starfield) {
+            Some(p) if self.lane_rows() > 0 && p.rect.y == first => p.rect.y + self.lane_rows(),
+            _ => first,
+        }
+    }
+
+    /// The rows the hero may not sit on because of the lanes, as
+    /// `(from, below)`: from `from` up to `below`. The lanes' own rows, and
+    /// when the starfield is in the top row everything above them too, as
+    /// the arcade has always done. `None` with no lanes.
+    fn lane_block(&self) -> Option<(usize, usize, std::ops::Range<usize>)> {
+        let n = self.lane_rows();
+        let p = self.layout.find(View::Starfield)?;
+        if n == 0 {
+            return None;
+        }
+        let top = self
+            .layout
+            .rows
+            .first()
+            .is_some_and(|r| r.panels.contains(p));
+        let from = if top { 0 } else { p.rect.y };
+        Some((from, p.rect.y + n, p.rect.cols()))
     }
 
     /// Propagate a sensitivity multiplier to all three sub-visualizations.
@@ -354,14 +477,22 @@ impl ArcadeVisualization {
     }
 
     pub fn set_sensitivity(&mut self, s: f32) {
-        self.starfield.set_sensitivity(s);
-        self.memory_castle.set_sensitivity(s);
-        self.memory_flow.set_sensitivity(s);
+        if let Some(v) = self.starfield.as_mut() {
+            v.set_sensitivity(s);
+        }
+        if let Some(v) = self.memory_castle.as_mut() {
+            v.set_sensitivity(s);
+        }
+        if let Some(v) = self.memory_flow.as_mut() {
+            v.set_sensitivity(s);
+        }
     }
 
     /// Initialize from devices (called once after creation)
     pub fn initialize_from_devices(&mut self, devices: &[crate::models::Device]) {
-        self.starfield.initialize_from_devices(devices);
+        if let Some(v) = self.starfield.as_mut() {
+            v.initialize_from_devices(devices);
+        }
     }
 
     /// Build and install board topology from live SMBUS data.
@@ -383,8 +514,12 @@ impl ArcadeVisualization {
         let topo = BoardTopology::from_devices_with_ids(backend.devices(), &board_ids);
 
         // Push topology to sub-visualizations.
-        self.starfield.set_topology(topo.clone());
-        self.memory_castle.set_topology(topo.clone());
+        if let Some(v) = self.starfield.as_mut() {
+            v.set_topology(topo.clone());
+        }
+        if let Some(v) = self.memory_castle.as_mut() {
+            v.set_topology(topo.clone());
+        }
         self.board_topology = Some(topo);
     }
 
@@ -575,12 +710,22 @@ impl ArcadeVisualization {
         self.frame = self.frame.wrapping_add(1);
 
         // Update sub-visualizations
-        self.starfield.update_from_telemetry(backend);
-        self.starfield.set_activity_tint(self.activity_tint());
+        let tint = self.activity_tint();
+        if let Some(sf) = self.starfield.as_mut() {
+            sf.update_from_telemetry(backend);
+            sf.set_activity_tint(tint);
+        }
         self.pulse_activities();
-        self.memory_castle.update(backend);
-        self.memory_flow.update(backend);
-        self.defrag.update(backend);
+        if let Some(v) = self.memory_castle.as_mut() {
+            v.update(backend);
+        }
+        if let Some(v) = self.memory_flow.as_mut() {
+            v.update(backend);
+        }
+        if let Some(v) = self.defrag.as_mut() {
+            v.update(backend);
+        }
+        self.update_new_panels(backend);
 
         // Update hero position based on telemetry
         if let Some(device) = backend.devices().first() {
@@ -655,8 +800,11 @@ impl ArcadeVisualization {
         self.hero_x = lerp(self.hero_x, self.hero_target_x, self.hero_lerp_speed);
         self.hero_y = lerp(self.hero_y, self.hero_target_y, self.hero_lerp_speed);
         // Keep the hero below any lanes, so it never sits on one.
-        if self.lane_rows() > 0 {
-            self.hero_y = self.hero_y.max(self.lanes_end_row() as f32);
+        if let Some((from, below, cols)) = self.lane_block() {
+            let in_cols = cols.contains(&(self.hero_x.max(0.0) as usize));
+            if in_cols && self.hero_y >= from as f32 && self.hero_y < below as f32 {
+                self.hero_y = below as f32;
+            }
         }
 
         // Update trail
@@ -732,17 +880,29 @@ impl ArcadeVisualization {
         let normalized_current = (current / 100.0).max(0.0).min(1.0);
         let target_x = normalized_current * (self.width as f32 - 1.0);
 
-        // Y position: map power across all three regions top-to-bottom.
-        // High power → starfield (top); medium → castle/defrag (middle); low → flow (bottom).
+        // Y position: map power across the laid-out rows top-to-bottom.
+        // High power → the top row; medium → the middle row; low → the bottom
+        // row. With the default layout these are starfield, castle/defrag
+        // and flow, as before. Each band is a row's rule and the content rows
+        // after it (`Layout::bands`).
+        let bands = self.layout.bands();
+        let band = |i: usize| {
+            bands
+                .get(i)
+                .cloned()
+                .unwrap_or(arcade_layout::HEADER_ROWS..arcade_layout::HEADER_ROWS)
+        };
+        let n = bands.len().max(1);
+        let (top, mid, bottom) = (band(0), band((n - 1) / 2), band(n - 1));
+        let along = |r: std::ops::Range<usize>, ratio: f32| {
+            r.start as f32 + ratio * (r.end - r.start) as f32
+        };
         let target_y = if power >= 80.0 {
-            let ratio = ((power - 80.0) / 70.0).clamp(0.0, 1.0);
-            self.starfield_start as f32 + ratio * (self.starfield_end - self.starfield_start) as f32
+            along(top, ((power - 80.0) / 70.0).clamp(0.0, 1.0))
         } else if power >= 30.0 {
-            let ratio = (power - 30.0) / 50.0;
-            self.castle_start as f32 + ratio * (self.castle_end - self.castle_start) as f32
+            along(mid, (power - 30.0) / 50.0)
         } else {
-            let ratio = (power / 30.0).clamp(0.0, 1.0);
-            self.flow_start as f32 + ratio * (self.flow_end - self.flow_start) as f32
+            along(bottom, (power / 30.0).clamp(0.0, 1.0))
         };
 
         (target_x, target_y)
@@ -775,59 +935,20 @@ impl ArcadeVisualization {
         lines.push(self.render_header(backend));
         lines.push(self.render_row1(backend));
 
-        // Render Starfield region — separator first, then content
-        let starfield_lines = self.starfield.render();
-        lines.push(self.render_separator("✧ STARFIELD", self.starfield_end - self.starfield_start));
-        for line in &starfield_lines {
-            lines.push(line.clone());
+        // Each configured row: its rule, then its panels side by side.
+        for row in &self.layout.rows {
+            lines.push(self.render_separator(&row.label(), row.height));
+            self.compose_row(row, backend, &mut lines);
         }
 
-        // Castle + Defrag side-by-side separator
-        lines.push(self.render_separator(
-            "🏰 MEMORY CASTLE  │  ▓ DEFRAG",
-            self.castle_end - self.castle_start,
-        ));
-
-        // Render castle and defrag columns, zip them side by side.
-        // Each produces `castle_height` lines; pad shorter side with blanks.
-        let castle_lines = self.memory_castle.render(backend);
-        let defrag_lines = self.defrag.render_embedded(backend);
-        let split_rows = self.castle_end - self.castle_start;
-        let div = Span::styled("│", Style::default().fg(colors::rgb(50, 70, 90)));
-        for row in 0..split_rows {
-            let left = castle_lines
-                .get(row)
-                .cloned()
-                .unwrap_or_else(|| Line::from(""));
-            let right = defrag_lines
-                .get(row)
-                .cloned()
-                .unwrap_or_else(|| Line::from(""));
-            // Clamp both columns to their budgets, then pad left to exact width.
-            let left_spans = clamp_spans_to_width(left.spans, self.castle_col_w);
-            let right_spans = clamp_spans_to_width(right.spans, self.defrag_col_w);
-            let left_w: usize = left_spans
-                .iter()
-                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
-                .sum();
-            let pad = self.castle_col_w.saturating_sub(left_w);
-            let mut spans: Vec<Span<'static>> = left_spans;
-            if pad > 0 {
-                spans.push(Span::raw(" ".repeat(pad)));
-            }
-            spans.push(div.clone());
-            spans.extend(right_spans);
-            lines.push(Line::from(spans));
-        }
-
-        // Separator between Castle and Flow
-        lines.push(self.render_separator("🌊 MEMORY FLOW", self.flow_end - self.flow_start));
-
-        // Render Memory Flow region
-        let flow_lines = self.memory_flow.render(backend);
-        for line in flow_lines {
-            lines.push(line);
-        }
+        // The cloudfield: the atmosphere behind every blank cell. Off, or
+        // with nothing featured, this changes nothing.
+        let mut lines = if self.cloudfield && self.atmosphere.active() {
+            let backdrop = self.atmosphere.render_backdrop(self.width, lines.len());
+            crate::animation::atmosphere::composite(&backdrop, lines, self.width)
+        } else {
+            lines
+        };
 
         // The bus effects (see `arcade_bus`), under the hero and the lanes.
         // With no bus this does nothing.
@@ -838,16 +959,197 @@ impl ArcadeVisualization {
         // them. With no activities `lane_rows()` is 0 and this does nothing.
         let mut lines = self.overlay_hero(lines, backend);
         let n = self.lane_rows();
-        if n > 0 {
-            let lanes = crate::animation::render_lanes(&self.activities, self.width);
+        if let (true, Some(p)) = (n > 0, self.layout.find(View::Starfield)) {
+            let r = p.rect;
+            let lanes = crate::animation::render_lanes(&self.activities, r.w);
             for (i, lane) in lanes.into_iter().enumerate() {
-                // Header (0), Row 1 (1), separator (2), then the starfield rows.
-                if let Some(slot) = lines.get_mut(3 + i) {
-                    *slot = lane;
+                if let Some(slot) = lines.get_mut(r.y + i) {
+                    if r.x == 0 && r.w == self.width {
+                        *slot = lane;
+                    } else {
+                        put_spans(slot, r.x, r.w, lane.spans);
+                    }
                 }
             }
         }
         lines
+    }
+
+    /// Update the Die 3D, Training and inference panels, when shown.
+    fn update_new_panels(&mut self, backend: &dyn TelemetryBackend) {
+        let secs = self.now_s();
+        if let Some(d) = self.die3d.as_mut() {
+            d.set_theme(colors::current_theme());
+            // `set_bus` updated it with the world this tick; without a bus it
+            // is updated here, with none.
+            if !self.die3d_fed {
+                d.update(backend, None, secs);
+            }
+        }
+        self.die3d_fed = false;
+        if let Some(t) = self.train.as_mut() {
+            t.update();
+        }
+        self.atmosphere.observe(&self.services);
+        if let (Some(snake), Some(p)) = (self.snake.as_mut(), self.layout.find(View::Inference)) {
+            let chips: Vec<crate::animation::ChipReading> = backend
+                .devices()
+                .iter()
+                .map(|d| {
+                    let t = backend.telemetry(d.index);
+                    crate::animation::ChipReading {
+                        index: d.index,
+                        arch: d.architecture.name(),
+                        power_w: t.and_then(|t| t.power),
+                        temp_c: t.and_then(|t| t.asic_temperature),
+                        aiclk_mhz: t.and_then(|t| t.aiclk),
+                    }
+                })
+                .collect();
+            let arch = backend
+                .devices()
+                .first()
+                .map(|d| d.architecture.name())
+                .unwrap_or("Unknown");
+            snake.update(&crate::animation::SnakeWorld {
+                rows: &self.services,
+                // The catalog only feeds the cold starfield, which the panel
+                // never shows: with no server it shows its note instead.
+                catalog: &[],
+                arch,
+                chips: &chips,
+                cadence_secs: crate::workload::inference_server::CADENCE_SECS,
+                width: p.rect.w,
+                height: p.rect.h,
+            });
+        }
+    }
+
+    /// Whether an inference service is up or coming up: the inference panel
+    /// draws the serving snake then, and its note otherwise.
+    fn has_server(&self) -> bool {
+        use crate::workload::inference_server::Phase;
+        self.services.iter().any(|s| s.phase != Phase::Down)
+    }
+
+    /// The lines of panel `p`, at most its height, each at most its width.
+    fn panel_lines(&self, p: &Panel, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
+        let note = |text: &str| {
+            vec![Line::from(Span::styled(
+                format!(" {text}"),
+                Style::default().fg(colors::text_secondary()),
+            ))]
+        };
+        let (w, h) = (p.rect.w, p.rect.h);
+        match p.view {
+            View::Starfield => self.starfield.as_ref().map(|v| v.render()),
+            View::Castle => self.memory_castle.as_ref().map(|v| v.render(backend)),
+            View::Flow => self.memory_flow.as_ref().map(|v| v.render(backend)),
+            View::Defrag => self.defrag.as_ref().map(|v| v.render_embedded(backend)),
+            View::Die3d => self
+                .die3d
+                .as_ref()
+                .map(|v| v.render_at(self.die3d_bus_now, self.now_s())),
+            View::Training => self.train.as_ref().map(|t| {
+                let none = crate::workload::train::TrainState::default();
+                let st = self.train_state.as_ref().unwrap_or(&none);
+                if st.proc.is_none() && !t.shows_bus_run() {
+                    note("no training run")
+                } else {
+                    t.render(st, backend)
+                }
+            }),
+            View::Inference => self.snake.as_ref().map(|s| {
+                if self.has_server() {
+                    s.render(w, h)
+                } else {
+                    note("no inference server")
+                }
+            }),
+        }
+        .unwrap_or_default()
+    }
+
+    /// Push the content rows of `row` onto `lines`: its panels side by side,
+    /// a `│` between two of them. A row holding one full-width panel pushes
+    /// that panel's lines as they are (clamped to the width), as the arcade
+    /// always did for the starfield and the flow.
+    fn compose_row(
+        &self,
+        row: &arcade_layout::LaidRow,
+        backend: &dyn TelemetryBackend,
+        lines: &mut Vec<Line<'static>>,
+    ) {
+        if row.height == 0 {
+            return;
+        }
+        let rendered: Vec<Vec<Line<'static>>> = row
+            .panels
+            .iter()
+            .map(|p| self.panel_lines(p, backend))
+            .collect();
+        if let [p] = row.panels.as_slice() {
+            if p.rect.x == 0 && p.rect.w == self.width {
+                // The bottom row's panel pushes the lines it returns, as
+                // many as it returns, as the arcade always let the flow do:
+                // the flow adds a legend line in the footer row (which the
+                // status bar covers) and at some sizes draws fewer or more
+                // rows than it was given. ratatui clips anything below the
+                // terminal. Every other row gets exactly its height, so the
+                // rows below it stay where the layout put them.
+                let is_last = self
+                    .layout
+                    .rows
+                    .last()
+                    .is_some_and(|r| std::ptr::eq(r, row));
+                let n = if is_last {
+                    rendered[0].len()
+                } else {
+                    row.height
+                };
+                for r in 0..n {
+                    let line = rendered[0].get(r).cloned().unwrap_or_default();
+                    let spans = clamp_spans_to_width(line.spans.clone(), p.rect.w);
+                    lines.push(Line { spans, ..line });
+                }
+                return;
+            }
+        }
+        let div = Span::styled("│", Style::default().fg(colors::rgb(50, 70, 90)));
+        let last = row.panels.len().saturating_sub(1);
+        for r in 0..row.height {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut col = 0usize;
+            for (i, p) in row.panels.iter().enumerate() {
+                if i > 0 {
+                    // The divider is the column before the panel.
+                    let at = p.rect.x.saturating_sub(1);
+                    if col < at {
+                        spans.push(Span::raw(" ".repeat(at - col)));
+                    }
+                    spans.push(div.clone());
+                    col = at + 1;
+                }
+                let line = rendered[i]
+                    .get(r)
+                    .cloned()
+                    .unwrap_or_else(|| Line::from(""));
+                let part = clamp_spans_to_width(line.spans, p.rect.w);
+                let used: usize = part
+                    .iter()
+                    .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                    .sum();
+                spans.extend(part);
+                col += used;
+                // Pad every panel but the last to its width, so the next
+                // divider lands in its column.
+                if i < last && used < p.rect.w {
+                    spans.push(Span::raw(" ".repeat(p.rect.w - used)));
+                    col += p.rect.w - used;
+                }
+            }
+            lines.push(Line::from(spans));
+        }
     }
 
     /// Draw the bus effects at the bus time of the last `set_bus`.
@@ -855,17 +1157,39 @@ impl ArcadeVisualization {
         if self.bus_fx.is_empty() {
             return;
         }
-        // Header (0), Row 1 (1), the starfield separator (2), then the
-        // starfield rows, the first of them under the lanes.
-        let sky_rows = self.starfield_end - self.starfield_start;
+        // The gauges and labels go on the rule of the gauge panel (see
+        // `Layout::gauge_panel`), across its columns. Particles rise in the
+        // starfield panel below the lanes; with no starfield they are not
+        // drawn. With the default layout this is the starfield's rule and
+        // rows across the whole width, as before.
         let lanes = self.lane_rows();
+        let gauge = self.layout.gauge_panel().and_then(|p| {
+            let row = self.layout.row_of(p)?;
+            Some((row.rule_y, p.rect.cols(), row.label()))
+        });
+        let (gauge_row, gauge_cols, label_cols) = match &gauge {
+            Some((y, cols, label)) => (
+                Some(*y),
+                cols.clone(),
+                UnicodeWidthStr::width("╔══[ ")
+                    + UnicodeWidthStr::width(label.as_str())
+                    + UnicodeWidthStr::width(" ]"),
+            ),
+            None => (None, 0..0, 0),
+        };
+        let (sky, sky_cols) = match self.layout.find(View::Starfield) {
+            Some(p) => ((p.rect.y + lanes)..(p.rect.y + p.rect.h), p.rect.cols()),
+            None => (0..0, 0..0),
+        };
         let stage = arcade_bus::Stage {
             width: self.width,
-            gauge_row: 2,
-            label_cols: UnicodeWidthStr::width("╔══[ ✧ STARFIELD ]"),
-            sky: (3 + lanes)..(3 + sky_rows),
+            gauge_row,
+            gauge_cols,
+            label_cols,
+            sky,
+            sky_cols,
             hero: (self.hero_x, self.hero_y),
-            top_row: self.lanes_end_row(),
+            top_row: self.top_row(),
         };
         arcade_bus::draw(&self.bus_fx, self.bus_now, &stage, lines);
     }
@@ -1304,6 +1628,59 @@ impl ArcadeVisualization {
     }
 }
 
+/// Write `spans` over the columns `x .. x + w` of `line`, keeping what is
+/// left and right of them. The spans are clamped to `w` and padded to it.
+fn put_spans(line: &mut Line<'static>, x: usize, w: usize, spans: Vec<Span<'static>>) {
+    let old = std::mem::take(&mut line.spans);
+    let mut out = clamp_spans_to_width(old.clone(), x);
+    let left: usize = out
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    if left < x {
+        out.push(Span::raw(" ".repeat(x - left)));
+    }
+    let mid = clamp_spans_to_width(spans, w);
+    let used: usize = mid
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    out.extend(mid);
+    if used < w {
+        out.push(Span::raw(" ".repeat(w - used)));
+    }
+    out.extend(skip_cols(old, x + w));
+    line.spans = out;
+}
+
+/// The spans after the first `n` display columns. A wide character cut by
+/// the edge becomes a space.
+fn skip_cols(spans: Vec<Span<'static>>, n: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut col = 0usize;
+    for span in spans {
+        let w = UnicodeWidthStr::width(span.content.as_ref());
+        if col >= n {
+            out.push(span);
+        } else if col + w > n {
+            let mut s = String::new();
+            let mut c = col;
+            for ch in span.content.chars() {
+                let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1);
+                if c >= n {
+                    s.push(ch);
+                } else if c + cw > n {
+                    s.push(' ');
+                }
+                c += cw;
+            }
+            out.push(Span::styled(s, span.style));
+        }
+        col += w;
+    }
+    out
+}
+
 /// Truncate a span list so its total display width does not exceed `max_cols`.
 /// Spans that fit entirely are kept unchanged; the last span that crosses the
 /// boundary is split at the column limit (character-granular, not byte).
@@ -1445,11 +1822,11 @@ mod tests {
         // ordering invariant: start < end, regions don't overlap, flow ends
         // before the total line count.
         let vis = ArcadeVisualization::new(80, 40);
-        assert!(vis.starfield_start < vis.starfield_end);
-        assert!(vis.starfield_end <= vis.castle_start);
-        assert!(vis.castle_start < vis.castle_end);
-        assert!(vis.castle_end <= vis.flow_start);
-        assert!(vis.flow_start < vis.flow_end);
+        assert!(vis.region(0).start < vis.region(0).end);
+        assert!(vis.region(0).end <= vis.region(1).start);
+        assert!(vis.region(1).start < vis.region(1).end);
+        assert!(vis.region(1).end <= vis.region(2).start);
+        assert!(vis.region(2).start < vis.region(2).end);
     }
 
     #[test]
@@ -1457,11 +1834,11 @@ mod tests {
         // At very small heights regions may collapse to zero size but must
         // not violate start <= end or produce overlapping ranges.
         let vis = ArcadeVisualization::new(40, 6);
-        assert!(vis.starfield_start <= vis.starfield_end);
-        assert!(vis.starfield_end <= vis.castle_start);
-        assert!(vis.castle_start <= vis.castle_end);
-        assert!(vis.castle_end <= vis.flow_start);
-        assert!(vis.flow_start <= vis.flow_end);
+        assert!(vis.region(0).start <= vis.region(0).end);
+        assert!(vis.region(0).end <= vis.region(1).start);
+        assert!(vis.region(1).start <= vis.region(1).end);
+        assert!(vis.region(1).end <= vis.region(2).start);
+        assert!(vis.region(2).start <= vis.region(2).end);
     }
 
     #[test]
@@ -1471,8 +1848,8 @@ mod tests {
                                                     // starfield_height == 1 (content_height ≈ 2): no mid separator
         let vis1 = ArcadeVisualization::new(80, 10);
         // Both must satisfy the no-overlap invariant
-        assert!(vis0.starfield_end <= vis0.castle_start);
-        assert!(vis1.starfield_end <= vis1.castle_start);
+        assert!(vis0.region(0).end <= vis0.region(1).start);
+        assert!(vis1.region(0).end <= vis1.region(1).start);
     }
 
     /// Regression for the duplicate-telemetry bug: the embedded starfield /
@@ -1633,7 +2010,7 @@ mod tests {
     fn a_short_starfield_gets_no_lanes() {
         let backend = mock_backend();
         let mut a = ArcadeVisualization::new(120, 12); // starfield region < 6 rows
-        assert!((a.starfield_end - a.starfield_start) < 6);
+        assert!((a.region(0).end - a.region(0).start) < 6);
         a.set_activities(vec![lane_act("nano_gpt")]);
         a.update(&backend);
         assert_eq!(a.lane_rows(), 0);
@@ -1670,20 +2047,23 @@ mod tests {
         a.set_activities(vec![act.clone()]);
         a.update(&backend);
         assert_eq!(
-            a.starfield.live_flares(),
+            a.starfield.as_ref().unwrap().live_flares(),
             0,
             "the first sight of a count is a baseline"
         );
         act.pulse_seq = Some(12);
         a.set_activities(vec![act.clone()]);
         a.update(&backend);
-        assert!(a.starfield.live_flares() >= 1, "a rise flares");
-        let before = a.starfield.live_flares();
+        assert!(
+            a.starfield.as_ref().unwrap().live_flares() >= 1,
+            "a rise flares"
+        );
+        let before = a.starfield.as_ref().unwrap().live_flares();
         act.pulse_seq = Some(1); // a new run: the count went down
         a.set_activities(vec![act]);
         a.update(&backend);
         assert!(
-            a.starfield.live_flares() <= before,
+            a.starfield.as_ref().unwrap().live_flares() <= before,
             "a drop is a reset, not a burst"
         );
     }
@@ -1745,7 +2125,11 @@ mod tests {
             id_act("svc:m", Serve, Some(0)),
         ]);
         a.update(&backend);
-        assert_eq!(a.starfield.live_flares(), 0, "no counter advanced");
+        assert_eq!(
+            a.starfield.as_ref().unwrap().live_flares(),
+            0,
+            "no counter advanced"
+        );
     }
 
     /// A service that loses its stats for a scrape and comes back at the same
@@ -1761,10 +2145,17 @@ mod tests {
         a.update(&backend);
         a.set_activities(vec![id_act("svc:m", Serve, Some(100))]);
         a.update(&backend);
-        assert_eq!(a.starfield.live_flares(), 0, "same 100 again is not new");
+        assert_eq!(
+            a.starfield.as_ref().unwrap().live_flares(),
+            0,
+            "same 100 again is not new"
+        );
         a.set_activities(vec![id_act("svc:m", Serve, Some(102))]);
         a.update(&backend);
-        assert!(a.starfield.live_flares() >= 1, "a real rise still flares");
+        assert!(
+            a.starfield.as_ref().unwrap().live_flares() >= 1,
+            "a real rise still flares"
+        );
     }
 
     /// An activity that appears in view for the first time gets a baseline, not
@@ -1781,7 +2172,7 @@ mod tests {
             id_act("svc:m", Serve, Some(9_000)),
         ]);
         a.update(&backend);
-        assert_eq!(a.starfield.live_flares(), 0);
+        assert_eq!(a.starfield.as_ref().unwrap().live_flares(), 0);
     }
 }
 

@@ -1047,6 +1047,15 @@ impl Die3dView {
     /// pulse fades over a second of it). With `None` nothing from the bus
     /// is drawn: the frame is the frame the view drew before the bus.
     pub fn render(&self, world: Option<&dyn WorldRead>, now: f64) -> Vec<Line<'static>> {
+        self.render_at(world.map(|w| w.now_mono_ns()), now)
+    }
+
+    /// [`render`](Self::render) with the bus clock given directly: `bus_now`
+    /// is the world's `now_mono_ns`, `None` for no bus. The frame needs no
+    /// more of the world than its clock, so a host that keeps the clock of
+    /// the last world it read (the arcade's Die 3D panel) draws the same
+    /// frame as the Die 3D view.
+    pub fn render_at(&self, bus_now: Option<u64>, now: f64) -> Vec<Line<'static>> {
         self.advance_clouds(now);
         let in_transition = self.director.progress(now).is_some();
         let key = (
@@ -1069,9 +1078,9 @@ impl Die3dView {
             }
         }
         // The effects at this frame: arithmetic on the overlay, no lookups.
-        let bus = world.is_some() && !self.overlay.is_empty();
-        let fx = match world {
-            Some(w) if bus => self.overlay.fx_at(w.now_mono_ns(), self.inset),
+        let bus = bus_now.is_some() && !self.overlay.is_empty();
+        let fx = match bus_now {
+            Some(t) if bus => self.overlay.fx_at(t, self.inset),
             _ => FxMap::new(),
         };
         let lines = self.draw(now, &fx, bus);

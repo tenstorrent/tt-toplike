@@ -481,7 +481,7 @@ fn weight(item: Option<&toml_edit::Item>, what: &str, report: &mut Report<'_>) -
         return Some(1);
     };
     match item.as_integer() {
-        Some(n) if n >= 1 && n <= 1000 => Some(n as u32),
+        Some(n) if (1..=1000).contains(&n) => Some(n as u32),
         Some(n) => {
             report(
                 item.span(),
