@@ -1,3 +1,28 @@
+tt-toplike (0.15.4) noble; urgency=medium
+
+  * A shared backdrop. Any view can draw a signal-driven background behind
+    its content: scene (the Inference atmosphere), sky (the Training aurora
+    and stars) or clouds (the Wafer Waffler's clouds). The Inference view,
+    the Training view and the Wafer Waffler keep their own as before. w cycles
+    the backdrop of the view on screen, /backdrop sets it, and [backdrop] in
+    the config file sets a default and a choice per view. The Starfield
+    refuses scene and sky, because its stars are Tensix cores.
+  * Arcade layouts. { and } step through eight built-in layouts (classic,
+    now-serving, defrag-wide, waffler, workload, deck, skyline, memory-lane)
+    and your own [[arcade.layouts]] tables in the config file. A layout can set
+    the arcade's backdrop. --arcade-layout NAME starts with one, and
+    /arcade layout next, prev, a name or list works on the command bar.
+  * No arcade row ends in a right-side border character at any width. The
+    default layout differs from 0.15.3 only by that last column at 377 sizes.
+  * A message set by a layout, backdrop or arcade key goes away when you leave
+    that view, and an informational one goes after about four seconds.
+  * Fix: switching layouts no longer shows "no Tenstorrent device found" for
+    one frame.
+  * The backdrop writes far less to the terminal: a serving model's scene
+    went from 1.17 MB/s to 74 KB/s on a blank 200x60 view.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 21:00:00 -0800
+
 tt-toplike (0.15.3) noble; urgency=medium
 
   * Die 3D is now the Wafer Waffler. /waffler and --mode waffler open it, and

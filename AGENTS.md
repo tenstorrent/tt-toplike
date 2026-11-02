@@ -1485,6 +1485,12 @@ the point (and still fun!)", plus renaming Die 3D to a fun name the user liked, 
   speed and density drivers, docs/bus.md's "the other views read what they read before", README's
   "the arcade hero duel reads the local monitor".
 
+### Version history: 0.15.4 (Nov 2 2026)
+
+0.15.4 adds the shared backdrop (`src/animation/backdrop.rs`, `docs/backdrop.md`) and the arcade layout
+presets with `{` and `}` (`src/animation/arcade_presets.rs`). The built-in layout order lives in one table in
+`arcade_presets.rs`.
+
 ### Version history: 0.15.3 (Nov 2 2026)
 
 0.15.3 adds the arcade layout engine (`src/animation/arcade_layout.rs`, `docs/arcade-layout.md`), the Wafer

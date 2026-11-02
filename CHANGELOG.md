@@ -17,6 +17,21 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.15.4
+- Shared backdrop: any view can draw a signal-driven background (`scene`, `sky` or `clouds`) behind its
+  content. `w` cycles the current view's backdrop, `/backdrop` sets it, `[backdrop]` in `config.toml` sets
+  a default and a choice per view. The Inference view, the Training view and the Wafer Waffler keep their
+  own. See `docs/backdrop.md`.
+- Arcade layouts: `{` and `}` step through eight built-in layouts and your own `[[arcade.layouts]]`;
+  `--arcade-layout NAME`, `/arcade layout ...`. A layout can set the arcade's backdrop. See
+  `docs/arcade-layout.md`.
+- No arcade row ends in a right-side border character at any width (377 sizes of the default layout lose
+  only their last column).
+- Messages from the layout, backdrop and arcade keys go away when you leave the view.
+- Fix: switching layouts no longer flashes "no Tenstorrent device found" for one frame.
+- The backdrop's terminal traffic fell from 1.17 MB/s to 74 KB/s while a model serves (blank 200x60 view).
+- Limits: not run on real hardware, in a live terminal, or attached to a headless host.
+
 ### 0.15.3
 - Die 3D is the Wafer Waffler (`/waffler`, `--mode waffler`; `/die3d` and `--mode die3d` still work).
 - Every explain, legend and help overlay is shorter and fits 80 columns without scrolling (help in 24
