@@ -23,6 +23,8 @@ pub mod arcade;
 pub mod arcade_bus;
 pub mod atmosphere;
 pub mod baseline;
+#[cfg(test)]
+pub(crate) mod bus_test_support;
 pub mod common;
 pub mod defrag;
 pub mod die3d;

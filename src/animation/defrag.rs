@@ -2370,3 +2370,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "defrag_bus_tests.rs"]
+mod bus_tests;

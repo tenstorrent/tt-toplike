@@ -2161,3 +2161,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "castle_bus_tests.rs"]
+mod bus_tests;
