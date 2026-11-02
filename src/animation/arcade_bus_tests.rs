@@ -123,14 +123,14 @@ const HASHED_AT: [u32; 3] = [1, 10, 30];
 
 /// Hashes of the frames of an arcade at `w` x `h` over [`Fixed`], after each
 /// update in [`HASHED_AT`]. `before_update` runs before every update (the
-/// bus tests hand the arcade an empty world there). Truecolor is forced so
-/// the colours do not depend on the terminal running the tests.
+/// bus tests hand the arcade an empty world there). The colours are pinned
+/// through [`tc`]: truecolor on, and the default theme under the theme lock.
 pub(super) fn hashes_with(
     w: usize,
     h: usize,
     mut before_update: impl FnMut(&mut ArcadeVisualization, &Fixed, u32),
 ) -> Vec<u64> {
-    crate::ui::colors::with_truecolor(true, || {
+    tc(|| {
         let backend = Fixed::new(2);
         let mut a = ArcadeVisualization::new(w, h);
         a.initialize_from_devices(backend.devices());
@@ -181,6 +181,21 @@ fn the_frames_with_no_bus_are_the_pinned_frames() {
             "{w}x{h}"
         );
     }
+}
+
+/// The golden hashes and every colour comparison below go through
+/// `colors::rgb`, which reads the app-wide theme. Both helpers must pin the
+/// default theme under the theme lock, or a test that flips the theme
+/// (`colors::tests::theme_state_roundtrips`) can change a frame mid-hash.
+#[test]
+fn the_colour_helpers_pin_the_default_theme() {
+    hashes_with(60, 18, |_, _, _| {
+        assert!(
+            crate::ui::colors::theme_is_pinned_to_default(),
+            "hashes_with"
+        )
+    });
+    tc(|| assert!(crate::ui::colors::theme_is_pinned_to_default(), "tc"));
 }
 
 // ---- The bus ---------------------------------------------------------------
@@ -349,9 +364,13 @@ fn count_fg(
         .count()
 }
 
-/// Run `f` with truecolor forced, so colours compare as RGB.
+/// Run `f` with truecolor forced, so colours compare as RGB, and with the
+/// default theme set under the theme lock, so a test that flips the
+/// app-wide theme cannot change the colours mid-test.
 fn tc<R>(f: impl FnOnce() -> R) -> R {
-    crate::ui::colors::with_truecolor(true, f)
+    crate::ui::colors::with_theme(crate::ui::colors::Theme::Default, || {
+        crate::ui::colors::with_truecolor(true, f)
+    })
 }
 
 #[test]

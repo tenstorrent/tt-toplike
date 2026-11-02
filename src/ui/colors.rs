@@ -117,6 +117,68 @@ pub fn current_theme() -> Theme {
     }
 }
 
+/// The lock every test that sets or depends on the app-wide theme takes
+/// through [`with_theme`]. The theme is one value for the whole process,
+/// and tests run in parallel, so a test that changes it would otherwise
+/// change the colours of a frame another test is hashing at that moment.
+#[cfg(test)]
+static THEME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+thread_local! {
+    /// Whether this thread holds [`THEME_LOCK`], so a nested
+    /// [`with_theme`] does not wait on its own lock.
+    static THEME_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `f` with the app-wide theme set to `t`, holding the test theme lock
+/// for the whole call. Every test that changes the theme, and every test
+/// that hashes or compares colours from [`rgb`], goes through this, so the
+/// two never overlap. The previous theme comes back when `f` returns or
+/// panics. A nested call on the same thread does not take the lock again.
+#[cfg(test)]
+pub fn with_theme<R>(t: Theme, f: impl FnOnce() -> R) -> R {
+    struct Restore {
+        prev: Theme,
+        outer: bool,
+        // Dropped after `drop` below has put the theme back.
+        _guard: Option<std::sync::MutexGuard<'static, ()>>,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            set_theme(self.prev);
+            if self.outer {
+                THEME_HELD.with(|h| h.set(false));
+            }
+        }
+    }
+    let held = THEME_HELD.with(std::cell::Cell::get);
+    let guard = if held {
+        None
+    } else {
+        Some(
+            THEME_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    };
+    THEME_HELD.with(|h| h.set(true));
+    let _restore = Restore {
+        prev: current_theme(),
+        outer: !held,
+        _guard: guard,
+    };
+    set_theme(t);
+    f()
+}
+
+/// Whether this thread runs inside [`with_theme`] with the default theme
+/// set: what a colour-pinning test helper must guarantee.
+#[cfg(test)]
+pub fn theme_is_pinned_to_default() -> bool {
+    THEME_HELD.with(std::cell::Cell::get) && current_theme() == Theme::Default
+}
+
 /// Remap one RGB triple for the Grayskull theme: mostly luma greys, a cyan tint
 /// for cool/cyan hues, a faint purple for violets, and hot pink for reds (the
 /// only "hot" color). Pure — the single source of the grayscale look; unit
@@ -496,10 +558,14 @@ mod tests {
 
     #[test]
     fn theme_state_roundtrips() {
-        set_theme(Theme::Grayskull);
-        assert_eq!(current_theme(), Theme::Grayskull);
-        set_theme(Theme::Default);
-        assert_eq!(current_theme(), Theme::Default);
+        // Under the theme lock: the arcade's colour tests hash frames
+        // through `rgb` and must not see the Grayskull moment.
+        with_theme(Theme::Default, || {
+            set_theme(Theme::Grayskull);
+            assert_eq!(current_theme(), Theme::Grayskull);
+            set_theme(Theme::Default);
+            assert_eq!(current_theme(), Theme::Default);
+        });
     }
 
     #[test]
