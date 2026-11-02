@@ -72,7 +72,7 @@ fn every_layout() -> Vec<NamedLayout> {
         name: "mine".into(),
         description: String::new(),
         rows: crate::animation::arcade_layout::example_rows(),
-        cloudfield: None,
+        backdrop: None,
     };
     LayoutCycle::new(&[mine], None).layouts().to_vec()
 }
@@ -256,10 +256,10 @@ fn each_preset_draws_every_panel_it_names() {
 }
 
 /// A switch keeps the hero where it was (scaled to a new size), the
-/// cloudfield, the sensitivity, the bus state and the running state, and
+/// backdrop, the sensitivity, the bus state and the running state, and
 /// lays the arcade out from the new rows.
 #[test]
-fn a_switch_keeps_the_hero_the_cloudfield_and_the_bus_state() {
+fn a_switch_keeps_the_hero_the_backdrop_and_the_bus_state() {
     tc(|| {
         let b = Fixed::new(2);
         let classic = &presets()[0];
@@ -277,7 +277,9 @@ fn a_switch_keeps_the_hero_the_cloudfield_and_the_bus_state() {
         let frame = a.frame;
         let trail = a.hero_trail.len();
         assert!(trail > 0);
-        a.set_cloudfield(true);
+        // A kind other than the old cloudfield, so the whole backdrop is
+        // seen to move over.
+        a.set_backdrop(Some(crate::animation::backdrop::BackdropKind::Clouds));
 
         let a = a.relayout(120, 40, &config_of(deck), &b);
         assert_eq!(a.layout(), &arcade_layout::layout(&deck.rows, 120, 40));
@@ -286,7 +288,11 @@ fn a_switch_keeps_the_hero_the_cloudfield_and_the_bus_state() {
         assert_eq!((a.hero_x, a.hero_y), (30.0, 20.0));
         assert_eq!((a.hero_target_x, a.hero_target_y), (33.0, 21.0));
         assert_eq!(a.hero_trail.len(), trail);
-        assert!(a.cloudfield(), "the cloudfield setting is kept");
+        assert_eq!(
+            a.backdrop().kind(),
+            Some(crate::animation::backdrop::BackdropKind::Clouds),
+            "the backdrop is kept"
+        );
         assert_eq!(a.sensitivity, 2.5);
         assert_eq!(a.bus_now, 77);
         assert_eq!(a.power_peak, 123.0);

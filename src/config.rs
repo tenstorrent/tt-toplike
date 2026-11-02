@@ -243,11 +243,11 @@ pub fn write_check_report(loaded: &LoadedConfig, out: &mut dyn std::io::Write) -
             } else {
                 writeln!(out, "{mark} {}  {}", l.name, l.description)?;
             }
-            if let Some(on) = l.cloudfield {
+            if let Some(c) = l.backdrop {
                 writeln!(
                     out,
-                    "    cloudfield {} when selected",
-                    if on { "on" } else { "off" }
+                    "    backdrop {} when selected",
+                    crate::animation::backdrop::choice_name(c)
                 )?;
             }
             for (i, r) in l.rows.iter().enumerate() {
@@ -541,6 +541,13 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
             if parsed.core_bad {
                 arcade_bad = true;
             }
+            for (span, message) in &parsed.notes {
+                out.notes.push(ConfigProblem {
+                    file: path.clone(),
+                    line: span.clone().map(|s| line_of(text, s.start)),
+                    message: message.clone(),
+                });
+            }
             if let Some(c) = parsed.cloudfield {
                 cloudfield = Some(c);
                 let line = item
@@ -640,9 +647,9 @@ fn config_layout(
         name: crate::animation::arcade_presets::CONFIG_LAYOUT.into(),
         description: "the [[arcade.row]] tables in config.toml".into(),
         rows,
-        // The file's `[arcade] cloudfield` is the session's starting
-        // setting already.
-        cloudfield: None,
+        // The file's `[arcade] cloudfield` and `[backdrop.views] arcade`
+        // are the session's starting backdrop already.
+        backdrop: None,
     }
 }
 
@@ -698,6 +705,8 @@ struct ArcadeParsed {
     start: Option<(String, Option<std::ops::Range<usize>>)>,
     /// A problem outside the named layouts and the start name.
     core_bad: bool,
+    /// Deprecation notes from the kept layouts (`cloudfield` in a layout).
+    notes: Vec<(Option<std::ops::Range<usize>>, String)>,
 }
 
 /// The `[arcade]` table. Every problem goes to `report`.
@@ -769,7 +778,7 @@ fn parse_arcade_into(
         }
     }
     if let Some(v) = table.get("layouts") {
-        out.layouts = Some(parse_layouts(v, probs));
+        out.layouts = Some(parse_layouts(v, probs, &mut out.notes));
     }
     core > 0
 }
@@ -779,6 +788,7 @@ fn parse_arcade_into(
 fn parse_layouts(
     item: &toml_edit::Item,
     probs: &mut Vec<(Option<std::ops::Range<usize>>, String)>,
+    notes: &mut Vec<(Option<std::ops::Range<usize>>, String)>,
 ) -> Vec<crate::animation::arcade_presets::NamedLayout> {
     use crate::animation::arcade_presets::{
         is_reserved, name_problem, preset, NamedLayout, CONFIG_LAYOUT, MAX_DESCRIPTION,
@@ -797,12 +807,12 @@ fn parse_layouts(
         let n = i + 1;
         let before = probs.len();
         for (k, _) in t.iter() {
-            if !["name", "description", "row", "cloudfield"].contains(&k) {
+            if !["name", "description", "row", "backdrop", "cloudfield"].contains(&k) {
                 let ks = t.get_key_value(k).and_then(|(key, _)| key.span());
                 probs.push((
                     ks,
                     format!(
-                        "unknown key `{k}` in layout {n} (expected name, description, cloudfield or row)"
+                        "unknown key `{k}` in layout {n} (expected name, description, backdrop or row)"
                     ),
                 ));
             }
@@ -872,12 +882,49 @@ fn parse_layouts(
                 }
             },
         };
-        // The cloudfield this layout sets when selected; none leaves the
-        // current setting alone (`NamedLayout::cloudfield`).
+        // The arcade backdrop this layout sets when selected; none leaves
+        // the current one alone (`NamedLayout::backdrop`). `backdrop` is
+        // off, scene, sky or clouds; the older `cloudfield = true|false`
+        // still works as scene or off, with a note, and `backdrop` wins
+        // when both are there.
+        use crate::animation::backdrop::{parse_choice, BackdropKind, CHOICES};
+        let backdrop = match t.get("backdrop") {
+            None => None,
+            Some(v) => match v.as_str().map(parse_choice) {
+                Some(Some(c)) => Some(c),
+                Some(None) => {
+                    probs.push((
+                        v.span(),
+                        format!(
+                            "{ctx}: `backdrop` must be {CHOICES}, got {:?}",
+                            v.as_str().unwrap_or_default()
+                        ),
+                    ));
+                    None
+                }
+                None => {
+                    probs.push((v.span(), format!("{ctx}: `backdrop` must be {CHOICES}")));
+                    None
+                }
+            },
+        };
+        let mut cloudfield_note = None;
         let cloudfield = match t.get("cloudfield") {
             None => None,
             Some(v) => match v.as_bool() {
-                Some(b) => Some(b),
+                Some(b) => {
+                    let ks = t
+                        .get_key_value("cloudfield")
+                        .and_then(|(key, _)| key.span());
+                    cloudfield_note = Some((
+                        ks,
+                        format!(
+                            "{ctx}: `cloudfield` is deprecated; write backdrop = \"{}\"",
+                            if b { "scene" } else { "off" }
+                        ),
+                    ));
+                    Some(b.then_some(BackdropKind::Scene))
+                }
                 None => {
                     probs.push((
                         v.span(),
@@ -887,6 +934,7 @@ fn parse_layouts(
                 }
             },
         };
+        let backdrop = backdrop.or(cloudfield);
         let rows = match t.get("row") {
             None => {
                 probs.push((
@@ -905,8 +953,9 @@ fn parse_layouts(
                     name,
                     description,
                     rows,
-                    cloudfield,
+                    backdrop,
                 });
+                notes.extend(cloudfield_note);
             }
         }
     }
@@ -2035,7 +2084,7 @@ panels = [{ view = "starfield" }]
         assert_eq!(l.layouts[0].rows.len(), 2);
         assert_eq!(l.layouts[0].rows[0].height, 3);
         assert_eq!(l.start_layout.as_deref(), Some("tall"));
-        assert_eq!(l.layouts[0].cloudfield, None);
+        assert_eq!(l.layouts[0].backdrop, None);
         assert_eq!(
             l.arcade.rows,
             default_rows(),
@@ -2046,10 +2095,76 @@ panels = [{ view = "starfield" }]
             &LAYOUTS.replace("name = \"solo\"", "name = \"solo\"\ncloudfield = true"),
         )]);
         assert!(l.problems.is_empty(), "{:?}", l.problems);
-        assert_eq!(l.layouts[1].cloudfield, Some(true));
+        assert_eq!(
+            l.layouts[1].backdrop,
+            Some(Some(crate::animation::backdrop::BackdropKind::Scene)),
+            "the old cloudfield is the scene"
+        );
         let c = LayoutCycle::new(&l.layouts, l.start_layout.as_deref());
         assert_eq!(c.current().name, "tall");
         assert_eq!(c.len(), 2 + presets().len());
+    }
+
+    /// A layout's `backdrop` loads; the old `cloudfield` is its alias with
+    /// a note, and `backdrop` wins when both are there.
+    #[test]
+    fn a_layouts_backdrop_loads_and_cloudfield_is_its_alias_with_a_note() {
+        use crate::animation::backdrop::BackdropKind;
+        let with = |extra: &str| {
+            load(&[(
+                "c.toml",
+                &LAYOUTS.replace("name = \"solo\"", &format!("name = \"solo\"\n{extra}")),
+            )])
+        };
+        for (text, want) in [
+            ("backdrop = \"clouds\"", Some(Some(BackdropKind::Clouds))),
+            ("backdrop = \"sky\"", Some(Some(BackdropKind::Sky))),
+            ("backdrop = \"scene\"", Some(Some(BackdropKind::Scene))),
+            ("backdrop = \"off\"", Some(None)),
+        ] {
+            let l = with(text);
+            assert!(
+                l.problems.is_empty() && l.notes.is_empty(),
+                "{text}: {:?}",
+                l.problems
+            );
+            assert_eq!(l.layouts[1].backdrop, want, "{text}");
+        }
+        let l = with("cloudfield = true");
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(l.layouts[1].backdrop, Some(Some(BackdropKind::Scene)));
+        let n: Vec<String> = l.notes.iter().map(|p| p.to_string()).collect();
+        assert_eq!(
+            n,
+            vec![
+                "c.toml:18: layout `solo`: `cloudfield` is deprecated; write backdrop = \"scene\""
+            ]
+        );
+        let l = with("cloudfield = false");
+        assert_eq!(l.layouts[1].backdrop, Some(None));
+        assert!(l.notes[0].message.ends_with("write backdrop = \"off\""));
+        let l = with("cloudfield = true\nbackdrop = \"sky\"");
+        assert_eq!(
+            l.layouts[1].backdrop,
+            Some(Some(BackdropKind::Sky)),
+            "backdrop wins"
+        );
+        assert_eq!(l.notes.len(), 1);
+        // The note goes to --check-config, which still passes.
+        let mut l = with("cloudfield = true");
+        choose_layout(&mut l, None);
+        let mut out = Vec::new();
+        assert_eq!(write_check_report(&l, &mut out), 0);
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("note: c.toml:18: layout `solo`: `cloudfield` is deprecated")
+                && out.contains("  solo\n    backdrop scene when selected\n"),
+            "{out}"
+        );
+        // A layout with a bad backdrop is dropped and gives no note.
+        let l = with("cloudfield = true\nbackdrop = 3");
+        assert_eq!(layout_names(&l), vec!["tall"]);
+        assert!(l.notes.is_empty());
     }
 
     #[test]
@@ -2158,7 +2273,7 @@ panels = [{ view = "starfield" }]
             ),
             (
                 "[[arcade.layouts]]\nname = \"a\"\nrows = 2\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
-                "c.toml:3: unknown key `rows` in layout 1 (expected name, description, cloudfield or row)",
+                "c.toml:3: unknown key `rows` in layout 1 (expected name, description, backdrop or row)",
             ),
             (
                 "[[arcade.layouts]]\nname = \"a\"\ndescription = 3\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
@@ -2183,6 +2298,14 @@ panels = [{ view = "starfield" }]
             (
                 "[[arcade.layouts]]\nname = \"a\"\ncloudfield = \"yes\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
                 "c.toml:3: layout `a`: `cloudfield` must be true or false",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"a\"\nbackdrop = \"fog\"\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:3: layout `a`: `backdrop` must be off, scene, sky or clouds, got \"fog\"",
+            ),
+            (
+                "[[arcade.layouts]]\nname = \"a\"\nbackdrop = true\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n",
+                "c.toml:3: layout `a`: `backdrop` must be off, scene, sky or clouds",
             ),
             (
                 "[arcade]\nlayouts = 3\n",
@@ -2288,7 +2411,7 @@ panels = [{ view = "starfield" }]
         assert!(
             out.contains("now-serving  ")
                 && out.contains(
-                    "    cloudfield on when selected\n    row 1 (height 3): inference x1\n"
+                    "    backdrop clouds when selected\n    row 1 (height 3): inference x1\n"
                 ),
             "{out}"
         );

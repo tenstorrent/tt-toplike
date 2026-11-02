@@ -555,9 +555,10 @@ pub const CLOUDFIELD_KEY: char = 'c';
 
 // ---- Legend and explain text --------------------------------------------------
 
-/// The text after the `▦ Layout` heading of the arcade legend. The
-/// backdrop has its own line at the end of the legend.
-pub const LEGEND_HEAD: &str = "[arcade] in config.toml   ◌ NAME  a panel too small";
+/// The text after the `▦ Layout` heading of the arcade legend: the layout
+/// keys, the backdrop key, the mark for a panel taken out, and where your
+/// own layouts go. The backdrop has its own line at the end of the legend.
+pub const LEGEND_HEAD: &str = "{ } layouts  c backdrop  ◌ NAME too small  [arcade] in config.toml";
 
 /// The arcade legend's lines on the layout, under [`LEGEND_HEAD`]: none,
 /// so the legend fits 30 rows at 80 columns with the backdrop line.
@@ -566,7 +567,7 @@ pub const LEGEND_TEXT: &[&str] = &[];
 /// The arcade explain text's line on the layout. The detail is in the docs.
 pub const EXPLAIN_TEXT: &[&str] = &[
     "",
-    "Layout: [arcade] in config.toml (docs/arcade-layout.md).",
+    "Layouts: { } step through them (docs/arcade-layout.md).",
 ];
 
 /// The legend lines for [`LEGEND_TEXT`], with the overlay's left bar.

@@ -7,13 +7,19 @@
 
 use super::*;
 use crate::animation::arcade_layout::{default_rows, layout, PanelSpec, RowSpec, View};
+use crate::animation::backdrop::{BackdropKind, BackdropSettings};
+
+/// The arcade's backdrop in `s`.
+fn arcade(s: &BackdropSettings) -> crate::animation::backdrop::Choice {
+    s.choice("arcade")
+}
 
 fn named(name: &str, rows: Vec<RowSpec>) -> NamedLayout {
     NamedLayout {
         name: name.into(),
         description: format!("{name} for a test"),
         rows,
-        cloudfield: None,
+        backdrop: None,
     }
 }
 
@@ -166,7 +172,7 @@ fn the_status_line_names_the_layout_its_place_and_its_description() {
             name: "bare".into(),
             description: String::new(),
             rows: flow_only(),
-            cloudfield: None,
+            backdrop: None,
         }],
         None,
     );
@@ -177,7 +183,7 @@ fn the_status_line_names_the_layout_its_place_and_its_description() {
 
 #[test]
 fn the_layout_command_steps_selects_and_lists() {
-    let mut cf = false;
+    let mut cf = BackdropSettings::default();
     let mut c = LayoutCycle::new(&[], None);
     let r = command("layout next", &mut cf, &mut c);
     assert_eq!(c.current().name, "defrag-wide");
@@ -214,14 +220,22 @@ fn the_layout_command_steps_selects_and_lists() {
 
 #[test]
 fn the_command_still_sets_the_cloudfield() {
-    let mut cf = false;
+    let mut cf = BackdropSettings::default();
     let mut c = LayoutCycle::new(&[], None);
     let r = command("cloudfield on", &mut cf, &mut c);
-    assert!(cf && !r.error && !r.relayout);
+    assert_eq!(arcade(&cf), Some(BackdropKind::Scene), "on is the scene");
+    assert!(!r.error && !r.relayout);
     assert_eq!(c.index(), 0);
+    command("cloudfield off", &mut cf, &mut c);
+    assert_eq!(arcade(&cf), None);
     let r = command("sparkle", &mut cf, &mut c);
     assert!(r.error);
     assert!(r.message.contains("/arcade layout"), "{}", r.message);
+    // A bad command leaves a sky or clouds backdrop alone.
+    cf.set("arcade", Some(BackdropKind::Clouds)).unwrap();
+    assert!(command("sparkle", &mut cf, &mut c).error);
+    assert!(command("cloudfield maybe", &mut cf, &mut c).error);
+    assert_eq!(arcade(&cf), Some(BackdropKind::Clouds));
 }
 
 #[test]
@@ -366,10 +380,10 @@ fn the_docs_sketch_every_preset_with_no_right_border() {
 }
 
 #[test]
-fn only_now_serving_sets_the_cloudfield_and_it_has_no_starfield() {
+fn only_now_serving_sets_a_backdrop_and_it_has_no_starfield() {
     for l in presets() {
-        let want = (l.name == "now-serving").then_some(true);
-        assert_eq!(l.cloudfield, want, "{}", l.name);
+        let want = (l.name == "now-serving").then_some(Some(BackdropKind::Clouds));
+        assert_eq!(l.backdrop, want, "{}", l.name);
     }
     let ns = preset("now-serving").unwrap();
     let views: Vec<View> = ns
@@ -380,44 +394,65 @@ fn only_now_serving_sets_the_cloudfield_and_it_has_no_starfield() {
     assert_eq!(views, vec![View::Inference, View::Die3d, View::Defrag]);
 }
 
-/// A layout with a cloudfield setting applies it when selected; a layout
-/// without one leaves the session's setting alone, so `c` still holds.
+/// A layout with a backdrop applies it when selected; a layout without
+/// one leaves the session's setting alone, so `c`, `w` and `/backdrop`
+/// still hold.
 #[test]
-fn a_layouts_cloudfield_applies_on_selection_and_none_leaves_it() {
-    let mut cf = false;
+fn a_layouts_backdrop_applies_on_selection_and_none_leaves_it() {
+    let clouds = Some(BackdropKind::Clouds);
+    let mut cf = BackdropSettings::default();
     let mut c = LayoutCycle::new(&[], None);
     // classic -> ... -> memory-lane: none of them set it.
     for _ in 0..6 {
         step_and_apply(&mut c, Step::Next, &mut cf);
-        assert!(!cf, "{}", c.current().name);
+        assert_eq!(arcade(&cf), None, "{}", c.current().name);
     }
     step_and_apply(&mut c, Step::Next, &mut cf);
     assert_eq!(c.current().name, "now-serving");
-    assert!(cf, "now-serving turns it on");
-    // The user turns it off with `c`; a switch to a layout with no
-    // setting keeps that.
-    cf = false;
+    assert_eq!(arcade(&cf), clouds, "now-serving sets the clouds");
+    // The user picks the sky (`w`); a switch to a layout with no backdrop
+    // keeps that.
+    cf.set("arcade", Some(BackdropKind::Sky)).unwrap();
     step_and_apply(&mut c, Step::Next, &mut cf);
     assert_eq!(c.current().name, "classic");
-    assert!(!cf);
-    // Back to now-serving applies its setting again, by key and by command.
+    assert_eq!(arcade(&cf), Some(BackdropKind::Sky));
+    // Back to now-serving applies its backdrop again, by key and by command.
     step_and_apply(&mut c, Step::Prev, &mut cf);
-    assert!(cf);
-    cf = false;
+    assert_eq!(arcade(&cf), clouds);
+    cf.set("arcade", None).unwrap();
     command("layout classic", &mut cf, &mut c);
-    assert!(!cf);
+    assert_eq!(arcade(&cf), None);
     let r = command("layout now-serving", &mut cf, &mut c);
-    assert!(cf && r.relayout);
-    cf = false;
+    assert!(r.relayout);
+    assert_eq!(arcade(&cf), clouds);
+    cf.set("arcade", None).unwrap();
     command("layout prev", &mut cf, &mut c);
     command("layout next", &mut cf, &mut c);
-    assert!(cf, "next to now-serving");
+    assert_eq!(arcade(&cf), clouds, "next to now-serving");
     // A layout that turns it off.
     let off = NamedLayout {
-        cloudfield: Some(false),
+        backdrop: Some(None),
         ..named("dark", flow_only())
     };
-    let mut cf = true;
-    apply_cloudfield(&off, &mut cf);
-    assert!(!cf);
+    apply_backdrop(&off, &mut cf);
+    assert_eq!(arcade(&cf), None);
+}
+
+/// `c` turns the arcade's backdrop off when one is drawn, and back on as
+/// the layout's own kind, or the scene when the layout has none.
+#[test]
+fn the_c_key_turns_the_layouts_backdrop_on_and_off() {
+    let ns = preset("now-serving").unwrap();
+    let classic = preset("classic").unwrap();
+    assert_eq!(toggled_backdrop(ns, None), Some(BackdropKind::Clouds));
+    assert_eq!(toggled_backdrop(classic, None), Some(BackdropKind::Scene));
+    for k in BackdropKind::ALL {
+        assert_eq!(toggled_backdrop(ns, Some(k)), None);
+        assert_eq!(toggled_backdrop(classic, Some(k)), None);
+    }
+    let off = NamedLayout {
+        backdrop: Some(None),
+        ..named("dark", flow_only())
+    };
+    assert_eq!(toggled_backdrop(&off, None), Some(BackdropKind::Scene));
 }

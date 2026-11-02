@@ -248,6 +248,16 @@ fn die3d_key_for(mode: DisplayMode, c: char) -> Option<crate::animation::die3d::
     }
 }
 
+/// The arcade layout step `c` stands for in `mode`: `}` next and `{`
+/// previous in Arcade, `None` anywhere else and for any other key.
+fn arcade_step_for(mode: DisplayMode, c: char) -> Option<crate::animation::arcade_presets::Step> {
+    if mode == DisplayMode::Arcade {
+        crate::animation::arcade_presets::step_for(c)
+    } else {
+        None
+    }
+}
+
 /// The Die 3D pan key `code` stands for in `mode`: an arrow key in the Die 3D
 /// view, `None` anywhere else so the arrows keep their other uses.
 fn die3d_pan_for(mode: DisplayMode, code: KeyCode) -> Option<crate::animation::die3d::Die3dKey> {
@@ -731,7 +741,9 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // to the status line (see `cmd_message` in `run_app`), and a bad
     // `[arcade]` keeps the default layout. Pinned by
     // `config_read_tests::the_config_is_read_before_raw_mode`.
-    let loaded_config = crate::config::load_config();
+    let mut loaded_config = crate::config::load_config();
+    // `--arcade-layout NAME` wins over `[arcade] layout`.
+    crate::config::choose_layout(&mut loaded_config, cli.arcade_layout.as_deref());
 
     // Setup terminal
     enable_raw_mode().map_err(|e| {
@@ -810,7 +822,7 @@ fn run_app(
     for p in &loaded_config.problems {
         log::warn!("config: {p}");
     }
-    let arcade_config = loaded_config.arcade.clone();
+    let mut arcade_config = loaded_config.arcade.clone();
     // Each view's backdrop (`[backdrop]`, `/backdrop`, the `w` key) and the
     // one the TUI lays over the view on screen (see `backdrop_bus`). The
     // settings live here, so they hold across a resize.
@@ -818,6 +830,19 @@ fn run_app(
         crate::animation::backdrop::BackdropSettings::new(loaded_config.backdrop.clone());
     let mut shared_backdrop = backdrop_bus::SharedBackdrop::default();
     let backdrop_started = Instant::now();
+    // The layouts `{` and `}` step through (`arcade_presets`). The choice
+    // lives here, so it holds across a resize and when the arcade is left
+    // and entered again; `arcade_config.rows` follows it.
+    let mut arcade_cycle = crate::animation::arcade_presets::LayoutCycle::new(
+        &loaded_config.layouts,
+        loaded_config.start_layout.as_deref(),
+    );
+    arcade_config.rows = arcade_cycle.current().rows.clone();
+    // The start layout's own backdrop, if it has one.
+    crate::animation::arcade_presets::apply_backdrop(
+        arcade_cycle.current(),
+        &mut backdrop_settings,
+    );
     let anim_cfg = {
         use crate::config::AnimConfig;
         AnimConfig::from_profile(cli.profile).merge(crate::config::AnimConfigOverrides {
@@ -2625,28 +2650,33 @@ fn run_app(
                                         }
                                     }
                                 } else if verb == "arcade" {
-                                    // `/arcade cloudfield on|off`: the old name for
-                                    // the arcade's scene backdrop.
+                                    // `/arcade layout ...` and `/arcade cloudfield
+                                    // on|off` (the old name for the arcade's
+                                    // scene backdrop).
                                     let arg = cmd_buf
                                         .trim()
                                         .trim_start_matches('/')
                                         .split_once(char::is_whitespace)
                                         .map(|(_, rest)| rest)
                                         .unwrap_or("");
-                                    let mut on = backdrop_settings.choice("arcade")
-                                        == Some(crate::animation::backdrop::BackdropKind::Scene);
-                                    let (msg, err) =
-                                        crate::animation::arcade_layout::command(arg, &mut on);
-                                    let _ = backdrop_settings.set(
-                                        "arcade",
-                                        on.then_some(
-                                            crate::animation::backdrop::BackdropKind::Scene,
-                                        ),
+                                    let reply = crate::animation::arcade_presets::command(
+                                        arg,
+                                        &mut backdrop_settings,
+                                        &mut arcade_cycle,
                                     );
+                                    if reply.relayout {
+                                        arcade_config.rows = arcade_cycle.current().rows.clone();
+                                        arcade = arcade.take().map(|a| {
+                                            let (w, h) = (a.width(), a.height());
+                                            a.relayout(w, h, &arcade_config, backend.as_ref())
+                                        });
+                                    }
+                                    // After the relayout, which keeps the old
+                                    // setting: the layout's own may differ.
                                     if let Some(arc) = arcade.as_mut() {
                                         arc.set_backdrop(backdrop_settings.choice("arcade"));
                                     }
-                                    cmd_message = Some((msg, err));
+                                    cmd_message = Some((reply.message, reply.error));
                                     force_redraw = true;
                                 } else if verb == "backdrop" {
                                     // `/backdrop [off|scene|sky|clouds]` for the view
@@ -3040,18 +3070,23 @@ fn run_app(
                             KeyCode::Char(crate::animation::arcade_layout::CLOUDFIELD_KEY)
                                 if display_mode == DisplayMode::Arcade =>
                             {
-                                // The old cloudfield key: the arcade's scene
-                                // backdrop on or off. Only in the arcade.
-                                use crate::animation::backdrop::BackdropKind;
-                                let on =
-                                    backdrop_settings.choice("arcade") != Some(BackdropKind::Scene);
-                                let _ = backdrop_settings
-                                    .set("arcade", on.then_some(BackdropKind::Scene));
+                                // The arcade's backdrop on or off: off when
+                                // one is drawn, else the layout's own kind,
+                                // else the scene. Only in the arcade; `w`
+                                // picks the kind.
+                                let next = crate::animation::arcade_presets::toggled_backdrop(
+                                    arcade_cycle.current(),
+                                    backdrop_settings.choice("arcade"),
+                                );
+                                let _ = backdrop_settings.set("arcade", next);
                                 if let Some(arc) = arcade.as_mut() {
-                                    arc.set_backdrop(backdrop_settings.choice("arcade"));
+                                    arc.set_backdrop(next);
                                 }
                                 cmd_message = Some((
-                                    crate::animation::arcade_layout::cloudfield_message(on),
+                                    format!(
+                                        "backdrop (arcade): {}",
+                                        crate::animation::backdrop::choice_name(next)
+                                    ),
                                     false,
                                 ));
                             }
@@ -3071,6 +3106,32 @@ fn run_app(
                                     ),
                                     false,
                                 ));
+                            }
+                            // `}` and `{`: the next and previous arcade layout,
+                            // in Arcade only (`arcade_step_for` is `None`
+                            // elsewhere, so nothing else is shadowed). The
+                            // arcade is laid out again at once, so the next
+                            // draw shows the new layout.
+                            KeyCode::Char(c) if arcade_step_for(display_mode, c).is_some() => {
+                                if let Some(step) = arcade_step_for(display_mode, c) {
+                                    // The new layout's own backdrop, if it has
+                                    // one, replaces the session's.
+                                    let status = crate::animation::arcade_presets::step_and_apply(
+                                        &mut arcade_cycle,
+                                        step,
+                                        &mut backdrop_settings,
+                                    );
+                                    arcade_config.rows = arcade_cycle.current().rows.clone();
+                                    arcade = arcade.take().map(|a| {
+                                        let (w, h) = (a.width(), a.height());
+                                        let mut a =
+                                            a.relayout(w, h, &arcade_config, backend.as_ref());
+                                        a.set_backdrop(backdrop_settings.choice("arcade"));
+                                        a
+                                    });
+                                    cmd_message = Some((status, false));
+                                }
+                                force_redraw = true;
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
                                 // Jump directly to Defrag mode. If the sweeper happens
@@ -4716,53 +4777,41 @@ fn overlay_lines_with(
                 ln!(spans)
             };
             let waffler = crate::animation::DIE3D_DISPLAY_NAME;
-            // The global keys, three to a line.
+            // The global keys, four to a line: twenty keys in five rows.
+            // The last cell of a row has no padding, so each row's longest
+            // description goes last.
             let keys = |kc| {
+                let row = |items: &[(&str, &str)]| cells(items, 4, 16, kc);
                 vec![
-                    cells(
-                        &[("v", "next view"), ("l", "legend"), ("?", "this help")],
-                        5,
-                        18,
-                        kc,
-                    ),
-                    cells(
-                        &[("!", "explain view"), ("/", "command bar"), ("q", "quit")],
-                        5,
-                        18,
-                        kc,
-                    ),
-                    cells(
-                        &[
-                            ("Esc", "back, or quit"),
-                            ("r", "refresh data"),
-                            ("b", "next backend"),
-                        ],
-                        5,
-                        18,
-                        kc,
-                    ),
-                    cells(
-                        &[("a A", "Arcade"), ("d D", "Defrag"), ("g", "Grid")],
-                        5,
-                        18,
-                        kc,
-                    ),
-                    cells(
-                        &[
-                            ("i I", "Inference"),
-                            ("~", "HivemindSweeper"),
-                            ("t", "Training"),
-                        ],
-                        5,
-                        18,
-                        kc,
-                    ),
-                    cells(
-                        &[("3", waffler), ("R", "rotate (kiosk)"), ("w", "backdrop")],
-                        5,
-                        18,
-                        kc,
-                    ),
+                    row(&[
+                        ("!", "explain view"),
+                        ("v", "next view"),
+                        ("?", "this help"),
+                        ("l", "legend"),
+                    ]),
+                    row(&[
+                        ("/", "command bar"),
+                        ("Esc", "back, or quit"),
+                        ("r", "refresh data"),
+                        ("q", "quit"),
+                    ]),
+                    row(&[
+                        ("b", "next backend"),
+                        ("a A", "Arcade"),
+                        ("d D", "Defrag"),
+                        ("g", "Grid"),
+                    ]),
+                    row(&[
+                        ("i I", "Inference"),
+                        ("~", "HivemindSweeper"),
+                        ("3", waffler),
+                        ("t", "Training"),
+                    ]),
+                    row(&[
+                        ("R", "rotate (kiosk)"),
+                        ("w", "backdrop"),
+                        ("c { }", "Arcade backdrop, layout"),
+                    ]),
                 ]
             };
             if mode == DisplayMode::Die3d {
@@ -4799,13 +4848,13 @@ fn overlay_lines_with(
                 // The global keys most used here; the full list is `?` in
                 // any other view, which keeps this panel inside 24 rows.
                 help.push(sep!("Everywhere  (every key: ? in another view)"));
-                // Rows 0, 1 and 4: the panels and quit, then the other
+                // Rows 0, 1 and 3: the panels and quit, then the other
                 // key-only views.
                 help.extend(
                     keys(key)
                         .into_iter()
                         .enumerate()
-                        .filter(|(i, _)| [0, 1, 4].contains(i))
+                        .filter(|(i, _)| [0, 1, 3].contains(i))
                         .map(|(_, l)| l),
                 );
                 return help;
@@ -4854,6 +4903,10 @@ fn overlay_lines_with(
                     13,
                     lbl,
                 ),
+                cmd(&[(
+                    "/arcade layout|cloudfield",
+                    "Arcade layout; scene on or off",
+                )]),
                 cmd(&[("/board /scene /cells …", &settings)]),
                 sep!("Status bar"),
                 cells(
@@ -10060,6 +10113,35 @@ mod display_mode_tests {
         }
     }
 
+    /// `}` and `{` step the arcade's layout in Arcade and do nothing in any
+    /// other view.
+    #[test]
+    fn the_layout_keys_work_only_in_the_arcade() {
+        use super::arcade_step_for;
+        use crate::animation::arcade_presets::Step;
+        assert_eq!(arcade_step_for(DisplayMode::Arcade, '}'), Some(Step::Next));
+        assert_eq!(arcade_step_for(DisplayMode::Arcade, '{'), Some(Step::Prev));
+        for c in ['[', ']', 'c', 'a', '(', ')'] {
+            assert_eq!(arcade_step_for(DisplayMode::Arcade, c), None, "{c}");
+        }
+        for m in [
+            DisplayMode::Insights,
+            DisplayMode::Grid,
+            DisplayMode::Starfield,
+            DisplayMode::MemoryCastle,
+            DisplayMode::MemoryFlow,
+            DisplayMode::Defrag,
+            DisplayMode::InferenceMonitor,
+            DisplayMode::HivemindSweeper,
+            DisplayMode::Training,
+            DisplayMode::Die3d,
+        ] {
+            for c in ['{', '}'] {
+                assert_eq!(arcade_step_for(m, c), None, "{c} in {m:?}");
+            }
+        }
+    }
+
     #[test]
     fn the_arrows_pan_the_die3d_view_and_nothing_else() {
         use crate::animation::die3d::Die3dKey;
@@ -11554,6 +11636,30 @@ mod host_default_screen_tests {
             "overlays over their target:\n{}",
             over.join("\n")
         );
+    }
+
+    /// Help, the Arcade legend and the Arcade explain text name the layout
+    /// keys `{ }`.
+    #[test]
+    fn the_overlays_name_the_layout_keys() {
+        use super::{overlay_lines, overlay_wrap_cols, DisplayMode, OverlayPanel};
+        for kind in [
+            OverlayPanel::Help,
+            OverlayPanel::Legend,
+            OverlayPanel::Explain,
+        ] {
+            let text: String = overlay_lines(kind, DisplayMode::Arcade, overlay_wrap_cols(80))
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("{ }"), "{kind:?}: {text}");
+        }
     }
 
     /// Prints each overlay's line count and the rows it needs at 80 columns.
@@ -13861,7 +13967,7 @@ mod config_read_tests {
         let src = include_str!("mod.rs");
         let run_tui = src.find("\npub fn run_tui(").expect("run_tui");
         let run_app = src.find("\nfn run_app(").expect("run_app");
-        let read = "let loaded_config = crate::config::load_config();";
+        let read = "loaded_config = crate::config::load_config();";
         let raw = "enable_raw_mode().map_err(";
         let read_at = src[run_tui..run_app]
             .find(read)
