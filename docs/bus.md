@@ -43,8 +43,8 @@ The bus gives every view and every other program the same stream of facts:
 * Views can show where a request or a model touches the machine, as it happens.
 * Other programs (tt-station, tensixinet, a future watch-only view) read the same stream.
 
-The rule for the data is to record the full stream at the rate each source produces it.
-Every other use is a slice of it, and a past that was not recorded cannot be recovered.
+The rule for the data is to record the full stream at the rate each source produces it. Views
+and tools read parts of it, and data that was not recorded cannot be recovered later.
 
 In this release Die 3D reads the bus (model flags, bring-up fill, request pulses, per-channel
 GDDR rows, hivemind sparks). The `i` view reads it when the TUI is attached to a `--headless`
@@ -738,7 +738,7 @@ and the files with 0600.
   prefixes (`xoxb-`, `xoxp-`, `xoxa-`), `AKIA` access key ids, and JWTs.
 
 A hidden value is replaced with `<redacted>`. Quotes around it are kept. A service key that
-changed during redaction gets an 8-digit hash suffix so two services whose keys differ only in
+changed during redaction gets a hash suffix of 8 hex digits so two services whose keys differ only in
 the hidden part stay two entities. The hash is salted with a random number drawn once per
 process, so the suffix cannot be matched against hashes of guessed secrets, and it differs from
 one host run to the next. A replay or `--bus-inspect` of a log that spans a host restart shows
@@ -772,8 +772,7 @@ Redaction is a pattern matcher. These shapes are known to get through:
 * The raw `tt-smi` snapshot is stored verbatim. It holds board serial numbers and firmware
   versions.
 
-Secrets in free text are the job of whoever starts the process. A secret placed in a command
-line can be recorded if its shape is not one of the above. Pass secrets through a file or the
+A secret placed in a command line can be recorded if its shape is not one of the above. Pass secrets through a file or the
 environment of a process the bus does not list, and keep the log directory private.
 
 ---
@@ -967,7 +966,9 @@ Until the sidecar exists, the Die 3D tile glow stays an estimate and says so.
 * If the open cannot list the log directory, the bus numbers from 1 in memory. When the lock is
   taken later, records whose numbers the directory already holds are not written; the head
   jumps past the newest record on disk and a gap record says so.
-* `events_since` returns at most the newest 64 events, with no overflow indicator.
+* The `WorldRead` trait's `events_since` (what views read, local or attached) returns at most
+  the newest 64 events, with no overflow indicator. The world itself keeps the newest 512
+  (`World::events`).
 * Process entities are never retired by an event. The world drops them after 15 minutes
   without a reading. Process names, command lines, model announcements and model samples are
   sent when they change and again every 5 minutes, so segment retention cannot remove the only

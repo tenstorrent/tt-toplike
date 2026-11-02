@@ -539,10 +539,10 @@ fn governor_does_not_hold_the_cache_lock_while_running_a_command() {
     // A runner that calls back into the governor's cache would deadlock if
     // the lock were held. Here: the first run blocks until the test lets it
     // go, and a second permit (served from cache or by its own attempt) must
-    // return while that first run is still blocked. This checks the order
-    // of events with a flag, not a wall-clock bound: if the lock were held,
-    // the second permit could not return until the first run was released,
-    // which happens only after the wait below gives up.
+    // return while that first run is still blocked. The test checks the
+    // order of events through channels and has no wall-clock bound. If the
+    // lock were held, the second permit could not return until the first
+    // run was released, and that happens only after the wait below gives up.
     struct Blocking {
         calls: Arc<AtomicUsize>,
         release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,

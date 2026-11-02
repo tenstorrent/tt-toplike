@@ -1838,5 +1838,5 @@ review, and most tasks needed one to three fix rounds.
 * **A fixture of constructed extremes proves little.** The redaction property test runs about
   25 secret shapes with random quoting, because hand-picked cases missed an unbalanced quote
   that disabled all redaction after it.
-* A secret in a persisted log is the failure redaction exists to prevent. A leak class found
-  in a review round is fixed in that round, even when it is outside the review's scope.
+* A redaction leak class found in a review round is fixed in that round, even when it is
+  outside the review's scope.

@@ -2,11 +2,11 @@ tt-toplike (0.15.0) noble; urgency=medium
 
   * New: the signal bus. Every source writes its readings to one ordered,
     timestamped log, and every view reads from it. The log records samples,
-    events, gaps and the provenance of each value (measured, derived or
-    estimated). A headless host keeps 24 hours or 5 GB of log in a directory
-    only the owner can read (--bus-retain HOURS[,GB] changes that). A TUI
-    without --record keeps its bus in memory. The log is described in
-    docs/bus.md.
+    events, gaps and the provenance of each value (measured, derived,
+    estimated or decoration). A headless host keeps 24 hours or 5 GB of log
+    in a directory only the owner can read (--bus-retain HOURS[,GB] changes
+    that). A TUI without --record or --bus-dir keeps its bus in memory. The
+    log is described in docs/bus.md.
   * Replay and inspect. --record DIR makes a normal TUI record to a directory.
     --bus-inspect DIR prints a summary of a recording (add --entity or
     --signal to narrow it). --replay DIR --speed N plays a recording back
@@ -34,6 +34,10 @@ tt-toplike (0.15.0) noble; urgency=medium
     leaks, both listed in docs/bus.md.
   * tt-station frames are now built from the bus. The bytes a client sees are
     unchanged.
+  * The no-TTY --serve loop now runs on the headless host. SIGTERM and SIGINT
+    flush the bus and exit 0; before, they killed the process. A --remote
+    relay re-broadcasts the origin's frame byte for byte. Nothing is sent
+    until the first raw tt-smi frame exists.
   * Die 3D reads the bus: model flags, a bring-up fill that grows with load
     progress, pulses on events, sparks, and per-channel DRAM rows. The legend
     and the explain text name each of these, and estimated values are marked

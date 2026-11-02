@@ -159,7 +159,7 @@ fn cells(lines: &[Line<'static>]) -> Vec<Vec<(char, ratatui::style::Style)>> {
 }
 
 /// Loading at 0.75 fills more of the die than at 0.25. The flag prints the
-/// percentage, so the flag's row (the one showing `25%` or `75%`) is left
+/// percentage, so the flag's row (it shows `25%` or `75%`) is left
 /// out, and the cells that differ from the frame without a world (colour or
 /// glyph) are counted on every other row. The label, phase and phase timing
 /// are the same in both; only the progress differs.

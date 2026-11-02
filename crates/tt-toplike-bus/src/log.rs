@@ -2349,8 +2349,8 @@ mod tests {
         flush(&bus);
         fs::remove_file(&log).unwrap();
         fs::rename(&other, &log).unwrap();
-        // Past the retry window. This record may be the one that takes the
-        // lock (then it is dropped as an overlap) or may come after it.
+        // Past the retry window. This record may take the lock (then it is
+        // dropped as an overlap) or may come after the lock was taken.
         clock.advance_secs(11);
         let a = bus.publish("t", sample(10));
         flush(&bus);

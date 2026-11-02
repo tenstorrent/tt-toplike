@@ -943,8 +943,9 @@ impl Cli {
         if self.replay.is_some() {
             if self.serve.is_some() {
                 return Err(
-                    "--replay cannot be combined with --serve: a replay is recorded data, \
-                     not live telemetry, so there is nothing to publish to other instances"
+                    "--replay cannot be combined with --serve: --serve publishes this \
+                     machine's live telemetry to other instances, and a replay plays a \
+                     recorded log"
                         .to_string(),
                 );
             }

@@ -19,9 +19,10 @@ list is a summary and is not kept for every release.
 
 ### 0.15.0
 - The signal bus. Every source writes to one ordered log and every view reads it. The log keeps
-  samples, events, gaps and the provenance of each value (measured, derived or estimated). A
-  `--headless` host keeps 24 hours or 5 GB of log (`--bus-retain HOURS[,GB]`) in a directory only
-  the owner can read. A TUI keeps its bus in memory unless `--record DIR` is given.
+  samples, events, gaps and the provenance of each value (measured, derived, estimated or
+  decoration). A `--headless` host keeps 24 hours or 5 GB of log (`--bus-retain HOURS[,GB]`) in a
+  directory only the owner can read. A TUI keeps its bus in memory unless `--record DIR` or
+  `--bus-dir DIR` is given.
 - Replay and inspect: `--bus-inspect DIR` summarises a recording, and `--replay DIR --speed N`
   plays it back through a headless host. Missing or unreadable segments show up as gaps.
 - The socket: a host serves its bus on a Unix socket (`--bus-socket PATH`) for snapshots, live
@@ -38,6 +39,9 @@ list is a summary and is not kept for every release.
 - Secrets in command lines (tokens, keys, passwords, URL credentials) are replaced with
   `<redacted>` before they reach the log. The matcher has known gaps, listed in `docs/bus.md`.
 - tt-station frames are built from the bus. The bytes are unchanged on the test fixture.
+- The no-TTY `--serve` loop now runs on the headless host. SIGTERM and SIGINT flush the bus and
+  exit 0; before, they killed the process. A `--remote` relay re-broadcasts the origin's frame
+  byte for byte. Nothing is sent until the first raw `tt-smi` frame exists.
 - Die 3D reads the bus: model flags, a bring-up fill that grows with load progress, pulses,
   sparks and per-channel DRAM rows. The legend and explain text name them, and `~` marks
   estimated values.
