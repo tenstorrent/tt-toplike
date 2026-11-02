@@ -23,6 +23,7 @@ pub mod arcade;
 pub mod arcade_bus;
 pub mod atmosphere;
 pub mod baseline;
+pub(crate) mod bus_intake;
 #[cfg(test)]
 pub(crate) mod bus_test_support;
 pub mod castle_bus;

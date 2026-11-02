@@ -1270,6 +1270,9 @@ fn run_app(
                         starfield = Some(sf);
                     }
                     if let Some(ref mut sf) = starfield {
+                        // The bus: clusters, labels, comets, twinkle, ECC
+                        // flares, sparks and resets (see `starfield_bus`).
+                        sf.set_bus(Some(&tui_bus.read()), backend.devices());
                         sf.update_from_telemetry(backend);
                     }
                 }
@@ -4522,7 +4525,12 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
         OverlayPanel::Legend => {
             // Per-view symbol legend — Arcade shows all four combined.
             match mode {
-                DisplayMode::Starfield => starfield_legend_lines(bar, bg, dim, key),
+                DisplayMode::Starfield => {
+                    let mut v = starfield_legend_lines(bar, bg, dim, key);
+                    v.push(sep!("◆ Signal bus"));
+                    v.extend(crate::animation::starfield_bus::legend_lines(bar, bg, dim));
+                    v
+                }
                 DisplayMode::MemoryCastle => {
                     let mut v = castle_legend_lines(bar, bg, dim);
                     v.push(sep!("◆ Signal bus"));
@@ -4612,7 +4620,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "Round planets (○) represent DDR/L2/L1",
                     "memory hierarchy — orbit radius tracks",
                     "memory bandwidth utilization.",
-                ],
+                ]
+                .iter()
+                .chain(crate::animation::starfield_bus::EXPLAIN_TEXT)
+                .copied()
+                .collect::<Vec<&str>>(),
                 cols,
             ),
             DisplayMode::MemoryCastle => explain_lines(

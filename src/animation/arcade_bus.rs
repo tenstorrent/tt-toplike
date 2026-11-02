@@ -225,9 +225,9 @@ pub struct ArcadeFx {
 /// The phase this arcade last saw a model in, and when it changed to it
 /// (`None` for the phase the model had when first seen).
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct PhaseMemo {
-    phase: ModelPhase,
-    since_ns: Option<u64>,
+pub(crate) struct PhaseMemo {
+    pub(crate) phase: ModelPhase,
+    pub(crate) since_ns: Option<u64>,
 }
 
 /// What the arcade remembers between two [`ArcadeFx::from_world`] calls.
@@ -504,7 +504,7 @@ fn add_particle(prev: &mut ArcadeBusState, chip: EntityKey, now: u64, seq: u64, 
 }
 
 /// The gauge of model `m`, whose phase memo is `memo`, at `now`.
-fn gauge_of(m: &ModelView, memo: Option<&PhaseMemo>, now: u64) -> Option<Gauge> {
+pub(crate) fn gauge_of(m: &ModelView, memo: Option<&PhaseMemo>, now: u64) -> Option<Gauge> {
     let since = memo.and_then(|p| p.since_ns);
     let recent = |t: &u64| now.saturating_sub(*t) < SETTLE_NS;
     match m.phase {
@@ -555,7 +555,7 @@ pub struct Stage {
 }
 
 /// The columns of slot `slot` of `slots` across `width`.
-fn slot_cols(slot: usize, slots: usize, width: usize) -> Range<usize> {
+pub(crate) fn slot_cols(slot: usize, slots: usize, width: usize) -> Range<usize> {
     let n = slots.max(1);
     (slot * width / n)..((slot + 1) * width / n)
 }

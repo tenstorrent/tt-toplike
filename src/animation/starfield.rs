@@ -305,6 +305,15 @@ pub struct HardwareStarfield {
     flares: Vec<Flare>,
     /// Total pulses so far; seeds each flare's position.
     pulse_count: u32,
+
+    // ── Signal bus (see `starfield_bus`) ──────────────────────────────────
+    /// What the bus puts on the field, as of the last `set_bus`. Empty
+    /// without a bus, and then the field draws what it drew before the bus.
+    bus_fx: crate::animation::starfield_bus::StarfieldFx,
+    /// What the field remembers between two `set_bus` calls.
+    bus_state: crate::animation::starfield_bus::StarfieldBusState,
+    /// The bus time of the last `set_bus`: the time the frames are drawn at.
+    bus_now: u64,
 }
 
 impl HardwareStarfield {
@@ -332,7 +341,41 @@ impl HardwareStarfield {
             tint: None,
             flares: Vec::new(),
             pulse_count: 0,
+            bus_fx: Default::default(),
+            bus_state: Default::default(),
+            bus_now: 0,
         }
+    }
+
+    /// Hand the field the signal bus's world (`TuiBus::read`), once per
+    /// update, before `update_from_telemetry`. It works out what the bus
+    /// puts on the field (see `starfield_bus`): bring-up clusters and model
+    /// labels, request comets, twinkle and orbit speed from tokens per
+    /// second, ECC flares, spark twinkles and reset flashes. Only the chips
+    /// of `devices` (the backend's) are drawn on. With `None` the field
+    /// draws what it drew before the bus, and the next world is read as a
+    /// first sight.
+    pub fn set_bus(&mut self, world: Option<&dyn tt_toplike_bus::WorldRead>, devices: &[Device]) {
+        use crate::animation::starfield_bus::{FieldChip, StarfieldFx};
+        match world {
+            Some(w) => {
+                let chips = FieldChip::of(devices);
+                let now = w.now_mono_ns();
+                self.bus_fx =
+                    StarfieldFx::from_world(w, &chips, devices.len(), now, &mut self.bus_state);
+                self.bus_now = now;
+            }
+            None => {
+                self.bus_fx = StarfieldFx::default();
+                self.bus_state = Default::default();
+            }
+        }
+    }
+
+    /// What the bus puts on the field, as of the last `set_bus`.
+    #[cfg(test)]
+    pub(crate) fn bus_fx(&self) -> &crate::animation::starfield_bus::StarfieldFx {
+        &self.bus_fx
     }
 
     /// Toggle section chrome (header label).  `true` = standalone look
@@ -704,9 +747,14 @@ impl HardwareStarfield {
 
                 // Multi-frequency twinkling — faster when throttled (nervous flicker).
                 let current_change = self.baseline.current_change(star.device_idx, current);
-                let twinkle_speed = 0.1
+                let mut twinkle_speed = 0.1
                     + current_change.max(0.0).min(1.0) * 0.3
                     + if throttler > 0 { 0.15 } else { 0.0 };
+                // The bus: the chip's model's tokens per second speed the
+                // twinkle (see `starfield_bus`). Nothing without a reading.
+                if let Some(t) = self.bus_fx.tokens_per_s(star.device_idx) {
+                    twinkle_speed += crate::animation::starfield_bus::twinkle_boost(t);
+                }
                 star.phase += twinkle_speed;
                 star.phase2 += twinkle_speed * 1.7;
 
@@ -891,7 +939,13 @@ impl HardwareStarfield {
                 };
 
                 // Speed increases with activity
-                planet.angle += orbit_speed * (1.0 + planet.activity * 0.5);
+                let mut step = orbit_speed * (1.0 + planet.activity * 0.5);
+                // The bus: the chip's model's tokens per second speed the
+                // orbit (see `starfield_bus`). Nothing without a reading.
+                if let Some(t) = self.bus_fx.tokens_per_s(planet.device_idx) {
+                    step *= crate::animation::starfield_bus::drift_factor(t);
+                }
+                planet.angle += step;
 
                 // Calculate new orbital position
                 // Layout, not identity: the orbital centre follows the device's
@@ -1159,6 +1213,18 @@ impl HardwareStarfield {
                     canvas[y as usize][x as usize] = (glyph, color);
                 }
             }
+        }
+
+        // The bus effects (see `starfield_bus`), over everything else. With
+        // no bus this does nothing.
+        if !self.bus_fx.is_empty() {
+            crate::animation::starfield_bus::draw(
+                &self.bus_fx,
+                self.bus_now,
+                &self.stars,
+                &self.planets,
+                &mut canvas,
+            );
         }
 
         // Convert canvas to Ratatui Lines with Spans
