@@ -93,6 +93,13 @@ fn events(v: &[Payload]) -> Vec<&Event> {
         .collect()
 }
 
+fn sweep<'a>(v: &'a [Payload], e: &EntityKey) -> Option<&'a tt_toplike_bus::Sweep> {
+    v.iter().find_map(|p| match p {
+        Payload::Sweep(s) if &s.entity == e => Some(s),
+        _ => None,
+    })
+}
+
 fn sample<'a>(v: &'a [Payload], e: &EntityKey, name: &str) -> Option<&'a Sample> {
     v.iter().find_map(|p| match p {
         Payload::Sample(s) if &s.entity == e && s.signal == name => Some(s),
@@ -566,10 +573,10 @@ fn process_records_carry_cpu_rss_redacted_cmdline_and_resolved_chips() {
         sample(&out, &e, sig::PROC_DEVICE).unwrap().value,
         Value::Text(format!("chip:{A}"))
     );
-    assert_eq!(
-        sample(&out, &e, sig::PROC_RSS_BYTES).unwrap().value,
-        Value::U64(2048)
-    );
+    let sw = sweep(&out, &e).unwrap();
+    assert_eq!(sw.signals, vec![sig::PROC_CPU_PCT, sig::PROC_RSS_BYTES]);
+    assert_eq!(sw.values, vec![Value::F64(50.0), Value::U64(2048)]);
+    assert_eq!(sw.prov, Provenance::Measured);
     // Index 3 did not resolve: it was held and no key was made for it.
     map.refresh(&[Device::new(0, "n150".into(), A.into(), String::new())]);
     assert_eq!(map.dropped(), 1);
@@ -623,6 +630,179 @@ fn a_log_built_from_a_process_list_with_secrets_never_contains_them() {
     );
     for secret in ["sk-abc", "hf_xyz", "tok-bearer-secret", "sk-eq"] {
         assert!(!text.contains(secret), "{secret} reached the log");
+    }
+}
+
+// ---- Fix round 1 -------------------------------------------------------------
+
+#[test]
+fn second_identical_process_feed_emits_only_the_numeric_sweeps() {
+    let map = map_with(&[(0, A)]);
+    let mut src = ProcessSource::new(map);
+    let procs = secret_procs();
+    src.feed(&procs);
+    let first = poll(&mut src);
+    assert!(first.iter().any(|p| matches!(p, Payload::Sample(_))));
+    src.feed(&procs);
+    let second = poll(&mut src);
+    assert_eq!(second.len(), procs.len(), "{second:?}");
+    assert!(second.iter().all(|p| matches!(p, Payload::Sweep(_))));
+    assert_eq!(src.redactions(), 2, "one redaction per distinct cmdline");
+}
+
+#[test]
+fn a_changed_cmdline_is_re_emitted_and_re_redacted() {
+    let map = map_with(&[(0, A)]);
+    let mut src = ProcessSource::new(map);
+    let mut procs = secret_procs();
+    src.feed(&procs);
+    poll(&mut src);
+    procs[0].cmdline = "python serve.py --token tk-changed1 --port 9000".into();
+    src.feed(&procs);
+    let out = poll(&mut src);
+    let e = EntityKey::process(100, 555);
+    assert_eq!(
+        sample(&out, &e, sig::PROC_CMDLINE).unwrap().value,
+        Value::Text("python serve.py --token <redacted> --port 9000".into())
+    );
+    // Name and device did not change, so they are not sent again.
+    assert!(sample(&out, &e, sig::PROC_NAME).is_none());
+    assert!(sample(&out, &e, sig::PROC_DEVICE).is_none());
+    assert_eq!(src.redactions(), 3);
+}
+
+#[test]
+fn a_vanished_process_state_is_pruned_and_a_return_is_sent_in_full() {
+    let map = map_with(&[(0, A)]);
+    let mut src = ProcessSource::new(map);
+    let procs = secret_procs();
+    src.feed(&procs);
+    poll(&mut src);
+    assert_eq!(src.tracked(), 2);
+    src.feed(&procs[1..]);
+    poll(&mut src);
+    assert_eq!(src.tracked(), 1);
+    src.feed(&procs);
+    let out = poll(&mut src);
+    let e = EntityKey::process(100, 555);
+    assert!(sample(&out, &e, sig::PROC_CMDLINE).is_some());
+}
+
+#[test]
+fn long_text_is_truncated_after_redaction() {
+    let map = map_with(&[(0, A)]);
+    let mut src = ProcessSource::new(map);
+    let long = format!("python x.py --api-key sk-long1 {}", "a".repeat(5000));
+    src.feed(&[ProcSnapshot {
+        pid: 1,
+        start_ticks: 1,
+        name: "n".repeat(900),
+        cmdline: long,
+        ..Default::default()
+    }]);
+    let out = poll(&mut src);
+    let e = EntityKey::process(1, 1);
+    for name in [sig::PROC_CMDLINE, sig::PROC_NAME] {
+        match &sample(&out, &e, name).unwrap().value {
+            Value::Text(t) => assert_eq!(t.chars().count(), MAX_TEXT, "{name}"),
+            v => panic!("{v:?}"),
+        }
+    }
+    let text = serde_json::to_string(&out).unwrap();
+    assert!(!text.contains("sk-long1"));
+}
+
+#[test]
+fn service_label_and_key_are_redacted() {
+    let map = map_with(&[(0, A)]);
+    let mut src = InferenceSource::new(map);
+    let mut s = state("svc HF_TOKEN=hf_keysecret1", Phase::Ready, &[0]);
+    s.label = format!("serve --api-key sk-labelsecret1 {}", "b".repeat(900));
+    src.feed(&[s]);
+    let out = poll(&mut src);
+    let text = serde_json::to_string(&out).unwrap();
+    assert!(!text.contains("keysecret1"), "{text}");
+    assert!(!text.contains("labelsecret1"), "{text}");
+    let m = EntityKey::model("svc HF_TOKEN=<redacted>");
+    assert!(events(&out).contains(&&Event::ModelReady {
+        model: m.clone(),
+        chips: vec![EntityKey::chip(A)]
+    }));
+    match &sample(&out, &m, bsig::MODEL_LABEL).unwrap().value {
+        Value::Text(t) => assert_eq!(t.chars().count(), MAX_TEXT),
+        v => panic!("{v:?}"),
+    }
+}
+
+#[test]
+fn a_service_first_seen_down_or_alarm_sends_nothing_until_announced() {
+    let map = map_with(&[(0, A)]);
+    let mut src = InferenceSource::new(map);
+    for ph in [Phase::Down, Phase::Alarm] {
+        src.feed(&[state("svc", ph, &[0])]);
+        assert!(poll(&mut src).is_empty(), "{ph:?}");
+    }
+    src.feed(&[state("svc", Phase::Loading, &[0])]);
+    let out = poll(&mut src);
+    assert_eq!(kinds(&out)[0], "loading");
+    assert!(out.len() > 1);
+    // Once announced, an Alarm is a phase sample.
+    src.feed(&[state("svc", Phase::Alarm, &[0])]);
+    let out = poll(&mut src);
+    assert!(sample(&out, &EntityKey::model("svc"), bsig::MODEL_PHASE).is_some());
+}
+
+#[test]
+fn a_service_that_leaves_and_returns_is_announced_again() {
+    let map = map_with(&[(0, A)]);
+    let mut src = InferenceSource::new(map);
+    src.feed(&[state("svc", Phase::Ready, &[0])]);
+    poll(&mut src);
+    src.feed(&[]);
+    assert_eq!(kinds(&poll(&mut src)), vec!["gone"]);
+    src.feed(&[state("svc", Phase::Ready, &[0])]);
+    let out = poll(&mut src);
+    assert_eq!(kinds(&out)[0], "ready");
+}
+
+#[test]
+fn a_log_built_from_property_command_lines_never_contains_their_secrets() {
+    use crate::bus::redact::tests::secret_line;
+    use tt_toplike_bus::{Bus, BusConfig};
+    let dir = tempfile::tempdir().unwrap();
+    let bus = Bus::open(BusConfig {
+        dir: Some(dir.path().to_path_buf()),
+        ..Default::default()
+    })
+    .unwrap();
+    let map = map_with(&[(0, A)]);
+    let mut src = ProcessSource::new(map.clone());
+    let mut secrets = Vec::new();
+    let mut procs = Vec::new();
+    for seed in 0..400u64 {
+        let (line, s) = secret_line(seed + 10_000);
+        secrets.extend(s);
+        procs.push(ProcSnapshot {
+            pid: seed as u32 + 1,
+            start_ticks: 7,
+            name: "python".into(),
+            cmdline: line,
+            ..Default::default()
+        });
+    }
+    src.feed(&procs);
+    for p in poll(&mut src) {
+        bus.publish("processes", p);
+    }
+    assert!(bus.flush(std::time::Duration::from_secs(5)));
+    let mut bytes = Vec::new();
+    for f in std::fs::read_dir(dir.path()).unwrap() {
+        bytes.extend(std::fs::read(f.unwrap().path()).unwrap());
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("process:400@7") && text.contains("<redacted>"));
+    for s in &secrets {
+        assert!(!text.contains(s.as_str()), "{s} reached the log");
     }
 }
 
@@ -693,9 +873,27 @@ mod remote_tests {
     }
 
     #[test]
+    fn remote_label_and_key_are_redacted() {
+        let map = map_with(&[(0, A)]);
+        let mut src = RemoteSource::new(map);
+        let mut r = ri("ready", None);
+        r.key = "svc --token tk-rkey1".into();
+        r.label = "Llama --api-key sk-rlabel1".into();
+        src.feed(Some(&[r]), None);
+        let text = serde_json::to_string(&poll(&mut src)).unwrap();
+        assert!(
+            !text.contains("tk-rkey1") && !text.contains("sk-rlabel1"),
+            "{text}"
+        );
+        assert!(text.contains("model:svc --token <redacted>"), "{text}");
+    }
+
+    #[test]
     fn unknown_remote_phase_emits_no_event_and_no_phase_sample() {
         let map = map_with(&[(0, A)]);
         let mut src = RemoteSource::new(map);
+        src.feed(Some(&[ri("loading", None)]), None);
+        poll(&mut src);
         src.feed(Some(&[ri("warming", None)]), None);
         let out = poll(&mut src);
         let m = EntityKey::model("svc");

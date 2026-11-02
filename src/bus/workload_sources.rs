@@ -54,11 +54,15 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 use tt_toplike_bus::signals as bsig;
-use tt_toplike_bus::{EntityKey, Event, Gap, Payload, Provenance, Sample, Value};
+use tt_toplike_bus::{EntityKey, Event, Gap, Payload, Provenance, Sample, Sweep, Value};
 
 /// Most hivemind events queued between polls. When full, the oldest is
 /// dropped and counted in [`HivemindSource::dropped`].
 pub const HIVEMIND_QUEUE: usize = 4096;
+
+/// Most characters in a free-text sample (command line, name, label),
+/// counted after redaction.
+pub const MAX_TEXT: usize = 512;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -130,6 +134,14 @@ fn chip_text(keys: &[EntityKey]) -> String {
         .map(|k| k.as_str())
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// Cut free text to [`MAX_TEXT`] characters. Applied after redaction.
+fn clip(mut s: String) -> String {
+    if let Some((i, _)) = s.char_indices().nth(MAX_TEXT) {
+        s.truncate(i);
+    }
+    s
 }
 
 /// The phase as the world spells it.
@@ -245,7 +257,8 @@ impl ModelTracker {
 
     /// Process one full snapshot. Order per service: the announcing event
     /// (when the phase or chips changed), then samples, then
-    /// `RequestsCompleted`. Then `ModelGone` for services that left.
+    /// `RequestsCompleted`. Then `ModelGone` for announced services that
+    /// left. A service that was never announced sends nothing.
     fn process(&mut self, snaps: &[ModelSnap], out: &mut dyn FnMut(Payload)) {
         let mut present: HashSet<&str> = HashSet::new();
         for s in snaps {
@@ -274,6 +287,13 @@ impl ModelTracker {
                 }
             }
 
+            // A service never announced (first seen Down, Alarm or in an
+            // unknown phase) sends nothing: the world has no view for it,
+            // and its samples would only sit there unread.
+            if t.announced.is_none() {
+                continue;
+            }
+
             // 2. Samples.
             Self::samples(&model, s, out);
 
@@ -297,7 +317,13 @@ impl ModelTracker {
             .cloned()
             .collect();
         for k in gone {
-            self.tracked.remove(&k);
+            let announced = self
+                .tracked
+                .remove(&k)
+                .is_some_and(|t| t.announced.is_some());
+            if !announced {
+                continue; // nothing was ever sent for it
+            }
             out(Payload::Event(Event::ModelGone {
                 model: EntityKey::model(&k),
             }));
@@ -434,11 +460,15 @@ impl ModelTracker {
 
 /// Turns the inference monitor's `ServiceState` snapshots into model records.
 ///
-/// Per service, on entity `EntityKey::model(&service.key)`:
+/// Per service, on entity `EntityKey::model(key)`, where the key and the
+/// label are passed through `redact_cmdline` and cut to [`MAX_TEXT`]
+/// characters:
 /// * `ModelLoading{chips, progress}` when the phase becomes Compiling or
 ///   Loading, `ModelReady{chips}` when it becomes Ready, each once per
 ///   change. Always emitted before the model's samples, because the world
 ///   creates a model view only on one of these events.
+/// * A service first seen Down, Alarm or in an unknown phase sends nothing
+///   until it is announced.
 /// * Samples: label, phase (Alarm and Down are a phase sample and no event),
 ///   progress, CPU, RSS, kernel and shard counts, and either the serving
 ///   fields (tokens/s, running, waiting, KV cache, TTFT) or the media fields
@@ -446,7 +476,8 @@ impl ModelTracker {
 /// * `RequestsCompleted{n}` from the scrape's completed delta. Not on the
 ///   first scrape seen, and not when the same scrape is fed again (the
 ///   stats, counters included, compare equal).
-/// * `ModelGone` once when a service seen before is missing from a snapshot.
+/// * `ModelGone` once when an announced service is missing from a
+///   snapshot. If it returns, it is announced again.
 pub struct InferenceSource {
     tracker: ModelTracker,
     pending: Option<Vec<ModelSnap>>,
@@ -479,8 +510,8 @@ fn snap_from_state(s: &ServiceState) -> ModelSnap {
         _ => None,
     };
     ModelSnap {
-        key: s.key.clone(),
-        label: s.label.clone(),
+        key: clip(redact_cmdline(&s.key)),
+        label: clip(redact_cmdline(&s.label)),
         phase: Some(s.phase),
         progress: s.progress,
         cpu_pct: Some(s.cpu_pct),
@@ -773,14 +804,44 @@ impl From<&ProcRow> for ProcSnapshot {
     }
 }
 
-/// Turns the process list into samples on process entities
-/// (`EntityKey::process(pid, start_ticks)`): CPU, RSS, name, command line
-/// and the chips held open. Name and command line are always redacted.
+/// What [`ProcessSource`] remembers about one process between feeds.
+#[derive(Debug, Default)]
+struct ProcState {
+    /// Hash of the raw command line last redacted, and its redacted text.
+    /// The raw text itself is not kept.
+    cmd_hash: Option<u64>,
+    /// Hash of the raw name last sent.
+    name_hash: Option<u64>,
+    /// Chips text last sent. `None` while no chip resolves.
+    device: Option<String>,
+    /// Indexes passed to `hold_unresolved` and not resolved since.
+    held: BTreeSet<usize>,
+}
+
+fn hash_of(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
+/// Turns the process list into records on process entities
+/// (`EntityKey::process(pid, start_ticks)`).
+///
+/// Per feed and process: one `Sweep` of the numbers (CPU, RSS, and
+/// `uses_tt` from a remote). The text signals (name, command line, chips)
+/// are sent only when they changed since the last feed for that process,
+/// so a steady process list costs one record per process per feed. Name
+/// and command line are redacted and cut to [`MAX_TEXT`] characters;
+/// `redact_cmdline` runs once per distinct command line. State for a
+/// process missing from a feed is dropped, so a process that returns is
+/// sent in full.
 pub struct ProcessSource {
     map: Arc<IdentityMap>,
     source: &'static str,
     pending: Option<Vec<ProcSnapshot>>,
-    held: HashMap<EntityKey, BTreeSet<usize>>,
+    state: HashMap<EntityKey, ProcState>,
+    redactions: u64,
 }
 
 impl ProcessSource {
@@ -793,8 +854,19 @@ impl ProcessSource {
             map,
             source,
             pending: None,
-            held: HashMap::new(),
+            state: HashMap::new(),
+            redactions: 0,
         }
+    }
+
+    /// Command lines redacted so far (one per distinct command line seen).
+    pub fn redactions(&self) -> u64 {
+        self.redactions
+    }
+
+    /// Processes with remembered state.
+    pub fn tracked(&self) -> usize {
+        self.state.len()
     }
 
     /// Hand over the current process list.
@@ -808,51 +880,65 @@ impl ProcessSource {
         for p in procs {
             let e = EntityKey::process(p.pid, p.start_ticks);
             present.insert(e.clone());
-            put(
-                out,
-                &e,
-                sig::PROC_CPU_PCT,
-                Value::F64(p.cpu_pct as f64),
-                Measured,
-            );
-            put(
-                out,
-                &e,
-                sig::PROC_RSS_BYTES,
-                Value::U64(p.rss_bytes),
-                Measured,
-            );
+            let st = self.state.entry(e.clone()).or_default();
+
+            // Numbers: one sweep.
+            let mut signals = Vec::new();
+            let mut values = Vec::new();
+            if p.cpu_pct.is_finite() {
+                signals.push(sig::PROC_CPU_PCT.to_string());
+                values.push(Value::F64(p.cpu_pct as f64));
+            }
+            signals.push(sig::PROC_RSS_BYTES.to_string());
+            values.push(Value::U64(p.rss_bytes));
+            if let Some(u) = p.uses_tt {
+                signals.push(sig::PROC_USES_TT.to_string());
+                values.push(Value::U64(u as u64));
+            }
+            out(Payload::Sweep(Sweep {
+                entity: e.clone(),
+                signals,
+                values,
+                prov: Measured,
+            }));
+
+            // Text: only when it changed.
             if !p.name.is_empty() {
-                put(
-                    out,
-                    &e,
-                    sig::PROC_NAME,
-                    Value::Text(redact_cmdline(&p.name)),
-                    Measured,
-                );
+                let h = hash_of(&p.name);
+                if st.name_hash != Some(h) {
+                    st.name_hash = Some(h);
+                    let text = clip(redact_cmdline(&p.name));
+                    put(out, &e, sig::PROC_NAME, Value::Text(text), Measured);
+                }
             }
             if !p.cmdline.is_empty() {
-                let text = redact_cmdline(&p.cmdline);
-                put(out, &e, sig::PROC_CMDLINE, Value::Text(text), Measured);
-            }
-            if let Some(u) = p.uses_tt {
-                put(out, &e, sig::PROC_USES_TT, Value::U64(u as u64), Measured);
+                let h = hash_of(&p.cmdline);
+                if st.cmd_hash != Some(h) {
+                    st.cmd_hash = Some(h);
+                    self.redactions += 1;
+                    let text = clip(redact_cmdline(&p.cmdline));
+                    put(out, &e, sig::PROC_CMDLINE, Value::Text(text), Measured);
+                }
             }
             let (chips, missing) = resolve_chips(&self.map, &p.device_indices);
-            let held = self.held.entry(e.clone()).or_default();
-            hold_new(&self.map, self.source, &e, &missing, held);
-            if !chips.is_empty() {
-                put(
-                    out,
-                    &e,
-                    sig::PROC_DEVICE,
-                    Value::Text(chip_text(&chips)),
-                    Measured,
-                );
+            hold_new(&self.map, self.source, &e, &missing, &mut st.held);
+            if chips.is_empty() {
+                st.device = None;
+            } else {
+                let text = chip_text(&chips);
+                if st.device.as_deref() != Some(text.as_str()) {
+                    put(
+                        out,
+                        &e,
+                        sig::PROC_DEVICE,
+                        Value::Text(text.clone()),
+                        Measured,
+                    );
+                    st.device = Some(text);
+                }
             }
         }
-        self.held
-            .retain(|k, h| present.contains(k) && !h.is_empty());
+        self.state.retain(|k, _| present.contains(k));
     }
 }
 
@@ -970,8 +1056,8 @@ mod remote {
             _ => None,
         };
         ModelSnap {
-            key: r.key.clone(),
-            label: r.label.clone(),
+            key: clip(redact_cmdline(&r.key)),
+            label: clip(redact_cmdline(&r.label)),
             phase: parse_phase(&r.phase),
             progress: r.progress,
             cpu_pct: None,
