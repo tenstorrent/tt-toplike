@@ -23,7 +23,7 @@ jobs:
 
       - name: Check formatting
         # Strict gate: the whole tree is fmt-clean, so any drift fails the build.
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Clippy (TUI, zero warnings)
         run: cargo clippy --locked --lib --bin tt-toplike-tui --features tui -- -D warnings

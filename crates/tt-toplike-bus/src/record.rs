@@ -31,7 +31,9 @@
 //!
 //! A missing reading has no representation: the source emits no sample.
 //! JSON cannot carry NaN or infinity, so a non-finite `F64` is not a valid
-//! value and sources must not emit one.
+//! value. Sources must not emit one, and [`Payload::sanitize`] enforces it:
+//! it drops non-finite readings and rejects malformed sweeps before a record
+//! is logged.
 //!
 //! `serde_json` escapes every control character inside strings, so a line
 //! never contains a raw newline even when text or a raw body does.
@@ -71,6 +73,16 @@ pub enum Value {
     Text(String),
 }
 
+impl Value {
+    /// False only for an `F64` that is NaN or infinite.
+    pub fn is_finite(&self) -> bool {
+        match self {
+            Value::F64(x) => x.is_finite(),
+            _ => true,
+        }
+    }
+}
+
 /// One reading of one signal on one entity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
@@ -85,7 +97,8 @@ pub struct Sample {
 }
 
 /// Many readings of one entity in one record (one chip per tick, or one tile
-/// sweep). `signals[i]` names `values[i]`.
+/// sweep). `signals[i]` names `values[i]`, so both vectors must have the same
+/// length. [`Payload::sanitize`] enforces that rule.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sweep {
     #[serde(rename = "e")]
@@ -177,6 +190,40 @@ pub enum Payload {
     Event(Event),
     Raw(RawFrame),
     Gap(Gap),
+}
+
+impl Payload {
+    /// Make a payload safe to log. A sample with a non-finite value, a sweep
+    /// whose `signals` and `values` differ in length, and a sweep with no
+    /// finite pair left all return `None`. A sweep with some non-finite
+    /// values keeps only its finite (signal, value) pairs. Everything else is
+    /// returned unchanged.
+    pub fn sanitize(self) -> Option<Payload> {
+        match self {
+            Payload::Sample(s) => s.value.is_finite().then_some(Payload::Sample(s)),
+            Payload::Sweep(mut s) => {
+                if s.signals.len() != s.values.len() {
+                    return None;
+                }
+                if s.values.iter().all(Value::is_finite) {
+                    return (!s.values.is_empty()).then_some(Payload::Sweep(s));
+                }
+                let (signals, values): (Vec<_>, Vec<_>) = s
+                    .signals
+                    .drain(..)
+                    .zip(s.values.drain(..))
+                    .filter(|(_, v)| v.is_finite())
+                    .unzip();
+                if values.is_empty() {
+                    return None;
+                }
+                s.signals = signals;
+                s.values = values;
+                Some(Payload::Sweep(s))
+            }
+            other => Some(other),
+        }
+    }
 }
 
 /// One line of the log.
@@ -428,5 +475,65 @@ mod tests {
         };
         let s = serde_json::to_string(&h).unwrap();
         assert_eq!(serde_json::from_str::<Header>(&s).unwrap(), h);
+    }
+
+    #[test]
+    fn sanitize_drops_non_finite_sample() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let p = Payload::Sample(Sample {
+                entity: chip(),
+                signal: "tt_tdp_w".into(),
+                value: Value::F64(bad),
+                prov: Provenance::Measured,
+            });
+            assert_eq!(p.sanitize(), None);
+        }
+    }
+
+    #[test]
+    fn sanitize_keeps_finite_pairs_aligned() {
+        let p = Payload::Sweep(Sweep {
+            entity: chip(),
+            signals: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            values: vec![
+                Value::F64(1.0),
+                Value::F64(f64::INFINITY),
+                Value::U64(3),
+                Value::F64(f64::NAN),
+            ],
+            prov: Provenance::Measured,
+        });
+        match p.sanitize() {
+            Some(Payload::Sweep(s)) => {
+                assert_eq!(s.signals, vec!["a".to_string(), "c".to_string()]);
+                assert_eq!(s.values, vec![Value::F64(1.0), Value::U64(3)]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn sanitize_rejects_mismatched_and_all_bad_sweeps() {
+        let mismatched = Payload::Sweep(Sweep {
+            entity: chip(),
+            signals: vec!["a".into(), "b".into()],
+            values: vec![Value::U64(1)],
+            prov: Provenance::Measured,
+        });
+        assert_eq!(mismatched.sanitize(), None);
+        let all_bad = Payload::Sweep(Sweep {
+            entity: chip(),
+            signals: vec!["a".into()],
+            values: vec![Value::F64(f64::NAN)],
+            prov: Provenance::Measured,
+        });
+        assert_eq!(all_bad.sanitize(), None);
+    }
+
+    #[test]
+    fn sanitize_leaves_finite_payloads_unchanged() {
+        for p in all_payloads() {
+            assert_eq!(p.clone().sanitize(), Some(p));
+        }
     }
 }
