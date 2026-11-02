@@ -469,6 +469,32 @@ mod tests {
         }
     }
 
+    /// Raw bodies with an embedded NUL byte and with a lone-surrogate JSON
+    /// escape (the six characters `\ud800`, which is valid text but not a
+    /// valid character once decoded) survive the on-disk line format
+    /// unchanged, and the line holds no raw NUL.
+    #[test]
+    fn awkward_raw_bodies_round_trip_through_a_line() {
+        for body in [
+            "{\"a\":\"x\0y\"}\0tail".to_string(),
+            r#"{"s":"\ud800","t":"\udfff\ud83d"}"#.to_string(),
+            "\0".to_string(),
+            "\\u0000 and \0 together".to_string(),
+        ] {
+            let r = rec(Payload::Raw(RawFrame {
+                source: "tt-smi".into(),
+                body: body.clone(),
+            }));
+            let line = r.to_line();
+            assert!(!line.contains('\0'), "{line:?}");
+            let back = Record::from_line(&line).unwrap();
+            match back.payload {
+                Payload::Raw(f) => assert_eq!(f.body, body),
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn truncated_line_is_an_error() {
         let line = rec(Payload::Gap(Gap { reason: "x".into() })).to_line();

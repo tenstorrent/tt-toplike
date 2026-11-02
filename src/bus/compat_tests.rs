@@ -133,6 +133,68 @@ fn awkward_bodies_survive_unchanged() {
     }
 }
 
+/// Bodies with an embedded NUL byte, and with a lone-surrogate JSON escape
+/// (the six characters `\ud800`: valid text, but not a valid character once
+/// decoded).
+fn nul_and_surrogate_bodies() -> Vec<String> {
+    vec![
+        "{\"device_info\":[],\"note\":\"a\0b\"}\0".to_string(),
+        r#"{"device_info":[],"s":"\ud800","t":"x\udfff"}"#.to_string(),
+    ]
+}
+
+#[test]
+fn nul_and_lone_surrogate_bodies_survive_publish_and_snapshot() {
+    let ext = ext();
+    for body in nul_and_surrogate_bodies() {
+        let b = bus();
+        publish_raw(&b, "tt-smi", &body);
+        let w = world_of(&b);
+        assert_eq!(relay_frame(&w).unwrap(), body, "{body:?}");
+        assert_eq!(
+            telemetry_frame(&w, &ext).unwrap(),
+            inject_extension(&body, &ext),
+            "{body:?}"
+        );
+    }
+}
+
+/// The same bodies through the on-disk path: written to a log directory,
+/// read back by `Replay`, published again into a fresh bus.
+#[test]
+fn awkward_bodies_survive_the_on_disk_path() {
+    let ext = ext();
+    let big_pad = "x".repeat(100_000);
+    let mut bodies = nul_and_surrogate_bodies();
+    bodies.push(format!("{}\n", FIXTURE.trim_end()));
+    bodies.push(r#"{"device_info":[],"note":"température 52°C – 温度"}"#.to_string());
+    bodies.push(format!(r#"{{"device_info":[],"pad":"{big_pad}"}}"#));
+    bodies.push("not json\n".to_string());
+    for body in bodies {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("bus");
+        {
+            let disk = Bus::open_with_world(BusConfig {
+                dir: Some(dir.clone()),
+                ..BusConfig::default()
+            })
+            .unwrap();
+            publish_raw(&disk, "tt-smi", &body);
+            assert!(disk.flush(std::time::Duration::from_secs(5)));
+        }
+        let again = bus();
+        for r in tt_toplike_bus::Replay::open(&dir).unwrap().records() {
+            again.publish(&r.source, r.payload);
+        }
+        let w = world_of(&again);
+        assert_eq!(relay_frame(&w).unwrap(), body, "{} bytes", body.len());
+        assert_eq!(
+            telemetry_frame(&w, &ext).unwrap(),
+            inject_extension(&body, &ext)
+        );
+    }
+}
+
 #[test]
 fn rejected_frames_come_back_as_inject_extension_returns_them() {
     let ext = ext();
