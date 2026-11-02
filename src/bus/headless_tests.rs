@@ -762,3 +762,42 @@ fn a_non_tt_process_is_never_recorded_in_headless_mode() {
     assert!(text.contains("tt-worker-a"), "{text}");
     assert!(!text.contains(NON_TT_NAME), "{text}");
 }
+
+// ---- A refused socket path leaves nothing behind (final fix wave, M1) --------
+
+/// A socket path that is refused (a directory others can write, or a path
+/// too long for a Unix socket) fails before the log directory is created or
+/// locked, and before any socket directory or lock file is made.
+#[cfg(unix)]
+#[test]
+fn a_refused_socket_path_leaves_no_files_behind() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let shared = tmp.path().join("shared");
+    std::fs::create_dir(&shared).unwrap();
+    std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let long_dir = tmp.path().join("d".repeat(120));
+    for (sock, kind) in [
+        (shared.join("s.sock"), io::ErrorKind::PermissionDenied),
+        (long_dir.join("s.sock"), io::ErrorKind::InvalidInput),
+    ] {
+        let log = tmp.path().join("bus");
+        let mut b = mock(1);
+        let err = run_headless(
+            &mut b,
+            &mut NoWorkloads,
+            cfg(Some(log.clone()), Some(sock.clone())),
+            None,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), kind, "{err}");
+        assert!(!log.exists(), "the bus directory was created: {err}");
+        assert!(!long_dir.exists(), "the socket directory was created");
+        let left: Vec<_> = std::fs::read_dir(&shared)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "files in the socket directory: {left:?}");
+    }
+}

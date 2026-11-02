@@ -299,6 +299,28 @@ impl Drop for ServedMark {
     }
 }
 
+/// Check the socket path before anything is opened (see
+/// [`tt_toplike_bus::SocketServer::check_path`]): a refused path then
+/// leaves no log directory, lock or segment behind. The error names the
+/// path, as [`serve_socket`]'s does.
+#[cfg(unix)]
+pub fn check_socket(path: Option<&Path>) -> io::Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    tt_toplike_bus::SocketServer::check_path(path).map_err(|e| {
+        io::Error::new(
+            e.kind(),
+            format!("cannot serve the bus socket at {}: {e}", path.display()),
+        )
+    })
+}
+
+#[cfg(not(unix))]
+pub fn check_socket(_path: Option<&Path>) -> io::Result<()> {
+    Ok(())
+}
+
 /// Serve `bus` on `path`, with the path in the error. The path is marked as
 /// this process's (see [`SERVED_SOCKETS`]) only after the bind succeeded.
 #[cfg(unix)]
@@ -361,6 +383,9 @@ pub fn run_headless_with(
     stop: &AtomicBool,
     clock: &mut dyn LoopClock,
 ) -> io::Result<HeadlessReport> {
+    // A socket path that would be refused is refused before the log
+    // directory is created or locked.
+    check_socket(cfg.socket.as_deref())?;
     let gozer = if cfg.gozer {
         GozerSource::with_command()
     } else {
@@ -446,6 +471,7 @@ pub fn run_headless_replay(
     stop: &AtomicBool,
     mut on_done: impl FnMut(&Result<u64, String>),
 ) -> io::Result<HeadlessReport> {
+    check_socket(cfg.socket.as_deref())?;
     let host = BusHost::replay(path, speed, cfg.bus)?;
     let server = serve_socket(host.bus(), cfg.socket.as_deref())?;
     let mut told = false;

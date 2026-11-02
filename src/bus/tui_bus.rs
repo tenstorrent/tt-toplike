@@ -360,6 +360,9 @@ impl TuiBus {
             ));
         }
 
+        // A refused socket path fails before the log directory is opened.
+        crate::bus::headless::check_socket(opts.serve_socket.as_deref())
+            .map_err(|e| e.to_string())?;
         let gozer = if opts.gozer {
             GozerSource::with_command()
         } else {

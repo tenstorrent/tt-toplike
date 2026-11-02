@@ -389,17 +389,23 @@ tt-toplike-tui --bus-inspect DIR --entity chip:0000:01:00.0 --signal tt_tdp_w
 
 The path is a segment file (plain or `.gz`) or a directory. The summary lists the header, who
 recorded it (backend and mode), the record count by kind, the time span, the entities, the
-events, and for each signal the sample count with minimum, maximum and last value. Example
-from a 14-second `--headless --mock 2` run:
+events, and for each signal the sample count with minimum, maximum and last value. The span is
+taken from the records' wall-clock times: monotonic times restart with each process, so they
+cannot measure a directory written by more than one run. Example from an 8-second
+`--headless --mock 2` run:
 
 ```
 header: schema 1, Live, written by tt-toplike-bus 0.1.0
 recorded by: backend mock, mode mock
-records: 5044 (skipped 0 bad lines)
+log: /tmp/smoke-bus
+records: 2944 (skipped 0 bad lines)
 holes: 0 holes
-by kind: sample 4764, sweep 280, event 0, raw 0, gap 0
-time span: 13.928s (monotonic 0.000s to 13.928s), sequence 1 to 5044
+by kind: sample 2784, sweep 160, event 0, raw 0, gap 0
+span (wall clock): 7.935s, 1793629669770 to 1793629677705 ms since the epoch, sequence 1 to 2944
 ```
+
+Output cut short by a closed pipe (`| head`) is not an error: the command exits 0. It exits 1
+when the log cannot be read or the output fails another way.
 
 `--entity` and `--signal` narrow the entity, event and signal sections. The totals at the top
 always cover the whole log. A signal filter leaves out the event section.
@@ -586,8 +592,10 @@ The second signal removes the socket file only when this process has bound it an
 file at that path still has the device and inode that this process bound. A second signal during
 a slow start-up therefore leaves another host's socket in place.
 Failures before the loop starts (the backend, a log directory or socket another process holds,
-a socket directory that is not private) print one line and exit with status 1. A failed
-telemetry update inside the loop is logged and the loop continues.
+a socket directory that is not private, a socket path too long for a Unix socket) print one
+line and exit with status 1. The socket path is checked before the log directory is opened, so
+a refused path leaves no log directory, lock or socket directory behind. A failed telemetry
+update inside the loop is logged and the loop continues.
 
 It needs no root. It reads the same sources the TUI reads and takes no chip lease: the
 telemetry sources (hwmon, sysfs, `tt-smi -s`, `/proc` scans, metrics scrapes) are the
@@ -951,7 +959,8 @@ Until the sidecar exists, the Die 3D tile glow stays an estimate and says so.
 * A full writer queue drops the disk write without publishing a gap record. The drop is
   counted in the bus statistics.
 * The in-memory window must be larger than the writer queue (the defaults are 65,536 and
-  16,384). A tiny window can report spurious `dropped` errors.
+  16,384; a TUI that serves no socket uses 4,096 and 2,048). A tiny window can report
+  spurious `dropped` errors.
 * Records lost from the end of a log (a deleted last segment) cannot be detected.
 * A compress error repeats at every rotation. Retention does not run on a segment whose
   metadata cannot be read.

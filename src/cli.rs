@@ -544,6 +544,14 @@ pub fn backend_shows_only_tt(bt: BackendType) -> bool {
 /// the same box without a port clash.
 pub const DEFAULT_SERVE_PORT: u16 = 8770;
 
+/// Records the TUI's own bus keeps in memory when it serves no socket (see
+/// `Cli::tui_bus_config`).
+pub const TUI_BUS_WINDOW: usize = 4_096;
+
+/// The TUI's disk writer queue when it serves no socket. Smaller than
+/// [`TUI_BUS_WINDOW`], as the bus requires.
+pub const TUI_BUS_QUEUE: usize = 2_048;
+
 /// Parse a `--serve`/`/serve` bind-address spec into a `SocketAddr`.
 ///
 /// Accepts, in order of preference:
@@ -875,11 +883,24 @@ impl Cli {
     /// `--record`/`--bus-dir` names a directory (the TUI never writes to the
     /// default directory, which belongs to a headless host), with the
     /// retention from `--bus-retain`.
+    ///
+    /// Without `--bus-socket` nothing reads the in-memory record window (the
+    /// views read the world the reducer keeps), so it is cut to
+    /// [`TUI_BUS_WINDOW`] records, about 1.5 MB in place of about 20 MB for
+    /// the default 65,536. The writer queue is cut to [`TUI_BUS_QUEUE`] so
+    /// the window stays larger than the queue, which the bus needs (a
+    /// window at or below the queue can report spurious `dropped` errors to
+    /// a subscriber; see `docs/bus.md`). With `--bus-socket` a client can
+    /// subscribe from an older sequence number, so the defaults stay.
     pub fn tui_bus_config(&self) -> tt_toplike_bus::BusConfig {
         let mut cfg = tt_toplike_bus::BusConfig {
             dir: self.bus_dir.clone().or_else(|| self.record.clone()),
             ..tt_toplike_bus::BusConfig::default()
         };
+        if self.bus_socket.is_none() {
+            cfg.window_records = TUI_BUS_WINDOW;
+            cfg.writer_queue = TUI_BUS_QUEUE;
+        }
         if let Some(r) = self.bus_retain {
             cfg.retain_secs = r.secs;
             if let Some(b) = r.bytes {
@@ -1982,6 +2003,24 @@ mod tests {
         let c = cli.tui_bus_config();
         assert_eq!(c.dir, Some(PathBuf::from("/d")));
         assert_eq!(c.retain_secs, 7_200);
+    }
+
+    /// Final fix wave M5: without `--bus-socket` the TUI's bus keeps a
+    /// 4,096-record window (and a smaller writer queue); with it, the
+    /// defaults.
+    #[test]
+    fn the_tui_bus_window_is_small_unless_a_socket_is_served() {
+        let d = tt_toplike_bus::BusConfig::default();
+        for args in [&[][..], &["--record", "/r"][..]] {
+            let c = parse(args).unwrap().tui_bus_config();
+            assert_eq!(c.window_records, 4_096, "{args:?}");
+            assert_eq!(c.writer_queue, 2_048, "{args:?}");
+            assert!(c.window_records > c.writer_queue);
+        }
+        let c = parse(&["--bus-socket", "/a/s"]).unwrap().tui_bus_config();
+        assert_eq!(c.window_records, d.window_records);
+        assert_eq!(c.writer_queue, d.writer_queue);
+        assert!(c.window_records > c.writer_queue);
     }
 
     /// `--bus-attach` reads another host's bus, so it cannot be combined

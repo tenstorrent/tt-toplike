@@ -44,19 +44,29 @@ fn main() {
 
     // --bus-inspect: print a summary of a recorded signal-bus log and exit.
     // Needs no backend and no TTY, and prints no banner, so the output can be
-    // piped. Exit 1 when the log cannot be read.
+    // piped. Exit 1 when the log cannot be read or the output fails, other
+    // than a closed pipe.
     if let Some(path) = &cli.bus_inspect {
         let filter = tt_toplike_bus::inspect::Filter {
             entity: cli.entity.clone(),
             signal: cli.signal.clone(),
         };
+        // A closed pipe on stdout (`| head`) is success, and an error
+        // message is written without `eprintln!`, which would panic when
+        // stderr is the same closed pipe (`2>&1 | head`).
         let stdout = std::io::stdout();
         let mut out = std::io::BufWriter::new(stdout.lock());
-        let result = tt_toplike_bus::inspect::inspect(path, &filter, &mut out);
-        let result = result.and_then(|()| std::io::Write::flush(&mut out));
-        if let Err(e) = result {
-            eprintln!("bus-inspect: cannot read {}: {e}", path.display());
-            std::process::exit(1);
+        let code = tt_toplike_bus::inspect::inspect_command(
+            path,
+            &filter,
+            &mut out,
+            &mut std::io::stderr(),
+        );
+        // Dropping a BufWriter flushes again and ignores the error, so a
+        // second broken pipe here is silent.
+        drop(out);
+        if code != 0 {
+            std::process::exit(code);
         }
         return;
     }

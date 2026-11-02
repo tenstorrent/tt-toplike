@@ -4,6 +4,13 @@
 //! kind, the time span, the entities seen, the events, and for every signal
 //! its sample count with minimum, maximum and last value.
 //!
+//! The time span is taken from the records' wall-clock times
+//! (`span (wall clock)`). Monotonic times restart with each process, so in
+//! a directory written by two runs they say nothing about the whole log.
+//!
+//! [`inspect_command`] is the `--bus-inspect` command: it treats a closed
+//! pipe on the output (`| head`) as success.
+//!
 //! A [`Filter`] narrows the entity, event and signal sections to one entity
 //! and/or one signal name (exact match on the key or name as written in the
 //! log). The totals at the top always cover the whole log. A signal filter
@@ -127,7 +134,6 @@ pub fn inspect(path: &Path, filter: &Filter, out: &mut impl Write) -> io::Result
     let mut total = 0u64;
     let (mut samples, mut sweeps, mut events_n, mut raws, mut gaps) =
         (0u64, 0u64, 0u64, 0u64, 0u64);
-    let mut span: Option<(u64, u64)> = None;
     let mut wall: Option<(u64, u64)> = None;
     let mut seqs: Option<(u64, u64)> = None;
     let mut entities: BTreeMap<EntityKey, u64> = BTreeMap::new();
@@ -141,7 +147,6 @@ pub fn inspect(path: &Path, filter: &Filter, out: &mut impl Write) -> io::Result
         let widen = |r: &mut Option<(u64, u64)>, x: u64| {
             *r = Some(r.map_or((x, x), |(lo, hi)| (lo.min(x), hi.max(x))));
         };
-        widen(&mut span, rec.t_mono_ns);
         widen(&mut wall, rec.t_wall_ms);
         widen(&mut seqs, rec.seq);
         match &rec.payload {
@@ -242,13 +247,11 @@ pub fn inspect(path: &Path, filter: &Filter, out: &mut impl Write) -> io::Result
         out,
         "by kind: sample {samples}, sweep {sweeps}, event {events_n}, raw {raws}, gap {gaps}"
     )?;
-    if let (Some((lo, hi)), Some((wlo, whi)), Some((slo, shi))) = (span, wall, seqs) {
+    if let (Some((wlo, whi)), Some((slo, shi))) = (wall, seqs) {
         writeln!(
             out,
-            "time span: {} (monotonic {} to {}), wall clock {wlo} to {whi} ms since the epoch, sequence {slo} to {shi}",
-            secs(hi - lo),
-            secs(lo),
-            secs(hi)
+            "span (wall clock): {}, {wlo} to {whi} ms since the epoch, sequence {slo} to {shi}",
+            secs((whi - wlo).saturating_mul(1_000_000))
         )?;
     }
     if filter.entity.is_some() || filter.signal.is_some() {
@@ -297,6 +300,58 @@ pub fn inspect(path: &Path, filter: &Filter, out: &mut impl Write) -> io::Result
         writeln!(out, "  {e} {s}: {} samples, {range}, last {last}", st.count)?;
     }
     Ok(())
+}
+
+/// A writer that remembers whether a write to it failed, so an error from
+/// the output can be told apart from an error reading the log.
+struct Watched<'a, W: Write> {
+    inner: &'a mut W,
+    failed: bool,
+}
+
+impl<W: Write> Write for Watched<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf).inspect_err(|_| self.failed = true)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush().inspect_err(|_| self.failed = true)
+    }
+}
+
+/// The `--bus-inspect` command: write the summary of the log at `path` to
+/// `out`, flush it, and return the process exit status.
+///
+/// * 0 when the summary was written, and also when `out` reports a broken
+///   pipe (the reader went away, as with `| head`): the output was wanted
+///   only up to that point.
+/// * 1 when the log cannot be read (`bus-inspect: cannot read <path>: ...`)
+///   or the output fails another way (`bus-inspect: cannot write the
+///   summary: ...`). The message goes to `err`, and a failure to write it
+///   there is ignored (with `2>&1 | head` the same closed pipe would
+///   otherwise end the process in a panic).
+pub fn inspect_command(
+    path: &Path,
+    filter: &Filter,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> i32 {
+    let mut w = Watched {
+        inner: out,
+        failed: false,
+    };
+    let result = inspect(path, filter, &mut w).and_then(|()| w.flush());
+    match result {
+        Ok(()) => 0,
+        Err(e) if w.failed && e.kind() == io::ErrorKind::BrokenPipe => 0,
+        Err(e) if w.failed => {
+            let _ = writeln!(err, "bus-inspect: cannot write the summary: {e}");
+            1
+        }
+        Err(e) => {
+            let _ = writeln!(err, "bus-inspect: cannot read {}: {e}", path.display());
+            1
+        }
+    }
 }
 
 #[cfg(test)]
@@ -353,7 +408,7 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("event 6"), "{text}");
-        assert!(text.contains("time span: 20.000s"), "{text}");
+        assert!(text.contains("span (wall clock): 20.000s"), "{text}");
         assert!(
             text.contains("model:llama-8b model.progress: 13 samples, min 0 max 1, last 1"),
             "{text}"
@@ -441,5 +496,125 @@ mod tests {
     #[test]
     fn an_intact_log_says_zero_holes() {
         assert!(run(&Filter::default()).contains("holes: 0 holes"));
+    }
+
+    // ---- Final fix wave (M2, M3) -----------------------------------------
+
+    /// A log written by two runs: the monotonic clock restarts with the
+    /// second process. The span is the wall-clock one, 4.656 s, where the
+    /// monotonic times would give 2.511 s.
+    #[test]
+    fn the_span_is_the_wall_clock_span_across_two_runs() {
+        let dir = crate::testutil::TempDir::new("inspect-span");
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let p = dir.path().join("two-runs.jsonl");
+        let mut text = String::from("{\"schema\":1,\"kind\":\"Live\",\"tool_versions\":{}}\n");
+        let w0 = 1_790_000_000_000u64;
+        // (seq, monotonic ns, wall ms)
+        for (q, m, w) in [
+            (1u64, 0u64, w0),
+            (2, 2_145_000_000, w0 + 2_145),
+            (3, 0, w0 + 2_145),
+            (4, 2_511_000_000, w0 + 4_656),
+        ] {
+            text.push_str(&format!(
+                "{{\"q\":{q},\"m\":{m},\"w\":{w},\"s\":\"t\",\"p\":{{\"k\":\"gap\",\"why\":\"x\"}}}}\n"
+            ));
+        }
+        std::fs::write(&p, text).unwrap();
+        let mut out = Vec::new();
+        inspect(&p, &Filter::default(), &mut out).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.contains("records: 4 "), "{text}");
+        assert!(text.contains("span (wall clock): 4.656s"), "{text}");
+        assert!(!text.contains("2.511"), "{text}");
+    }
+
+    /// A writer that fails every write with `kind`.
+    struct Failing(io::ErrorKind);
+
+    impl Write for Failing {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(self.0))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::from(self.0))
+        }
+    }
+
+    /// `| head` closes the pipe: exit 0, nothing on stderr. With `2>&1 |
+    /// head` stderr is the same closed pipe: still exit 0, no panic.
+    #[test]
+    fn a_broken_pipe_on_the_output_is_success() {
+        let mut err = Vec::new();
+        let code = inspect_command(
+            Path::new(FIXTURE),
+            &Filter::default(),
+            &mut Failing(io::ErrorKind::BrokenPipe),
+            &mut err,
+        );
+        assert_eq!(code, 0);
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+        let code = inspect_command(
+            Path::new(FIXTURE),
+            &Filter::default(),
+            &mut Failing(io::ErrorKind::BrokenPipe),
+            &mut Failing(io::ErrorKind::BrokenPipe),
+        );
+        assert_eq!(code, 0);
+    }
+
+    /// Other output errors and an unreadable log exit 1 with a message that
+    /// says which, and a failing stderr does not panic.
+    #[test]
+    fn other_errors_exit_one_with_the_right_message() {
+        let mut err = Vec::new();
+        let code = inspect_command(
+            Path::new(FIXTURE),
+            &Filter::default(),
+            &mut Failing(io::ErrorKind::StorageFull),
+            &mut err,
+        );
+        assert_eq!(code, 1);
+        let msg = String::from_utf8(err).unwrap();
+        assert!(
+            msg.starts_with("bus-inspect: cannot write the summary"),
+            "{msg}"
+        );
+
+        let mut err = Vec::new();
+        let code = inspect_command(
+            Path::new("/nonexistent/tt-toplike-bus-log"),
+            &Filter::default(),
+            &mut Vec::new(),
+            &mut err,
+        );
+        assert_eq!(code, 1);
+        let msg = String::from_utf8(err).unwrap();
+        assert!(
+            msg.starts_with("bus-inspect: cannot read /nonexistent"),
+            "{msg}"
+        );
+        let code = inspect_command(
+            Path::new("/nonexistent/tt-toplike-bus-log"),
+            &Filter::default(),
+            &mut Vec::new(),
+            &mut Failing(io::ErrorKind::BrokenPipe),
+        );
+        assert_eq!(code, 1);
+    }
+
+    /// The command's success path writes the same summary as `inspect`.
+    #[test]
+    fn the_command_writes_the_summary() {
+        let mut out = Vec::new();
+        let code = inspect_command(
+            Path::new(FIXTURE),
+            &Filter::default(),
+            &mut out,
+            &mut Vec::new(),
+        );
+        assert_eq!(code, 0);
+        assert_eq!(String::from_utf8(out).unwrap(), run(&Filter::default()));
     }
 }

@@ -1344,3 +1344,23 @@ fn remote_world_prunes_a_quiet_process_without_a_resnapshot() {
         "the chip stays"
     );
 }
+
+/// Final fix wave M1: `check_path` refuses a path too long for a socket
+/// address without creating its directory or lock, and `spawn` refuses it
+/// the same way.
+#[test]
+fn a_too_long_path_is_refused_before_anything_is_created() {
+    let d = TempDir::new("long");
+    let dir = d.path().join("x".repeat(110));
+    let path = dir.join("s");
+    let err = SocketServer::check_path(&path).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+    let err = SocketServer::spawn(world_bus(), &path).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+    assert!(!dir.exists(), "the socket directory was created");
+    // A short path under a missing directory passes the check and creates
+    // nothing.
+    let ok = d.path().join("new").join("s");
+    SocketServer::check_path(&ok).unwrap();
+    assert!(!d.path().join("new").exists());
+}

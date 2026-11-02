@@ -366,6 +366,7 @@ impl SocketServer {
     /// both find it stale, and the slower one would delete the faster one's
     /// new socket. The lock file is left in place when the server stops.
     pub fn spawn_with(bus: Bus, path: &Path, opts: ServerOptions) -> io::Result<SocketServer> {
+        SocketServer::check_path(path)?;
         prepare_dir(path)?;
         let lock = lock_path(path)?;
         clear_stale(path)?;
@@ -391,6 +392,76 @@ impl SocketServer {
             ident: (meta.dev(), meta.ino()),
             _lock: lock,
         })
+    }
+
+    /// Check that a server could be started at `path`, without creating
+    /// anything: no directory, no lock file, no socket. A caller that opens
+    /// other resources first (a log directory and its lock) calls this
+    /// before them, so a refused path leaves nothing behind.
+    ///
+    /// Refuses, with the same kinds [`SocketServer::spawn_with`] uses:
+    ///
+    /// * a path too long for a Unix socket address (`InvalidInput`): it must
+    ///   be shorter than [`MAX_SOCKET_PATH`] bytes;
+    /// * a parent directory that exists and is not a directory, is not
+    ///   owned by this user, or is writable by group or others
+    ///   (`PermissionDenied`); a missing parent is accepted when its nearest
+    ///   existing ancestor is a directory (`spawn_with` creates it 0700);
+    /// * a path that is a symlink (`InvalidInput`) or exists and is not a
+    ///   socket (`AlreadyExists`).
+    ///
+    /// A server already listening at the path, or holding its lock, is
+    /// found only by `spawn_with`.
+    pub fn check_path(path: &Path) -> io::Result<()> {
+        let len = path.as_os_str().len();
+        if len >= MAX_SOCKET_PATH {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "the socket path {} is {len} bytes; a Unix socket path must be shorter than {MAX_SOCKET_PATH}",
+                    path.display()
+                ),
+            ));
+        }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        match fs::metadata(parent) {
+            Ok(_) => check_private(parent)?,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let mut up = parent.parent();
+                while let Some(a) = up.filter(|a| !a.as_os_str().is_empty()) {
+                    match fs::metadata(a) {
+                        Ok(m) if m.is_dir() => break,
+                        Ok(_) => return Err(io::Error::new(
+                            io::ErrorKind::PermissionDenied,
+                            format!(
+                                "the socket directory {} cannot be created: {} is not a directory",
+                                parent.display(),
+                                a.display()
+                            ),
+                        )),
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => up = a.parent(),
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+            Err(e) => return Err(e),
+        }
+        match fs::symlink_metadata(path) {
+            Ok(m) if m.file_type().is_symlink() => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is a symlink", path.display()),
+            )),
+            Ok(m) if !m.file_type().is_socket() => Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} exists and is not a socket", path.display()),
+            )),
+            Ok(_) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// The socket path.
@@ -449,8 +520,22 @@ fn prepare_dir(path: &Path) -> io::Result<()> {
             .create(parent)?;
         fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
     }
-    // Nobody else may create, swap or rename entries here, so the socket
-    // cannot be replaced between `bind` and the chmod after it.
+    check_private(parent)
+}
+
+/// Longest socket path, in bytes, plus one: `sun_path` holds the path and a
+/// NUL (108 bytes on Linux, 104 on macOS and the BSDs).
+#[cfg(target_os = "linux")]
+pub const MAX_SOCKET_PATH: usize = 108;
+/// Longest socket path, in bytes, plus one: `sun_path` holds the path and a
+/// NUL (108 bytes on Linux, 104 on macOS and the BSDs).
+#[cfg(not(target_os = "linux"))]
+pub const MAX_SOCKET_PATH: usize = 104;
+
+/// Refuse a socket directory that others could write. Nobody else may
+/// create, swap or rename entries there, so the socket cannot be replaced
+/// between `bind` and the chmod after it.
+fn check_private(parent: &Path) -> io::Result<()> {
     let dir = fs::metadata(parent)?;
     // SAFETY: `geteuid` takes no arguments, cannot fail and touches no memory.
     let me = unsafe { libc::geteuid() };
