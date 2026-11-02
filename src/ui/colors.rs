@@ -556,6 +556,24 @@ mod tests {
         assert!(r == g && g == b, "near-grey stays grey, got {r},{g},{b}");
     }
 
+    /// `with_theme` sets the theme for the call, a nested call sets its own
+    /// without waiting on the lock it already holds, and each puts the
+    /// previous theme back.
+    #[test]
+    fn with_theme_sets_and_restores_the_theme() {
+        with_theme(Theme::Default, || {
+            with_theme(Theme::Grayskull, || {
+                assert_eq!(current_theme(), Theme::Grayskull);
+                with_theme(Theme::Default, || {
+                    assert!(theme_is_pinned_to_default());
+                });
+                assert_eq!(current_theme(), Theme::Grayskull);
+            });
+            assert_eq!(current_theme(), Theme::Default);
+        });
+        assert!(!theme_is_pinned_to_default(), "the lock is let go");
+    }
+
     #[test]
     fn theme_state_roundtrips() {
         // Under the theme lock: the arcade's colour tests hash frames
