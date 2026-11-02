@@ -2303,13 +2303,16 @@ mod tests {
             Box::new(NoReducer),
             locker,
         );
-        chmod(dir.path(), 0o700);
         let bus = opened.unwrap();
         let table = |b: &Bus| -> Vec<u64> {
             let t = lock(&b.inner.disk.as_ref().unwrap().table);
             t.closed.iter().map(|g| g.first_seq).collect()
         };
+        // Checked while the directory is still unreadable. Once it is
+        // readable again the writer thread may take the lock and refresh
+        // the table at any moment, so checking after the chmod raced it.
         assert!(table(&bus).is_empty());
+        chmod(dir.path(), 0o700);
         // The open published its outage Gap, and the writer may have tried
         // it while the directory was still unreadable: go past the retry
         // window.
