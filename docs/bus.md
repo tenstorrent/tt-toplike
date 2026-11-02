@@ -789,6 +789,54 @@ seen across a gap (the first read, or a return from another view) evict nothing.
 `model.kernel_count` is not used. With an empty world Defrag draws the frames it drew before
 the bus; a test pins them.
 
+### The Starfield on the bus
+
+The Starfield (view `starfield`) reads the bus once per update, before it reads the telemetry, through
+`StarfieldFx::from_world` (`src/animation/starfield_bus.rs`). Each device has an equal share of
+the width, as the stars are laid out, and the field draws only on the TUI's own chips. It
+draws:
+
+| What | Signal | Measured, derived or decoration |
+|---|---|---|
+| The chip's stars turn to purple `●` from the grid's centre out to a radius equal to the progress, while a model compiles or loads | `model_on_chip`, the model's phase and `model.progress` | the radius is derived from the reported progress |
+| A purple ring sweeping out from the centre when the model has no progress figure | the phase | decoration: it says the model is busy and does not say how far |
+| The chip's stars tinted teal on a change to `Ready`, grey on a change to `Down`, fading over 2 s | the phase, against the phase last seen | the change is read; the fade is decoration |
+| The model's name, phase, progress and tokens/s on the top row of the chip's share, `~` first for an estimate | the model's readings | as reported; `~` through `model_text_is_estimated` |
+| A teal comet from the chip's share across the field, one tail cell per request up to eight | `RequestsCompleted` for a model on one of the TUI's chips | the count is read; the row, speed and fade are decoration |
+| Faster twinkle of the chip's stars and faster orbits of its planets | `model.tokens_per_s` of the ready model on the chip, at most 10 s old, smoothed over 2 s | the rate is measured; how much it speeds them is decoration |
+| A red `✸` flare on the chip's DDR planet for the channel, for 0.6 s | a rise of the summed ECC counters of `dram:<chip>/<n>`, or `EccTick` | the rise is read; the flare's shape is decoration |
+| One of the chip's stars twinkles `✦` in the `spark_rgb` colours (purple for a compile) | `Spark` and `KernelCompiled` naming the chip | the event is read; which star is decoration |
+| The chip's stars turn white and fade back over 0.6 s | a new `reset_seq` for the chip | the reset is read |
+
+The fleet galaxy view (32 or more devices) has no per-chip stars and draws nothing from the bus.
+The arcade embeds the same starfield and never hands it a world, so the arcade's starfield band
+is unchanged.
+
+### MemoryFlow on the bus
+
+MemoryFlow (view `flow`) reads the bus once per update through `MemoryFlowFx::from_world`
+(`src/animation/memory_flow_bus.rs`). Its DDR bars are one segment per channel of the first
+device, as before. It draws:
+
+| What | Signal | Measured, derived or decoration |
+|---|---|---|
+| A DDR segment's state (idle, trained, error) | `toplike.dram.harvested`, `enabled`, `training_pass`, `bist_pass` of `dram:<chip>/<n>` of the first device; a channel with none of them keeps the SMBUS state | measured |
+| A DDR segment tinted toward red as the channel gets hotter (40 to 90 C) | `toplike.dram.temp_top_c`, `temp_bottom_c` | the temperature is measured; how strongly it tints is decoration |
+| `▸` filling each DDR IN segment from its left edge as far as the progress, while a model loads | the first loading model on one of the TUI's chips, its `model.progress` | derived from the reported progress |
+| A short run of `▸` travelling along each DDR IN segment when the loading model has no progress figure | the phase | decoration |
+| Both lanes brighten toward teal, fading over 1 s | `RequestsCompleted` for a model on one of the TUI's chips | the count sets the strength (Die 3D's pulse strength); the fade is decoration |
+| A channel's segments shown reversed in red for 0.6 s | a rise of the summed ECC counters of `dram:<chip>/<n>` of any of the TUI's chips, or `EccTick` | the rise is read |
+| The model row (the blank line under DDR IN): each chip's model, phase, progress and tokens/s, right-aligned in its share, with a `▸` gauge while it compiles or loads and a teal or grey rule fading after `Ready` or `Down` | the model's readings and phase | as reported; `~` through `model_text_is_estimated`; the travelling band shown with no figure is decoration |
+| The chip's share of the model row shown reversed for 0.6 s | a new `reset_seq` | the reset is read |
+| A `✦` in the chip's share of the core grid, in the `spark_rgb` colours | `Spark` and `KernelCompiled` naming the chip | the event is read; where it lands is decoration |
+
+For both modes, events already in the world when the mode first reads it, and events that
+arrived while it was off screen, draw nothing. An ECC count or `reset_seq` seen for the first
+time is recorded and draws nothing. The rule and its constants are Die 3D's, shared through
+`src/animation/bus_intake.rs`. Attached to a headless host, only the TUI's own chips are drawn.
+With an empty world both modes draw the frames they drew before the bus; tests pin them by
+hash.
+
 ### The `~` view (HivemindSweeper)
 
 The `~` view reads the bus the way Die 3D does (`TuiBus::read`, limited to local chips when
