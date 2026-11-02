@@ -182,7 +182,7 @@ const SCENE_TIME_WRAP_S: f64 = 86_400.0;
 /// when the four pixel one does not fit, and clipped around its middle when
 /// even that does not (see `scene::fit_last_resort`). A window smaller than
 /// this shows too little of a clipped scene to be worth drawing.
-const SCENE_MIN_CELLS: (usize, usize) = (16, 6);
+pub const SCENE_MIN_CELLS: (usize, usize) = (16, 6);
 
 /// Smallest view (columns, rows) in which an automatic cell mode uses half
 /// blocks: the size where the whole scene of one board fits in them.

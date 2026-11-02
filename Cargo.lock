@@ -5563,6 +5563,7 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "toml",
+ "toml_edit 0.22.27",
  "tt-toplike-bus",
  "unicode-width 0.1.14",
  "vte",

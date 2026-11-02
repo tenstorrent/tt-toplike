@@ -134,6 +134,9 @@ rand = "0.9"  # For particle effects
 
 # Configuration
 toml = "0.8"
+# Spans for config errors: file and line for each problem `--check-config`
+# reports (the same parser `toml` uses, already in the lock file).
+toml_edit = { version = "0.22", default-features = false, features = ["parse"] }
 
 # Platform config/data directories (used by AnimConfig to locate ~/.config/tt-toplike/config.toml)
 dirs = "6"
