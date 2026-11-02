@@ -80,6 +80,7 @@
 // Public modules - these are the stable API
 pub mod animation;
 pub mod backend;
+pub mod bus;
 pub mod error;
 pub mod logging;
 pub mod models;
