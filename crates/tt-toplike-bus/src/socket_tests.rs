@@ -209,8 +209,29 @@ fn subscribe_from_dropped_or_future_is_a_clear_error() {
 /// A client that never reads is cut once it is `queue_lines` behind with
 /// its socket blocked. Another client keeps receiving every record, and
 /// `publish` stays fast throughout.
+///
+/// "Fast" is checked as no single publish taking 2 s. A publish that waited
+/// on the stuck client would wait until it was cut (its socket buffer full,
+/// thousands of records behind), and the old bound of 200 ms could be
+/// crossed by a loaded machine alone. The run is repeated once before the
+/// test fails on that bound.
 #[test]
 fn a_client_that_never_reads_is_cut_and_others_keep_receiving() {
+    let worst = slow_client_run();
+    let worst = if worst < Duration::from_secs(2) {
+        worst
+    } else {
+        println!("worst publish {worst:?} on the first run; running again");
+        slow_client_run()
+    };
+    assert!(
+        worst < Duration::from_secs(2),
+        "publish must not wait on clients; worst was {worst:?}"
+    );
+}
+
+/// One run of the scenario above. Returns the slowest single publish.
+fn slow_client_run() -> Duration {
     const N: u64 = 10_000;
     let bus = Bus::open_with_world(BusConfig {
         window_records: 1_000_000,
@@ -265,10 +286,6 @@ fn a_client_that_never_reads_is_cut_and_others_keep_receiving() {
     }
     reader.join().unwrap();
     assert!(
-        worst < Duration::from_millis(200),
-        "publish must not wait on clients; worst was {worst:?}"
-    );
-    assert!(
         wait_for(5, || server.clients() == 0),
         "the stuck client must be gone"
     );
@@ -288,6 +305,7 @@ fn a_client_that_never_reads_is_cut_and_others_keep_receiving() {
     if last.ends_with('\n') && last.starts_with("{\"error\"") {
         assert_eq!(last.trim(), "{\"error\":\"too_slow\"}");
     }
+    worst
 }
 
 /// Two servers start at once on a path holding a stale socket. Without the

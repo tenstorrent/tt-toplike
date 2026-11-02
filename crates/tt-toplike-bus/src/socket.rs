@@ -434,14 +434,14 @@ impl SocketServer {
                 while let Some(a) = up.filter(|a| !a.as_os_str().is_empty()) {
                     match fs::metadata(a) {
                         Ok(m) if m.is_dir() => break,
-                        Ok(_) => return Err(io::Error::new(
-                            io::ErrorKind::PermissionDenied,
-                            format!(
+                        Ok(_) => {
+                            let why = format!(
                                 "the socket directory {} cannot be created: {} is not a directory",
                                 parent.display(),
                                 a.display()
-                            ),
-                        )),
+                            );
+                            return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
+                        }
                         Err(e) if e.kind() == io::ErrorKind::NotFound => up = a.parent(),
                         Err(e) => return Err(e),
                     }

@@ -1877,25 +1877,41 @@ mod tests {
 
     /// True when the current user can write into a 0500 directory (root).
     #[cfg(unix)]
-    fn permissions_are_ignored(dir: &Path) -> bool {
-        let probe = dir.join("probe");
-        let ok = fs::write(&probe, b"x").is_ok();
-        let _ = fs::remove_file(&probe);
-        ok
+    /// Put a plain file where the directory `dir` was, keeping the
+    /// directory at `<dir>.away`. Creating anything under `dir` then fails
+    /// with "not a directory" for every user, root included, so the tests
+    /// below need no permission bits (which root ignores) to make the disk
+    /// fail.
+    fn break_dir(dir: &Path) {
+        fs::rename(dir, away(dir)).unwrap();
+        fs::write(dir, b"not a directory").unwrap();
     }
 
-    #[cfg(unix)]
+    /// Undo [`break_dir`].
+    fn mend_dir(dir: &Path) {
+        fs::remove_file(dir).unwrap();
+        fs::rename(away(dir), dir).unwrap();
+    }
+
+    fn away(dir: &Path) -> PathBuf {
+        let mut s = dir.as_os_str().to_os_string();
+        s.push(".away");
+        PathBuf::from(s)
+    }
+
+    /// A log path that cannot be used as a directory (a plain file is in
+    /// the way): the bus opens with the disk off, keeps serving reads from
+    /// memory and publishes one gap for the outage. (This used a 0500
+    /// directory before, which root can write; a file in the way fails for
+    /// every user.)
     #[test]
-    fn read_only_dir_keeps_live_reads_and_publishes_one_gap() {
+    fn an_unusable_dir_keeps_live_reads_and_publishes_one_gap() {
         let dir = TempDir::new("ro");
         fs::create_dir_all(dir.path()).unwrap();
-        chmod(dir.path(), 0o500);
-        if permissions_are_ignored(dir.path()) {
-            eprintln!("skipped: running with permission checks off (root)");
-            return;
-        }
+        let log = dir.path().join("log");
+        fs::write(&log, b"not a directory").unwrap();
         let clock = ManualClock::new(T0);
-        let bus = Bus::open(disk_cfg(dir.path(), &clock)).expect("open is Ok with disk off");
+        let bus = Bus::open(disk_cfg(&log, &clock)).expect("open is Ok with disk off");
         assert!(!bus.stats().disk_on);
         for i in 0..10 {
             bus.publish("t", sample(i));
@@ -1919,25 +1935,25 @@ mod tests {
         );
     }
 
+    /// The directory goes away mid-run (a file takes its place), comes
+    /// back, and goes away again: one gap per outage, and writing resumes
+    /// in between. Runs the same as root.
     #[cfg(unix)]
     #[test]
     fn disk_failure_mid_run_publishes_one_gap_per_outage() {
-        let dir = TempDir::new("midrun");
+        let root = TempDir::new("midrun");
+        let dir = root.path().join("log");
         let clock = ManualClock::new(T0);
         let bus = Bus::open(BusConfig {
             segment_secs: 10,
-            ..disk_cfg(dir.path(), &clock)
+            ..disk_cfg(&dir, &clock)
         })
         .unwrap();
         for i in 0..3 {
             bus.publish("t", sample(i));
         }
         flush(&bus);
-        chmod(dir.path(), 0o500);
-        if permissions_are_ignored(dir.path()) {
-            eprintln!("skipped: running with permission checks off (root)");
-            return;
-        }
+        break_dir(&dir);
         // Rotation needs a new file, which now fails.
         clock.advance_secs(10);
         bus.publish("t", sample(3));
@@ -1950,14 +1966,14 @@ mod tests {
         assert_eq!(gaps(&bus.read_from(1, 100).unwrap()), 1);
 
         // The disk comes back; the next retry succeeds.
-        chmod(dir.path(), 0o700);
+        mend_dir(&dir);
         clock.advance_secs(11);
         bus.publish("t", sample(0));
         flush(&bus);
         assert!(bus.stats().disk_on);
 
         // A second outage gets a second gap.
-        chmod(dir.path(), 0o500);
+        break_dir(&dir);
         clock.advance_secs(10);
         bus.publish("t", sample(1));
         flush(&bus);
@@ -1975,6 +1991,7 @@ mod tests {
             })
             .unwrap();
         assert!(!g.is_empty());
+        mend_dir(&dir);
     }
 
     // ---- fix round 1 ----

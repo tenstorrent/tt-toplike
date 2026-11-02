@@ -145,6 +145,24 @@ fn frame_at(fake: &Fake, f: &BusFixture, update_ns: u64, render_ns: u64) -> Vec<
     v.render(Some(&f.view(render_ns)), 0.0)
 }
 
+/// Each row of a frame as (character, style) cells, spans expanded.
+fn cells(lines: &[Line<'static>]) -> Vec<Vec<(char, ratatui::style::Style)>> {
+    lines
+        .iter()
+        .map(|l| {
+            l.spans
+                .iter()
+                .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
+                .collect()
+        })
+        .collect()
+}
+
+/// Loading at 0.75 fills more of the die than at 0.25. The flag prints the
+/// percentage, so the flag's row (the one showing `25%` or `75%`) is left
+/// out, and the cells that differ from the frame without a world (colour or
+/// glyph) are counted on every other row. The label, phase and phase timing
+/// are the same in both; only the progress differs.
 #[test]
 fn loading_fills_the_die_and_more_progress_fills_more() {
     let fake = two_dies();
@@ -157,9 +175,35 @@ fn loading_fills_the_die_and_more_progress_fills_more() {
         let v = view_with(&fake, 150, 42, false, None);
         v.render(None, 0.0)
     };
-    let (half, full) = (at(0.5), at(1.0));
-    assert_ne!(half, none);
-    assert_ne!(half, full);
+    let (low, high, none) = (cells(&at(0.25)), cells(&at(0.75)), cells(&none));
+    let text_of = |row: &Vec<(char, ratatui::style::Style)>| -> String {
+        row.iter().map(|(c, _)| *c).collect()
+    };
+    // The flag's row: it shows the percentage.
+    let flag_rows: Vec<usize> = (0..low.len())
+        .filter(|&r| text_of(&low[r]).contains("25%") || text_of(&high[r]).contains("75%"))
+        .collect();
+    assert_eq!(
+        flag_rows.len(),
+        1,
+        "the flag shows the progress on one row: {flag_rows:?}"
+    );
+    let filled = |frame: &Vec<Vec<(char, ratatui::style::Style)>>| -> usize {
+        (0..frame.len())
+            .filter(|r| !flag_rows.contains(r))
+            .map(|r| {
+                frame[r]
+                    .iter()
+                    .zip(&none[r])
+                    .filter(|(a, b)| a != b)
+                    .count()
+            })
+            .sum()
+    };
+    let (lo, hi) = (filled(&low), filled(&high));
+    println!("filled cells: 0.25 -> {lo}, 0.75 -> {hi}");
+    assert!(lo > 0, "loading at 0.25 fills part of the die");
+    assert!(hi > lo, "0.75 fills more than 0.25: {hi} vs {lo}");
 }
 
 #[test]

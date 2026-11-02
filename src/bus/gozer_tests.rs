@@ -537,34 +537,65 @@ fn governor_failed_refresh_uses_cache_until_60s_then_denies() {
 #[test]
 fn governor_does_not_hold_the_cache_lock_while_running_a_command() {
     // A runner that calls back into the governor's cache would deadlock if
-    // the lock were held. Here: a slow runner on one thread must not stop a
-    // second permit (served from cache or by its own attempt) from returning.
-    struct Slow(Arc<AtomicUsize>);
-    impl StatusRunner for Slow {
+    // the lock were held. Here: the first run blocks until the test lets it
+    // go, and a second permit (served from cache or by its own attempt) must
+    // return while that first run is still blocked. This checks the order
+    // of events with a flag, not a wall-clock bound: if the lock were held,
+    // the second permit could not return until the first run was released,
+    // which happens only after the wait below gives up.
+    struct Blocking {
+        calls: Arc<AtomicUsize>,
+        release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+        started: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+    }
+    impl StatusRunner for Blocking {
         fn run(&self, _a: &[&str], _t: Duration) -> Option<String> {
-            self.0.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(500));
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                let _ = self.started.lock().unwrap().send(());
+                let _ = self
+                    .release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(30));
+            }
             None
         }
     }
-    let n = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
     let g = Arc::new(GozerGovernor::new(
         Some("L1".into()),
         Some("0".into()),
-        Box::new(Slow(n.clone())),
+        Box::new(Blocking {
+            calls: calls.clone(),
+            release: std::sync::Mutex::new(release_rx),
+            started: std::sync::Mutex::new(started_tx),
+        }),
     ));
-    let g2 = g.clone();
     let t = Instant::now();
-    let h = std::thread::spawn(move || g2.permit_at(&EntityKey::chip(A), t));
-    std::thread::sleep(Duration::from_millis(100));
-    let t0 = Instant::now();
-    assert!(denied(&g.permit_at(&EntityKey::chip(A), t)));
+    let g1 = g.clone();
+    let first = std::thread::spawn(move || g1.permit_at(&EntityKey::chip(A), t));
+    started_rx
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the first run started");
+    // The first run is blocked inside the runner now.
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let g2 = g.clone();
+    let second = std::thread::spawn(move || {
+        let p = g2.permit_at(&EntityKey::chip(A), t);
+        let _ = done_tx.send(());
+        p
+    });
+    let returned = done_rx.recv_timeout(Duration::from_secs(10)).is_ok();
+    // Let the first run finish either way, so the threads end.
+    let _ = release_tx.send(());
     assert!(
-        t0.elapsed() < Duration::from_millis(300),
-        "{:?}",
-        t0.elapsed()
+        returned,
+        "the second permit waited for the first run: the lock is held while running"
     );
-    assert!(denied(&h.join().unwrap()));
+    assert!(denied(&second.join().unwrap()));
+    assert!(denied(&first.join().unwrap()));
 }
 
 // ---- fix round 1 ----
