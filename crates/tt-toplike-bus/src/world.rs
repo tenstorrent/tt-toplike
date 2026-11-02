@@ -22,6 +22,7 @@ use crate::entity::{EntityKey, EntityKind};
 use crate::log::{Bus, Reducer};
 use crate::record::{Event, Payload, Provenance, RawFrame, Record, Value};
 use crate::signals;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io;
 
@@ -51,8 +52,9 @@ pub struct Reading {
     pub t_mono_ns: u64,
 }
 
-/// Where a model is in its life.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Where a model is in its life. Serialises in lowercase (`"ready"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ModelPhase {
     Down,
     Compiling,
@@ -74,8 +76,9 @@ impl ModelPhase {
     }
 }
 
-/// What a view shows about one model.
-#[derive(Debug, Clone, PartialEq)]
+/// What a view shows about one model. The socket snapshot carries it as is
+/// (see [`crate::summary`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelView {
     pub key: EntityKey,
     pub label: String,
@@ -314,6 +317,31 @@ impl World {
     pub fn latest_raw(&self, source: &str) -> Option<&RawFrame> {
         self.raw.get(source)
     }
+
+    /// Every entity the world has seen, of any kind, in key order.
+    pub fn all_entities(&self) -> impl Iterator<Item = &EntityKey> {
+        self.known.iter()
+    }
+
+    /// Every latest reading as `(entity, signal, reading)`, ordered by
+    /// entity key and then signal name.
+    pub fn readings(&self) -> impl Iterator<Item = (&EntityKey, &str, &Reading)> {
+        self.readings
+            .iter()
+            .flat_map(|(e, rs)| rs.iter().map(move |(s, r)| (e, s.as_str(), r)))
+    }
+
+    /// Every chip that has had a `Reset`, with the sequence number of its
+    /// latest one, in key order.
+    pub fn resets(&self) -> impl Iterator<Item = (&EntityKey, u64)> {
+        self.resets.iter().map(|(k, q)| (k, *q))
+    }
+
+    /// The newest raw frame of every source, keyed by the record's source
+    /// name, in name order.
+    pub fn raw_frames(&self) -> impl Iterator<Item = (&str, &RawFrame)> {
+        self.raw.iter().map(|(s, f)| (s.as_str(), f))
+    }
 }
 
 /// Kinds that come and go while the monitor runs.
@@ -345,7 +373,7 @@ fn as_u32(v: &Value) -> Option<u32> {
 }
 
 /// Copy one model signal into the view. Other signals are ignored.
-fn update_view(view: &mut ModelView, signal: &str, v: &Value) {
+pub(crate) fn update_view(view: &mut ModelView, signal: &str, v: &Value) {
     match signal {
         signals::MODEL_LABEL => {
             if let Value::Text(t) = v {

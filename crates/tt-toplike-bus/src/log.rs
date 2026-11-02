@@ -439,6 +439,17 @@ impl Bus {
         }
     }
 
+    /// The log directory, or `None` for a memory-only bus.
+    pub fn dir(&self) -> Option<&Path> {
+        self.inner.disk.as_deref().map(|d| d.dir.as_path())
+    }
+
+    /// The bus clock's monotonic time now, in nanoseconds: the scale every
+    /// record's `t_mono_ns` and every reading's age are on.
+    pub fn now_mono_ns(&self) -> u64 {
+        self.inner.clock.mono_ns()
+    }
+
     /// The newest assigned sequence number, 0 before the first publish.
     pub fn head(&self) -> u64 {
         lock(&self.inner.state).head

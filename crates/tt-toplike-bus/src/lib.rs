@@ -11,7 +11,12 @@
 //! * [`signals`] names the signals sources and the world agree on.
 //! * [`replay`] reads a recorded log back and republishes it.
 //! * [`segment`] reads and writes the segment files on disk.
+//! * [`summary`] defines [`WorldSummary`], the serialisable part of the world.
+//! * `socket` (Unix only) serves the bus on a Unix socket; `client` (Unix
+//!   only) reads it, and its `RemoteWorld` keeps a remote world current.
 
+#[cfg(unix)]
+pub mod client;
 pub mod config;
 pub mod entity;
 pub mod inspect;
@@ -20,10 +25,15 @@ pub mod record;
 pub mod replay;
 pub mod segment;
 pub mod signals;
+#[cfg(unix)]
+pub mod socket;
+pub mod summary;
 #[cfg(test)]
 mod testutil;
 pub mod world;
 
+#[cfg(unix)]
+pub use client::{ClientError, RemoteSubscription, RemoteView, RemoteWorld, SocketClient};
 pub use config::{BusConfig, Clock, ManualClock, SystemClock};
 pub use entity::{EntityKey, EntityKind};
 pub use log::{Bus, BusStats, ReadError, Reducer, Subscription};
@@ -32,4 +42,10 @@ pub use record::{
     Sweep, Value, SCHEMA_VERSION,
 };
 pub use replay::{Hole, HoleKind, ManualPlayClock, PlayClock, RealClock, Replay};
+#[cfg(unix)]
+pub use socket::{ServerOptions, SocketServer};
+pub use summary::{
+    EventSummary, RawSummary, ReadingSummary, RemoteSnapshot, ResetSummary, WorldSummary,
+    SUMMARY_EVENTS,
+};
 pub use world::{ModelPhase, ModelView, Reading, Snapshot, World};

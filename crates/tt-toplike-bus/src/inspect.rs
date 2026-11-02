@@ -74,7 +74,7 @@ impl Stat {
 }
 
 /// The entities an event names.
-fn event_entities(e: &Event) -> Vec<&EntityKey> {
+pub(crate) fn event_entities(e: &Event) -> Vec<&EntityKey> {
     match e {
         Event::ModelLoading { model, chips, .. } | Event::ModelReady { model, chips } => {
             std::iter::once(model).chain(chips).collect()
