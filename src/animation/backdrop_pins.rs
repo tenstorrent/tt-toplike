@@ -222,6 +222,8 @@ pub(crate) fn arcade_hashes_with(
     let mut out = Vec::new();
     for i in 1..=*HASHED_AT.last().unwrap() {
         a.set_services(rows(i));
+        // A fixed clock: one backdrop step (a quarter second) per update.
+        a.set_clock(i as f64 / 4.0);
         a.update(&backend);
         if HASHED_AT.contains(&i) {
             out.push(frame_hash(&a.render(&backend)));
@@ -283,7 +285,10 @@ fn every_view_that_draws_a_backdrop_draws_its_pinned_frames() {
     assert!(bad.is_empty(), "frames changed:\n{}", bad.join("\n"));
 }
 
-/// The frames at d6560a27, before the shared backdrop.
+/// The frames at d6560a27, before the shared backdrop, except the eight
+/// `arcade loading|serving cloudfield true` pins: those were taken again
+/// when the shared scene moved to the 4 Hz step clock with banded colours
+/// (with the old clock and no banding they match the d6560a27 frames).
 const PINS: &[(&str, [u64; 3])] = &[
     (
         "scene none 40x12",
@@ -672,33 +677,33 @@ const PINS: &[(&str, [u64; 3])] = &[
     (
         "arcade loading cloudfield true 40x12",
         [
-            6960756980018108034,
-            9963172242351696268,
-            13177072378536065850,
+            17600810937517185883,
+            5298132627360190466,
+            13522251953021424455,
         ],
     ),
     (
         "arcade loading cloudfield true 80x24",
         [
-            13687458272266961278,
-            2272844355502408463,
-            5139468353327996385,
+            6166752679609268426,
+            4548656637848181461,
+            17744006136028677657,
         ],
     ),
     (
         "arcade loading cloudfield true 120x40",
         [
-            2319266879340482874,
-            13129620313764950859,
-            7596440141141660204,
+            17485118963406918052,
+            10511013143972236741,
+            8543344910002935063,
         ],
     ),
     (
         "arcade loading cloudfield true 200x60",
         [
-            15581551254880896381,
-            15237981064356457953,
-            2700203072131376521,
+            3133112314097811679,
+            8672895268254122397,
+            13578347475956915347,
         ],
     ),
     (
@@ -736,33 +741,33 @@ const PINS: &[(&str, [u64; 3])] = &[
     (
         "arcade serving cloudfield true 40x12",
         [
-            457088931256313135,
-            4693865741704924061,
-            16007164415530909401,
+            5559341245018801355,
+            6558307764349356329,
+            8179624805102117375,
         ],
     ),
     (
         "arcade serving cloudfield true 80x24",
         [
-            9778635872105015607,
-            9020790417169388633,
-            13932195218536682183,
+            9977941912129369391,
+            5841659665422848906,
+            16178686722491176411,
         ],
     ),
     (
         "arcade serving cloudfield true 120x40",
         [
-            16186770185269660220,
-            12465635764874659268,
-            7117659199061754494,
+            11736144332369776670,
+            7192376284964381782,
+            10830265772596426576,
         ],
     ),
     (
         "arcade serving cloudfield true 200x60",
         [
-            17165495659616058954,
-            15962492213174421728,
-            12228937589131635281,
+            3514092556317983135,
+            18230619572327720344,
+            14500107786641651981,
         ],
     ),
 ];

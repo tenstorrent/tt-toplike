@@ -268,22 +268,33 @@ fn the_buffer_layer_fills_only_blank_cells() {
 
 // ---- Each kind is its painter --------------------------------------------
 
+/// The shared scene is the atmosphere, advanced at each step by the frames
+/// a quarter second holds at `SCENE_FPS`, with its colours banded, and
+/// composited as the Inference view does.
 #[test]
-fn the_scene_is_the_atmosphere_composited_as_the_inference_view_does() {
+fn the_scene_is_the_atmosphere_stepped_and_banded() {
     tc(|| {
+        let per_step = (SCENE_FPS / CLOCK_STEPS_PER_SEC).round() as usize;
         for (name, rows) in scene_rosters() {
             let mut a = crate::animation::atmosphere::Atmosphere::new();
             let mut b = Backdrop::new(SCENE);
-            for i in 1..=40 {
-                a.observe(&rows(i));
-                b.observe(&BackdropSignals {
-                    services: rows(i),
-                    ..Default::default()
-                });
+            for i in 0..40u64 {
+                // Four updates a step: only the first of each step moves it.
+                for sub in 0..4u64 {
+                    b.observe(&BackdropSignals {
+                        services: rows(i + 1),
+                        now_s: i as f64 / CLOCK_STEPS_PER_SEC + sub as f64 * 0.05,
+                        ..Default::default()
+                    });
+                }
+                let n = if i == 0 { 1 } else { per_step };
+                for _ in 0..n {
+                    a.observe(&rows(i + 1));
+                }
                 for (w, h) in [(40, 12), (120, 40)] {
                     let fg = foreground(w, h);
                     let want = if a.active() {
-                        composite(&a.render_backdrop(w, h), fg.clone(), w)
+                        composite(&band_colours(a.render_backdrop(w, h)), fg.clone(), w)
                     } else {
                         fg.clone()
                     };
@@ -295,6 +306,40 @@ fn the_scene_is_the_atmosphere_composited_as_the_inference_view_does() {
                 }
             }
         }
+    })
+}
+
+/// The scene changes at most four times a second and runs at the same
+/// speed whatever the view's frame rate (review S2 and M4).
+#[test]
+fn the_scene_steps_four_times_a_second_at_any_frame_rate() {
+    tc(|| {
+        let (_, rows) = scene_rosters()
+            .into_iter()
+            .find(|(n, _)| *n == "aurora")
+            .unwrap();
+        let run = |fps: u32| {
+            let mut b = Backdrop::new(SCENE);
+            let mut changes = 0;
+            let mut last: Option<u64> = None;
+            for i in 0..fps * 3 {
+                b.observe(&BackdropSignals {
+                    services: rows(i as u64),
+                    now_s: i as f64 / fps as f64,
+                    ..Default::default()
+                });
+                let h = frame_hash(&b.layer(foreground(80, 24), 80, 24));
+                if last.is_some_and(|l| l != h) {
+                    changes += 1;
+                }
+                last = Some(h);
+            }
+            (changes, b.atmosphere.frame())
+        };
+        let (c10, f10) = run(10);
+        let (c60, f60) = run(60);
+        assert!(c10 <= 12 && c60 <= 12, "{c10} {c60} changes in 3 s");
+        assert_eq!(f10, f60, "the same atmosphere frame after 3 s");
     })
 }
 

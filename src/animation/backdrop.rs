@@ -27,14 +27,17 @@
 //! rate, and [`Backdrop::observe`] keeps the little each kind needs; drawing
 //! is arithmetic over that state.
 //!
-//! Terminal traffic. The sky and the clouds move on the clouds' step clock
-//! (4 steps a second, `die3d::clouds::CloudClock`), so between steps they
-//! change no cell at all. The clouds also keep their three flat density bands
-//! and their brightness hysteresis, and the sky's aurora is coloured in flat
-//! bands too (the Training view's own sky is not). The scene keeps the atmosphere's own
-//! clock (one frame per update), because its comets, rain and flares are the
-//! signals themselves; stepping them four times a second would hide the
-//! request rate it shows.
+//! Terminal traffic. Every kind moves on the clouds' step clock (4 steps a
+//! second, `die3d::clouds::CloudClock`), so between steps it changes no cell
+//! at all, and its canvas is drawn once per step and size and lent between
+//! steps. The scene takes, at each step, the atmosphere frames a quarter
+//! second holds at [`SCENE_FPS`], so its comets, rain and flares move at the
+//! same speed whatever the view's frame rate; a request that finishes
+//! between steps still flares at the next one. The clouds also keep their
+//! three flat density bands and their brightness hysteresis, and the sky's
+//! aurora is coloured in flat bands too (the Training view's own sky is
+//! not). The Inference view's own scene is a separate `Atmosphere` on its
+//! own per-update clock, unchanged.
 //!
 //! Which view uses which kind is a setting ([`BackdropConfig`],
 //! [`BackdropSettings`]): by default the Inference view draws the scene, the
@@ -438,10 +441,7 @@ impl BackdropSignals {
         }
         // So does a service the `i` view marks as one: an attached host's
         // estimated model (`~` before its label) or a mock service.
-        estimated |= services.iter().any(|s| {
-            s.label.starts_with('~')
-                || crate::workload::inference_server::mock::is_mock_label(&s.label)
-        });
+        estimated |= services_are_estimated(&services);
         BackdropSignals {
             now_s,
             services,
@@ -451,6 +451,15 @@ impl BackdropSignals {
             estimated,
         }
     }
+}
+
+/// Whether any service row is one the `i` view marks as an estimate: an
+/// attached host's estimated model (`~` before its label) or a mock
+/// service.
+pub fn services_are_estimated(services: &[ServiceState]) -> bool {
+    services.iter().any(|s| {
+        s.label.starts_with('~') || crate::workload::inference_server::mock::is_mock_label(&s.label)
+    })
 }
 
 // ---- The backdrop ---------------------------------------------------------
@@ -522,17 +531,73 @@ fn aurora_colour(lit: f32, hue: f32) -> Color {
     Color::Rgb(r, g, b)
 }
 
+/// The atmosphere frames a second the shared scene runs at: the animated
+/// views' rate, which the Inference view's own scene runs at.
+pub const SCENE_FPS: f64 = ANIM_FPS as f64;
+
+/// At most this many atmosphere frames are taken at one step, so a view
+/// that comes back after a long pause does not replay it.
+const SCENE_MAX_FRAMES_PER_OBSERVE: u32 = 60;
+
+/// The scene's state: the last step it took frames for.
+#[derive(Debug, Clone, Copy, Default)]
+struct SceneClock {
+    step: Option<i64>,
+}
+
+impl SceneClock {
+    /// How many atmosphere frames to take at view time `now`: none
+    /// between steps, one at the first observe, and at a step the frames the
+    /// steps since the last one hold at [`SCENE_FPS`]. A `now` before the
+    /// last step restarts the clock there.
+    fn frames_at(&mut self, now: f64) -> u32 {
+        let steps = now * CLOCK_STEPS_PER_SEC;
+        if !steps.is_finite() || steps.abs() >= i64::MAX as f64 / 2.0 {
+            return 0;
+        }
+        let step = steps.floor() as i64;
+        let n = match self.step {
+            None => 1,
+            Some(last) if step > last => {
+                let per_step = SCENE_FPS / CLOCK_STEPS_PER_SEC;
+                (((step - last) as f64 * per_step).round() as u32).min(SCENE_MAX_FRAMES_PER_OBSERVE)
+            }
+            Some(last) if step < last => 1,
+            Some(_) => 0,
+        };
+        self.step = Some(step);
+        n
+    }
+}
+
+/// The shared scene's canvas with each colour channel in flat steps of
+/// [`SCENE_COLOUR_STEP`], so a cell whose colour drifts a little between
+/// steps is not sent again. The glyphs are the atmosphere's.
+fn band_colours(mut canvas: Canvas) -> Canvas {
+    let q = |v: u8| (v / SCENE_COLOUR_STEP) * SCENE_COLOUR_STEP + SCENE_COLOUR_STEP / 2;
+    for cell in canvas.iter_mut().flatten().flatten() {
+        if let Color::Rgb(r, g, b) = cell.1 {
+            cell.1 = Color::Rgb(q(r), q(g), q(b));
+        }
+    }
+    canvas
+}
+
+/// The colour step of the shared scene, per channel.
+const SCENE_COLOUR_STEP: u8 = 24;
+
 /// The glyph of each cloud band, thin to thick.
 const CLOUD_GLYPHS: [char; 3] = ['░', '▒', '▓'];
 
-/// What a cached canvas was drawn from. The sky and the clouds change only
-/// on a step, so their canvas is drawn once per step and size.
+/// What a cached canvas was drawn from. Every kind changes only on a step,
+/// so its canvas is drawn once per step and size.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct CacheKey {
     kind: BackdropKind,
     w: usize,
     h: usize,
-    /// The sky frame, or the cloud offset and intensity, as bits.
+    /// The scene's atmosphere frame, the sky frame, or the cloud offset;
+    /// and the cloud intensity, as bits.
     a: u64,
     b: u32,
     theme: crate::ui::colors::Theme,
@@ -543,6 +608,7 @@ struct CacheKey {
 pub struct Backdrop {
     kind: Choice,
     atmosphere: Atmosphere,
+    scene_clock: SceneClock,
     clouds: Clouds,
     cloud_clock: CloudClock,
     sky: SkyClock,
@@ -556,6 +622,7 @@ impl Backdrop {
         Self {
             kind,
             atmosphere: Atmosphere::new(),
+            scene_clock: SceneClock::default(),
             clouds: Clouds::new(super::die3d::CLOUD_SEED),
             cloud_clock: CloudClock::default(),
             sky: SkyClock::default(),
@@ -603,7 +670,11 @@ impl Backdrop {
 
     /// Take in this update's signals. Every kind is fed, whichever is shown.
     pub fn observe(&mut self, s: &BackdropSignals) {
-        self.atmosphere.observe(&s.services);
+        // The scene moves only at a step; reading the same rows again adds
+        // no completion, so only the first frame of a step can flare.
+        for _ in 0..self.scene_clock.frames_at(s.now_s) {
+            self.atmosphere.observe(&s.services);
+        }
         self.cloud_clock.advance(
             s.now_s,
             Clouds::drift_px_per_s(s.pcie_bps),
@@ -620,21 +691,18 @@ impl Backdrop {
     }
 
     /// Run `f` on the backdrop for `w` by `h` cells; `None` when nothing is
-    /// drawn. The scene draws its canvas each time, as the Inference view
-    /// always has. The sky and the clouds draw theirs once per step and size
-    /// and lend the cached one, so a frame between steps allocates nothing.
+    /// drawn. Every kind draws its canvas once per step and size and lends
+    /// the cached one, so a frame between steps allocates nothing.
     fn with_canvas<R>(&self, w: usize, h: usize, f: impl FnOnce(&Canvas) -> R) -> Option<R> {
         let kind = self.kind.filter(|_| self.active())?;
-        if kind == BackdropKind::Scene {
-            return Some(f(&self.atmosphere.render_backdrop(w, h)));
-        }
         let key = CacheKey {
             kind,
             w,
             h,
             a: match kind {
+                BackdropKind::Scene => self.atmosphere.frame(),
                 BackdropKind::Sky => self.sky.frame(),
-                _ => self.cloud_clock.offset_px().to_bits(),
+                BackdropKind::Clouds => self.cloud_clock.offset_px().to_bits(),
             },
             b: self.cloud_clock.intensity().to_bits(),
             theme: crate::ui::colors::current_theme(),
@@ -642,8 +710,9 @@ impl Backdrop {
         let mut cache = self.cache.borrow_mut();
         if cache.as_ref().is_none_or(|(k, _)| *k != key) {
             let canvas = match kind {
+                BackdropKind::Scene => band_colours(self.atmosphere.render_backdrop(w, h)),
                 BackdropKind::Sky => self.sky_canvas(w, h),
-                _ => self.cloud_canvas(w, h, key.theme),
+                BackdropKind::Clouds => self.cloud_canvas(w, h, key.theme),
             };
             *cache = Some((key, canvas));
         }

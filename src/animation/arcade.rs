@@ -1120,6 +1120,8 @@ impl ArcadeVisualization {
         });
         signals.now_s = secs;
         signals.services = std::mem::take(&mut self.services);
+        // The rows arrive after `gather`, so their `~` is added here.
+        signals.estimated |= crate::animation::backdrop::services_are_estimated(&signals.services);
         self.backdrop.observe(&signals);
         self.services = std::mem::take(&mut signals.services);
         if let (Some(snake), Some(p)) = (self.snake.as_mut(), self.layout.find(View::Inference)) {
