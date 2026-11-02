@@ -11,6 +11,24 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// What sort of thing an [`EntityKey`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum EntityKind {
+    Chip,
+    Board,
+    Tile,
+    Model,
+    Process,
+    Lease,
+    Host,
+    DramChannel,
+    EthPort,
+    TrainingRun,
+    /// A key with a prefix this version does not know (for example one read
+    /// from a log written by a newer version).
+    Other,
+}
+
 /// Stable identity of an entity. Serialises as a bare JSON string.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -56,6 +74,22 @@ impl EntityKey {
     /// A training run, keyed by its run key.
     pub fn training_run(key: &str) -> Self {
         Self(format!("run:{key}"))
+    }
+    /// The kind, read from the key's prefix.
+    pub fn kind(&self) -> EntityKind {
+        match self.0.split_once(':').map(|(k, _)| k) {
+            Some("chip") => EntityKind::Chip,
+            Some("board") => EntityKind::Board,
+            Some("tile") => EntityKind::Tile,
+            Some("model") => EntityKind::Model,
+            Some("process") => EntityKind::Process,
+            Some("lease") => EntityKind::Lease,
+            Some("host") => EntityKind::Host,
+            Some("dram") => EntityKind::DramChannel,
+            Some("eth") => EntityKind::EthPort,
+            Some("run") => EntityKind::TrainingRun,
+            _ => EntityKind::Other,
+        }
     }
     /// The key as text.
     pub fn as_str(&self) -> &str {

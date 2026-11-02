@@ -7,6 +7,8 @@
 //! * [`record`] defines [`Record`] and its payloads, plus the JSON line format.
 //! * [`config`] defines [`BusConfig`] and the [`Clock`] the bus reads.
 //! * [`log`] defines [`Bus`]: publish, read by sequence number, subscribe.
+//! * [`world`] defines [`World`], the reducer that holds the current state.
+//! * [`signals`] names the signals sources and the world agree on.
 //! * [`segment`] reads and writes the segment files on disk.
 
 pub mod config;
@@ -14,13 +16,16 @@ pub mod entity;
 pub mod log;
 pub mod record;
 pub mod segment;
+pub mod signals;
 #[cfg(test)]
 mod testutil;
+pub mod world;
 
 pub use config::{BusConfig, Clock, ManualClock, SystemClock};
-pub use entity::EntityKey;
+pub use entity::{EntityKey, EntityKind};
 pub use log::{Bus, BusStats, ReadError, Reducer, Subscription};
 pub use record::{
     DecodeError, Event, Gap, Header, HeaderKind, Payload, Provenance, RawFrame, Record, Sample,
     Sweep, Value, SCHEMA_VERSION,
 };
+pub use world::{ModelPhase, ModelView, Reading, Snapshot, World};
