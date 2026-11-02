@@ -128,3 +128,12 @@ pub const PROC_CMDLINE: &str = "toplike.proc.cmdline";
 pub const PROC_DEVICE: &str = "toplike.proc.device";
 /// 1 when the remote host says the process uses Tenstorrent hardware, else 0 (remote source only).
 pub const PROC_USES_TT: &str = "toplike.proc.uses_tt";
+
+// ---- Gozer lease source (chip entity, only when changed) ---------------
+
+/// The chip's gozer state as text: `FREE`, `HELD`, `HELD-FOREIGN`, `CLAIMED`,
+/// `STALE`, `BUSY-UNTRACKED`, `DEGRADED` or `UNREADABLE`.
+pub const GOZER_STATE: &str = "toplike.gozer.state";
+/// Who holds the chip, from the lease (`--who`). Redacted and clipped to 128
+/// characters. Empty text when the holder goes away.
+pub const GOZER_WHO: &str = "toplike.gozer.who";
