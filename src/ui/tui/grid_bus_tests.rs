@@ -797,6 +797,17 @@ fn a_new_reset_flashes_its_portrait_and_an_old_one_does_not() {
             0,
             "the flash is over"
         );
+
+        // A reset while the Grid was away: no flash on return.
+        let mut g = GridBus::default();
+        for i in 0..5 {
+            g.update(&f.view(t0 + i * TICK), b.devices());
+        }
+        f.event(Event::Reset {
+            chips: vec![chip(0)],
+        });
+        g.update(&f.view(t0 + 10 * SEC), b.devices());
+        assert_eq!(reversed(&grid_with(&b, &g, W, H), &g0), 0, "away");
     })
 }
 
@@ -1081,5 +1092,63 @@ fn grid_bus_smoke_screen() {
         for y in 0..40 {
             println!("{}", row(&buf, y).trim_end());
         }
+    })
+}
+
+/// A world that hands out models whose chip lists are empty, as an attached
+/// world does for another machine's models once `ReadView::only_chips` has
+/// cut them. Die 3D's `Foreign` double, for Grid and Insights.
+struct Foreign(LocalView);
+
+impl tt_toplike_bus::WorldRead for Foreign {
+    fn seq(&self) -> u64 {
+        self.0.seq()
+    }
+    fn models(&self) -> Vec<tt_toplike_bus::ModelView> {
+        let mut m = self.0.models();
+        m.iter_mut().for_each(|m| m.chips.clear());
+        m
+    }
+    fn model_on_chip(&self, chip: &EntityKey) -> Option<tt_toplike_bus::ModelView> {
+        self.0.model_on_chip(chip).map(|mut m| {
+            m.chips.clear();
+            m
+        })
+    }
+    fn reading(&self, entity: &EntityKey, signal: &str) -> Option<tt_toplike_bus::Reading> {
+        self.0.reading(entity, signal)
+    }
+    fn events_since(&self, seq: u64) -> Vec<(u64, Event)> {
+        self.0.events_since(seq)
+    }
+    fn reset_seq(&self, chip: &EntityKey) -> Option<u64> {
+        self.0.reset_seq(chip)
+    }
+    fn header_kind(&self) -> HeaderKind {
+        self.0.header_kind()
+    }
+    fn now_mono_ns(&self) -> u64 {
+        self.0.now_mono_ns()
+    }
+}
+
+/// `model_on_chip` can hand back a model whose chip list has been cut to
+/// nothing. Grid draws nothing for it, and the Insights rule stays plain.
+#[test]
+fn a_model_whose_chip_list_was_cut_away_draws_nothing() {
+    tc(|| {
+        let b = Fixed::new(2, "p300");
+        let mut f = Bus::new();
+        f.loading("far", &[0], Some(0.5))
+            .ready("other", &[1], Some(9.0));
+        let w = Foreign(f.view(5 * SEC));
+        let mut g = GridBus::default();
+        g.update(&w, b.devices());
+        assert_eq!(g.fx().chips, vec![]);
+        let flags = ChipFlags::from_world(&w, b.devices());
+        assert_eq!(
+            buffer_hash(&panels_with(&b, &flags, 120, 40)),
+            buffer_hash(&panels_buffer(&b, 120, 40))
+        );
     })
 }
