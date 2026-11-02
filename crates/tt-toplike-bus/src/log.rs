@@ -374,14 +374,19 @@ impl Bus {
     /// delete anything until it holds it. Once held, it is kept until the
     /// writer thread exits (after the last `Bus` handle is dropped).
     ///
-    /// # One backend and mode per directory
+    /// # One backend class and mode per directory
     ///
-    /// When the newest segment's header names a `backend` or `mode` (see
-    /// [`BusConfig::header_tags`]) different from the one being opened, the
-    /// open fails with `InvalidInput`: `log directory holds a
-    /// <backend>/<mode> log; use another --bus-dir or remove it`. An empty
-    /// directory, a log with no tags, and a bus opened with no tags are
-    /// accepted. Replaying a log reads its files and is never refused.
+    /// When the newest segment's header names a `mode` (live, mock, replay)
+    /// or a `backend` class (`mock`, `remote`, or `local-hardware` for every
+    /// backend that reads this box's chips; see [`BusConfig::header_tags`])
+    /// different from the one being opened, the open fails with
+    /// `InvalidInput`: `log directory holds a <class>/<mode> log; use
+    /// another --bus-dir or remove it`. A change between local backends
+    /// (hybrid, json, sysfs, ...) is accepted. An empty directory, a log
+    /// with no tags or an unreadable header, and a bus opened with no tags
+    /// are accepted. Replaying a log reads its files and is never refused.
+    /// The same check runs again when the lock is taken late (see
+    /// `Writer::ensure_lock`).
     pub fn open_with(cfg: BusConfig, reducer: Box<dyn Reducer>) -> io::Result<Bus> {
         Bus::open_inner(cfg, reducer, Arc::new(lock_dir))
     }
@@ -473,6 +478,7 @@ impl Bus {
                 last_attempt_ms: None,
                 dir_lock,
                 locker,
+                refused: false,
             };
             let (done_tx, done_rx) = mpsc::sync_channel::<()>(0);
             thread_handle = Some(
@@ -974,19 +980,31 @@ fn prepare(dir: &Path, may_write: bool) -> io::Result<(Vec<SegInfo>, u64)> {
     Ok((closed, last))
 }
 
-/// Header tags that must match between a directory's newest segment and a
-/// bus opened on it.
-const SAME_LOG_TAGS: [&str; 2] = ["backend", "mode"];
+/// The class of a `backend` header tag: `mock` (made-up values), `remote`
+/// (a relay of another machine's data), or `local-hardware` (sysfs,
+/// hybrid, json, luwen, host and any other backend that reads this box's
+/// chips). `--backend auto` can choose a different local backend from one
+/// start to the next, so logs are kept apart by class, not by name.
+fn backend_class(backend: &str) -> &'static str {
+    match backend {
+        "mock" => "mock",
+        "remote" => "remote",
+        _ => "local-hardware",
+    }
+}
 
 /// Refuse to add to a directory whose newest segment (`closed`, oldest
-/// first, as [`prepare`] lists them) names a different `backend` or `mode`
+/// first, as [`prepare`] lists them) names a different `mode` (live, mock,
+/// replay), or a `backend` of a different class (see [`backend_class`]),
 /// in its header than `tags`, the bus being opened. Mixing them would make
-/// one log of two machines' or modes' data, and `bus inspect` prints only
-/// the first segment's header. A tag missing on either side is not
-/// compared: an empty directory, a log written before tags existed, and a
-/// bus opened with no tags are all accepted. A replay reads its source
-/// files directly and never opens the source directory as a bus, so this
-/// does not stop a replay of any log.
+/// one log of made-up and real data, or of two machines' data, and
+/// `bus inspect` prints only the first segment's header. A change of local
+/// backend (hybrid one start, json the next) is accepted. A tag missing on
+/// either side is not compared, and a header that cannot be read is
+/// accepted: an empty directory, a log written before tags existed, and a
+/// bus opened with no tags all open. A replay reads its source files
+/// directly and never opens the source directory as a bus, so this does
+/// not stop a replay of any log.
 fn check_same_log(
     dir: &Path,
     closed: &[SegInfo],
@@ -999,20 +1017,22 @@ fn check_same_log(
     let Ok(Some(header)) = segment::read_header(&p) else {
         return Ok(());
     };
-    let theirs = |k: &str| header.tool_versions.get(k);
-    let differs = SAME_LOG_TAGS
-        .iter()
-        .any(|k| matches!((tags.get(*k), theirs(k)), (Some(a), Some(b)) if a != b));
-    if !differs {
+    let theirs = |k: &str| header.tool_versions.get(k).map(String::as_str);
+    let ours = |k: &str| tags.get(k).map(String::as_str);
+    let mode_differs = matches!((ours("mode"), theirs("mode")), (Some(a), Some(b)) if a != b);
+    let class_differs = matches!(
+        (ours("backend"), theirs("backend")),
+        (Some(a), Some(b)) if backend_class(a) != backend_class(b)
+    );
+    if !mode_differs && !class_differs {
         return Ok(());
     }
-    let name = |k: &str| theirs(k).map_or("unknown", |s| s.as_str()).to_string();
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
         format!(
             "log directory holds a {}/{} log; use another --bus-dir or remove it ({})",
-            name("backend"),
-            name("mode"),
+            theirs("backend").map_or("unknown", backend_class),
+            theirs("mode").unwrap_or("unknown"),
             dir.display()
         ),
     ))
@@ -1060,6 +1080,9 @@ struct Writer {
     /// until the writer exits; closing it releases the lock.
     dir_lock: Option<File>,
     locker: Locker,
+    /// The directory holds a log of another class or mode (found when the
+    /// lock was taken late). Nothing more is written in this run.
+    refused: bool,
 }
 
 impl Writer {
@@ -1075,14 +1098,36 @@ impl Writer {
     /// in this run before the lock was held, so the refresh loses nothing.
     /// If the cleanup fails the lock is released and the next retry tries
     /// both again.
+    ///
+    /// The directory may also have changed during the outage, or could not
+    /// be listed at open, so the class and mode check of [`check_same_log`]
+    /// runs again here. On a refusal the lock is released and the disk is
+    /// switched off for the rest of this run (see [`Writer::refuse`]), so
+    /// two logs are never mixed.
     fn ensure_lock(&mut self) -> io::Result<()> {
         if self.dir_lock.is_none() {
             let f = (self.locker)(&self.disk.dir).map_err(LockError::into_io)?;
             let (closed, _) = prepare(&self.disk.dir, true)?;
+            if let Err(e) = check_same_log(&self.disk.dir, &closed, &self.disk.tags) {
+                drop(f);
+                self.refuse(e.to_string());
+                return Err(e);
+            }
             lock(&self.disk.table).closed = closed;
             self.dir_lock = Some(f);
         }
         Ok(())
+    }
+
+    /// Switch the disk off for good: record `why` as the outage reason and
+    /// publish a new Gap carrying it (even when an outage was already
+    /// running, so the reason is not the open's older one). Every later
+    /// record is dropped and counted without touching the directory.
+    fn refuse(&mut self, why: String) {
+        self.refused = true;
+        *lock(&self.disk.reason) = why;
+        self.disk.failed.store(true, Ordering::SeqCst);
+        self.disk.gap_pending.store(true, Ordering::SeqCst);
     }
 
     fn run(mut self, rx: Receiver<Msg>) {
@@ -1137,6 +1182,10 @@ impl Writer {
 
     fn write_record(&mut self, rec: &Record) {
         let d = &self.disk;
+        if self.refused {
+            d.dropped.fetch_add(1, Ordering::SeqCst);
+            return;
+        }
         if d.failed.load(Ordering::SeqCst) {
             if let Some(t) = self.last_attempt_ms {
                 if rec.t_wall_ms.saturating_sub(t) < DISK_RETRY_MS {
@@ -2212,20 +2261,23 @@ mod tests {
         flush(&bus);
     }
 
-    /// Hardening B3: a directory whose newest segment was written for one
-    /// backend or mode is not reused for another.
+    /// Hardening B3: a directory whose newest segment was written for
+    /// another mode, or another backend class, is not reused.
     #[test]
-    fn a_directory_of_another_backend_or_mode_is_refused() {
+    fn a_directory_of_another_class_or_mode_is_refused() {
         let dir = TempDir::new("mixmode");
         let clock = ManualClock::new(T0);
         record_one(tagged(dir.path(), &clock, "sysfs", "live"));
-        for (backend, mode) in [("mock", "mock"), ("hybrid", "live"), ("sysfs", "replay")] {
+        // Live then mock, local hardware then a remote relay, and a mode
+        // change within one class.
+        for (backend, mode) in [("mock", "mock"), ("remote", "live"), ("sysfs", "replay")] {
             let err = Bus::open(tagged(dir.path(), &clock, backend, mode)).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
             let msg = err.to_string();
             assert!(
                 msg.contains(
-                    "log directory holds a sysfs/live log; use another --bus-dir or remove it"
+                    "log directory holds a local-hardware/live log; use another --bus-dir or \
+                     remove it"
                 ),
                 "{msg}"
             );
@@ -2234,6 +2286,27 @@ mod tests {
         // and mode still open.
         assert_eq!(segment_files(dir.path()).len(), 1);
         record_one(tagged(dir.path(), &clock, "sysfs", "live"));
+    }
+
+    /// Fix round 1: `--backend auto` can pick `hybrid` on one boot and fall
+    /// back to `json` on the next, and someone may run `--backend sysfs`
+    /// once to debug. A change within the local-hardware class is accepted.
+    #[test]
+    fn local_hardware_backends_share_a_directory() {
+        let dir = TempDir::new("mixlocal");
+        let clock = ManualClock::new(T0);
+        for backend in ["sysfs", "hybrid", "json", "luwen", "host", "sysfs"] {
+            record_one(tagged(dir.path(), &clock, backend, "live"));
+        }
+        // Mock after mock opens, and a remote relay after a remote relay.
+        let mock = TempDir::new("mixmock");
+        record_one(tagged(mock.path(), &clock, "mock", "mock"));
+        record_one(tagged(mock.path(), &clock, "mock", "mock"));
+        let remote = TempDir::new("mixremote");
+        record_one(tagged(remote.path(), &clock, "remote", "live"));
+        record_one(tagged(remote.path(), &clock, "remote", "live"));
+        let err = Bus::open(tagged(remote.path(), &clock, "hybrid", "live")).unwrap_err();
+        assert!(err.to_string().contains("holds a remote/live log"), "{err}");
     }
 
     /// An empty directory, a log with no tags (written before tags
@@ -2261,6 +2334,72 @@ mod tests {
         record_one(tagged(dir.path(), &clock, "mock", "mock"));
         let err = Bus::open(tagged(dir.path(), &clock, "sysfs", "live")).unwrap_err();
         assert!(err.to_string().contains("holds a mock/mock log"), "{err}");
+    }
+
+    /// Fix round 1: the class and mode check runs again when the lock is
+    /// taken late. Here the directory was empty at open (lock unavailable)
+    /// and a mock log was written into it during the outage. The live bus
+    /// must not add to it: the disk goes off with a Gap naming the reason,
+    /// and later records are not written either.
+    #[test]
+    fn a_late_lock_refuses_a_directory_of_another_class() {
+        let dir = TempDir::new("latemix");
+        fs::create_dir_all(dir.path()).unwrap();
+        let clock = ManualClock::new(T0);
+        let allow = Arc::new(AtomicBool::new(false));
+        let a = allow.clone();
+        let locker: Locker = Arc::new(move |d: &Path| {
+            if a.load(Ordering::SeqCst) {
+                lock_dir(d)
+            } else {
+                Err(LockError::Open(io::Error::other("injected: no lock file")))
+            }
+        });
+        let bus = Bus::open_inner(
+            tagged(dir.path(), &clock, "sysfs", "live"),
+            Box::new(NoReducer),
+            locker,
+        )
+        .unwrap();
+        // The open's outage Gap has been tried (and refused) by now.
+        flush(&bus);
+        // Another run records a mock log while this bus has no lock.
+        record_one(tagged(dir.path(), &clock, "mock", "mock"));
+        let before = segment_files(dir.path());
+        allow.store(true, Ordering::SeqCst);
+        clock.advance_secs(11);
+        bus.publish("t", sample(1));
+        flush(&bus);
+        assert_eq!(segment_files(dir.path()), before, "added to a mock log");
+        assert!(!bus.stats().disk_on);
+        // Still refused at the next retry. The refusal's Gap goes out with
+        // the next publish.
+        clock.advance_secs(11);
+        bus.publish("t", sample(2));
+        flush(&bus);
+        assert_eq!(segment_files(dir.path()), before);
+        // After a refusal the writer does not retry the directory, so no
+        // second refusal Gap follows.
+        clock.advance_secs(11);
+        bus.publish("t", sample(3));
+        flush(&bus);
+        clock.advance_secs(11);
+        bus.publish("t", sample(4));
+        flush(&bus);
+        assert_eq!(segment_files(dir.path()), before);
+        let recs = bus.read_from(1, 100).unwrap();
+        let reasons: Vec<String> = recs
+            .iter()
+            .filter_map(|r| match &r.payload {
+                Payload::Gap(g) => Some(g.reason.clone()),
+                _ => None,
+            })
+            .collect();
+        let refusals = reasons
+            .iter()
+            .filter(|r| r.contains("log directory holds a mock/mock log"))
+            .count();
+        assert_eq!(refusals, 1, "{reasons:?}");
     }
 
     #[test]

@@ -123,11 +123,21 @@ enum Pending {
     Nested(Nest),
 }
 
+/// Most open brackets a nested value may have. One more and the scan
+/// stops trusting the value and hides to the end of the line.
+const MAX_NEST: u32 = 64;
+
 /// Where a scan of a nested secret value stands: how many brackets are
-/// open, and whether it is inside a quoted string (and with which quote).
+/// open and of which kind, and whether it is inside a quoted string (and
+/// with which quote).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct Nest {
     depth: u32,
+    /// The kind of each open bracket, one bit per level: bit `n` is the
+    /// bracket opened at depth `n + 1`, 1 for `[` and 0 for `{`. A `u64`
+    /// keeps `Nest` `Copy`; deeper values hide to the end (see
+    /// [`MAX_NEST`]).
+    kinds: u64,
     quote: Option<u8>,
     escaped: bool,
     /// A stray quote was seen, so the quote pairing (and with it any later
@@ -142,10 +152,12 @@ struct Nest {
 
 /// Scan `s`, one word, as the continuation of a nested value. `{` and `[`
 /// open, `}` and `]` close, and brackets inside a quoted string (either
-/// quote, with backslash escapes) do not count. Returns the byte index just
-/// after the bracket that brings the depth back to zero, or `None` and the
-/// state at the end of `s` when the value is still open (or a stray quote
-/// set [`Nest::to_end`]).
+/// quote, with backslash escapes) do not count. A close must match the
+/// kind of the innermost open bracket (`]` does not close `{`); a close
+/// that does not match, or a value more than [`MAX_NEST`] levels deep,
+/// sets [`Nest::to_end`]. Returns the byte index just after the bracket
+/// that brings the depth back to zero, or `None` and the state at the end
+/// of `s` when the value is still open (or [`Nest::to_end`] is set).
 fn scan_nest(s: &str, mut st: Nest) -> (Option<usize>, Nest) {
     let b = s.as_bytes();
     let alnum_at = |j: usize| b.get(j).is_some_and(|c| c.is_ascii_alphanumeric());
@@ -173,9 +185,27 @@ fn scan_nest(s: &str, mut st: Nest) -> (Option<usize>, Nest) {
                     st.to_end = true;
                 }
             }
-            b'{' | b'[' => st.depth += 1,
+            b'{' | b'[' => {
+                if st.depth >= MAX_NEST {
+                    st.to_end = true;
+                    continue;
+                }
+                let bit = 1u64 << st.depth;
+                if c == b'[' {
+                    st.kinds |= bit;
+                } else {
+                    st.kinds &= !bit;
+                }
+                st.depth += 1;
+            }
             b'}' | b']' => {
-                st.depth = st.depth.saturating_sub(1);
+                // The innermost open bracket's kind must match.
+                let open_square = st.depth > 0 && st.kinds & (1u64 << (st.depth - 1)) != 0;
+                if st.depth == 0 || open_square != (c == b']') {
+                    st.to_end = true;
+                    continue;
+                }
+                st.depth -= 1;
                 if st.depth == 0 {
                     return (Some(i + 1), st);
                 }

@@ -424,7 +424,8 @@ fn a_live_log_replays_into_its_own_directory_and_live_is_refused_there() {
     play(Some(&replay_dir));
     let err = tt_toplike_bus::Bus::open(tagged(&replay_dir, "live")).unwrap_err();
     assert!(
-        err.to_string().contains("holds a sysfs/replay log"),
+        err.to_string()
+            .contains("holds a local-hardware/replay log"),
         "{err}"
     );
 }

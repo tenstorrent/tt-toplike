@@ -403,10 +403,10 @@ fn a_second_stop_signal_exits_at_once_and_removes_the_socket() {
         drop(std::os::unix::net::UnixListener::bind(&sock).unwrap());
         assert!(sock.exists());
     };
-    // Stands for a socket this process bound through `serve_socket`.
-    let _mark = ServedMark::new(&sock);
     for (second, code) in [(StopSignal::Int, 130), (StopSignal::Term, 143)] {
         make_socket();
+        // Stands for a socket this process bound through `serve_socket`.
+        let _mark = ServedMark::new(&sock);
         let flag = AtomicBool::new(false);
         let mut exits = Vec::new();
         watch_stop([StopSignal::Term, second], &flag, Some(&sock), &mut |c| {
@@ -433,6 +433,38 @@ fn a_second_stop_signal_exits_at_once_and_removes_the_socket() {
         &mut |_| {},
     );
     assert!(file.exists());
+}
+
+/// Fix round 1: the mark remembers which socket this process bound. When
+/// the file at the path has been replaced by another socket (another host
+/// bound the path while this one was still dropping its server), the
+/// second signal leaves the new file alone.
+#[cfg(unix)]
+#[test]
+fn a_second_signal_leaves_a_socket_that_replaced_ours() {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::net::UnixListener;
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("s.sock");
+    let _ours = UnixListener::bind(&sock).unwrap();
+    let mark = ServedMark::new(&sock);
+    // Another host's socket, made beside ours (so it cannot reuse our
+    // inode) and moved over the path.
+    let other = tmp.path().join("other.sock");
+    let _theirs = UnixListener::bind(&other).unwrap();
+    let ino = std::fs::metadata(&other).unwrap().ino();
+    std::fs::rename(&other, &sock).unwrap();
+    let mut exits = Vec::new();
+    watch_stop(
+        [StopSignal::Int, StopSignal::Int],
+        &AtomicBool::new(false),
+        Some(&sock),
+        &mut |c| exits.push(c),
+    );
+    assert_eq!(exits, vec![130]);
+    assert!(sock.exists(), "the other host's socket was removed");
+    assert_eq!(std::fs::metadata(&sock).unwrap().ino(), ino);
+    drop(mark);
 }
 
 // ---- Hardening B1 ------------------------------------------------------------

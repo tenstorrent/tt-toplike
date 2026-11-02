@@ -155,8 +155,11 @@ fn clip(mut s: String) -> String {
 /// secret and compare it with the suffix. With it, the suffix is the same
 /// for the same key within one run, so keys stay distinct and stable, but
 /// it differs from one run to the next: a restarted host gives a redacted
-/// service a new entity key. Replaying a recorded log is not affected,
-/// because the log stores the key and replay does not recompute it.
+/// service a new entity key. Replaying a recorded log does not recompute
+/// keys (the log stores them), but a log that spans a host restart holds
+/// both keys: a replay or `bus inspect` of it shows the old and the new
+/// salted key as two entities (the world never prunes an announced model),
+/// and an `--entity` filter naming one key matches only that one.
 fn safe_key(raw: &str) -> String {
     let safe = clip(redact_cmdline(raw));
     if safe == raw {

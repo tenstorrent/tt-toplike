@@ -736,6 +736,51 @@ fn each_stray_quote_sign_stops_the_nested_scan_on_its_own() {
     assert_eq!(scan_nest("}}}", st).0, None);
 }
 
+// ---- Fix round 1: bracket kinds -----------------------------------------------
+
+#[test]
+fn a_close_of_the_wrong_kind_masks_to_the_end() {
+    // `]` used to close `{` (and `}` close `[`), ending the value early.
+    for cmd in [
+        "app {'auth': [}, 'SEKRIT1'] -v",
+        "app {'auth': {'k': ]'SEKRIT2'}} -v",
+        r#"app {"auth":[},"SEKRIT3"]} -v"#,
+    ] {
+        let out = redact_cmdline(cmd);
+        hidden(&out, &["SEKRIT1", "SEKRIT2", "SEKRIT3", "-v"]);
+    }
+}
+
+#[test]
+fn mixed_valid_nesting_masks_exactly_the_nested_value() {
+    let out = redact_cmdline("app {'auth': [{'k': ['x', 'mv1']}, 'y'], 'm': 1} -v");
+    masked_between(&out, "app {'auth': ", ", 'm': 1} -v");
+    assert_eq!(
+        redact_cmdline(r#"app {"auth":[{"k":["x","mv2"]},{"j":[]}],"m":1} -v"#),
+        r#"app {"auth":<redacted>,"m":1} -v"#
+    );
+}
+
+#[test]
+fn nesting_past_64_levels_masks_to_the_end() {
+    let deep = |n: usize| {
+        format!(
+            r#"app {{"auth":{}"dp1"{},"n":"keep"}} -v"#,
+            "[".repeat(n),
+            "]".repeat(n)
+        )
+    };
+    // 64 levels still balance and mask exactly the value.
+    assert_eq!(
+        redact_cmdline(&deep(64)),
+        r#"app {"auth":<redacted>,"n":"keep"} -v"#
+    );
+    // 65 levels: fail safe, everything to the end of the line.
+    let out = redact_cmdline(&deep(65));
+    hidden(&out, &["dp1", "keep", "-v"]);
+    assert!(out.starts_with(r#"app {"auth":"#), "{out}");
+}
+
 #[test]
 fn an_attached_dash_p_password_that_spells_a_secret_word_is_masked() {
     // Found by the 20,000-seed re-run: `-pwdUca...` split into words is

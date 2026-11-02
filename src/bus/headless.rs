@@ -181,33 +181,67 @@ pub struct HeadlessReport {
 }
 
 /// The socket server and its [`ServedMark`], or nothing where there is no
-/// Unix socket. The server is dropped first (it removes its socket file),
-/// then the mark.
+/// Unix socket. Fields drop in order: the mark first, so the path is no
+/// longer this process's while the server shuts down (it can take up to
+/// about a second, and another host may bind the path meanwhile), then the
+/// server, which removes its socket file.
 #[cfg(unix)]
 struct Server {
-    _server: tt_toplike_bus::SocketServer,
     _mark: ServedMark,
+    _server: tt_toplike_bus::SocketServer,
 }
 #[cfg(not(unix))]
 type Server = ();
 
-/// Socket paths this process has bound through [`serve_socket`] and still
-/// serves. The second-signal exit in [`watch_stop`] removes a socket file
-/// only when its path is here: before the bind succeeds, the file at the
-/// path may belong to another running host (a second instance started on
-/// the same default path), and removing it would cut that host off.
-static SERVED_SOCKETS: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+/// A socket file's device and inode numbers: which file it is, not just
+/// where it is.
+type SocketId = (u64, u64);
 
-/// Is `p` a socket this process bound and still serves?
-fn serving_socket(p: &Path) -> bool {
+/// The device and inode of the socket file at `p`, or `None` when there is
+/// no socket there (or no Unix sockets at all).
+fn socket_id(p: &Path) -> Option<SocketId> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let m = std::fs::symlink_metadata(p).ok()?;
+        m.file_type().is_socket().then(|| (m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = p;
+        None
+    }
+}
+
+/// Socket paths this process has bound through [`serve_socket`] and still
+/// serves, each with the device and inode of the socket file it bound. The
+/// second-signal exit in [`watch_stop`] removes a socket file only when its
+/// path is here AND the file at the path is still that same socket: before
+/// the bind succeeds, or after another host has replaced the file, the
+/// socket at the path belongs to another running host, and removing it
+/// would cut that host off.
+static SERVED_SOCKETS: std::sync::Mutex<Vec<(PathBuf, Option<SocketId>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// The socket file this process bound at `p`, if it is marked.
+fn marked_socket(p: &Path) -> Option<Option<SocketId>> {
     SERVED_SOCKETS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
-        .any(|s| s == p)
+        .find(|(s, _)| s == p)
+        .map(|(_, id)| *id)
 }
 
-/// Puts a path on [`SERVED_SOCKETS`] and takes it off again when dropped.
+/// Is `p` a socket path this process bound and still serves?
+#[cfg(test)]
+fn serving_socket(p: &Path) -> bool {
+    marked_socket(p).is_some()
+}
+
+/// Puts a path, with the identity of the socket file there now, on
+/// [`SERVED_SOCKETS`], and takes it off again when dropped. Made right
+/// after the bind, so the identity is that of this process's socket.
 struct ServedMark(PathBuf);
 
 impl ServedMark {
@@ -215,7 +249,7 @@ impl ServedMark {
         SERVED_SOCKETS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(p.to_path_buf());
+            .push((p.to_path_buf(), socket_id(p)));
         ServedMark(p.to_path_buf())
     }
 }
@@ -223,7 +257,7 @@ impl ServedMark {
 impl Drop for ServedMark {
     fn drop(&mut self) {
         let mut v = SERVED_SOCKETS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(i) = v.iter().position(|s| *s == self.0) {
+        if let Some(i) = v.iter().position(|(s, _)| *s == self.0) {
             v.remove(i);
         }
     }
@@ -243,8 +277,8 @@ fn serve_socket(bus: &tt_toplike_bus::Bus, path: Option<&Path>) -> io::Result<Op
         )
     })?;
     Ok(Some(Server {
-        _server: server,
         _mark: ServedMark::new(path),
+        _server: server,
     }))
 }
 
@@ -404,7 +438,8 @@ impl StopSignal {
 /// The first raises `flag`, and the loop is expected to notice it, flush
 /// and exit. The second means the loop did not get out (a hung
 /// `backend.update()`, a stalled flush): the socket file at `socket` is
-/// removed if it is a socket AND this process bound it (best effort, so the
+/// removed if it is still the socket this process bound, the same file by
+/// device and inode (best effort, so the
 /// next start does not find it), and `exit` is called with 128 + the signal
 /// number. `exit` is `std::process::exit` in normal use; tests record the
 /// code.
@@ -425,25 +460,27 @@ pub fn watch_stop(
             flag.store(true, Ordering::SeqCst);
             continue;
         }
-        if let Some(p) = socket.filter(|p| serving_socket(p)) {
-            remove_if_socket(p);
+        if let Some(p) = socket {
+            remove_if_ours(p);
         }
         exit(sig.exit_code());
         return;
     }
 }
 
-/// Remove `p` if it is a Unix socket. Anything else is left alone.
-fn remove_if_socket(p: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_socket()) {
-            let _ = std::fs::remove_file(p);
-        }
+/// Remove `p` only if this process marked it (see [`SERVED_SOCKETS`]) and
+/// the file there is still the socket it bound: same device and inode.
+/// Anything else (no mark, not a socket, a socket another host bound at
+/// the path since) is left alone. A small window remains between the
+/// identity check and the removal; the mark is dropped before the server
+/// shuts down, which keeps it short.
+fn remove_if_ours(p: &Path) {
+    let Some(Some(ours)) = marked_socket(p) else {
+        return;
+    };
+    if socket_id(p) == Some(ours) {
+        let _ = std::fs::remove_file(p);
     }
-    #[cfg(not(unix))]
-    let _ = p;
 }
 
 /// A flag raised by the first SIGTERM or SIGINT (Ctrl-C elsewhere). A
