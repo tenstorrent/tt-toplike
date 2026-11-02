@@ -1,3 +1,28 @@
+tt-toplike (0.15.3) noble; urgency=medium
+
+  * Die 3D is now the Wafer Waffler. /waffler and --mode waffler open it, and
+    /die3d and --mode die3d still do. The name lives in one place in the code.
+  * Every explain, legend and help overlay is shorter and fits 80 columns
+    in 24 rows (help) or 30 rows (legend and explain) with no scrolling. The
+    Insights explain text keeps its ECC paragraph on a short terminal, and
+    the Starfield text no longer says the orbit radius follows memory
+    bandwidth.
+  * Arcade can be laid out in the config file. [[arcade.row]] tables in
+    ~/.config/tt-toplike/config.toml pick the panels (starfield, castle, flow,
+    defrag, die3d, training, inference) and give each a width weight, so
+    width = 3 makes a panel triple wide. A bad file keeps the default
+    layout and says why on the status line. tt-toplike --check-config prints
+    every problem with its line. The default layout draws what it drew
+    before, at every terminal size. The c key and /arcade cloudfield on|off
+    turn on a backdrop behind the arcade while an inference service loads or
+    serves.
+  * The config file is read only if it is a regular file of at most
+    256 KiB, and a problem reading it is reported instead of ignored.
+  * Tests that depended on the terminal's colour settings or on a real process
+    now pass under TERM=dumb, as CI runs them.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 19:00:00 -0800
+
 tt-toplike (0.15.2) noble; urgency=medium
 
   * The rest of the views read the signal bus. Starfield shows a cluster for

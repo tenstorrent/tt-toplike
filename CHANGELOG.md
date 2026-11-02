@@ -17,6 +17,19 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.15.3
+- Die 3D is the Wafer Waffler (`/waffler`, `--mode waffler`; `/die3d` and `--mode die3d` still work).
+- Every explain, legend and help overlay is shorter and fits 80 columns without scrolling (help in 24
+  rows, legend and explain in 30). The Insights ECC paragraph shows on a 24-row terminal.
+- Arcade layout from the config file: `[[arcade.row]]` tables choose the panels (`starfield`, `castle`,
+  `flow`, `defrag`, `die3d`, `training`, `inference`) and their width weights (`width = 3` is triple
+  wide). A bad file keeps the default layout and the status line says why; `--check-config` lists every
+  problem. The default layout is unchanged at every size. `c` and `/arcade cloudfield on|off` switch on a
+  backdrop that shows while an inference service loads or serves. See `docs/arcade-layout.md`.
+- The config file is read only when it is a regular file of at most 256 KiB, and a read problem is reported.
+- Limits: not run on real hardware, in a live terminal, or attached to a headless host. The shared
+  backdrop and switching between arcade layouts are not in this release.
+
 ### 0.15.2
 - Starfield, Memory Flow, Memory Castle, Defrag, Grid, the Insights chip panels and Training read the
   signal bus, each in its own style: model bring-up that follows load progress, a hit or comet for each

@@ -1485,6 +1485,13 @@ the point (and still fun!)", plus renaming Die 3D to a fun name the user liked, 
   speed and density drivers, docs/bus.md's "the other views read what they read before", README's
   "the arcade hero duel reads the local monitor".
 
+### Version history: 0.15.3 (Nov 2 2026)
+
+0.15.3 adds the arcade layout engine (`src/animation/arcade_layout.rs`, `docs/arcade-layout.md`), the Wafer
+Waffler name (`crate::die3d_display_name!`), and the overlay row targets (Help 24, Legend and Explain 30
+rows at 80 columns, held by `every_overlay_fits_its_row_target_at_80_columns`). The config loader
+(`src/config.rs`) reads one regular file and reports every problem.
+
 ### Version history: 0.15.2 (Nov 2 2026)
 
 0.15.2 puts the remaining views on the signal bus (`src/animation/{starfield,memory_flow,castle,defrag,train}_bus.rs`,
