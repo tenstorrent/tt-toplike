@@ -42,9 +42,12 @@ use crate::segment;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Longest single sleep in [`Replay::play_until`], so `stop` is seen soon.
+const STOP_CHECK_NS: u64 = 100_000_000;
 
 /// What [`Replay::play`] waits on between records.
 pub trait PlayClock {
@@ -212,6 +215,23 @@ impl Replay {
     /// were published. A `speed` that is not finite and above zero is an
     /// error and nothing is published.
     pub fn play(&mut self, bus: &Bus, speed: f64, clock: &dyn PlayClock) -> io::Result<u64> {
+        self.play_until(bus, speed, clock, &AtomicBool::new(false))
+    }
+
+    /// [`Replay::play`] that stops early once `stop` is true.
+    ///
+    /// `stop` is checked before each record and at least every 100 ms of a
+    /// pause, so a long pause in the log does not hold up a host that is
+    /// shutting down. Returns how many records were published before it
+    /// stopped. A host runs this on a background thread and raises `stop`
+    /// when it is dropped.
+    pub fn play_until(
+        &mut self,
+        bus: &Bus,
+        speed: f64,
+        clock: &dyn PlayClock,
+        stop: &AtomicBool,
+    ) -> io::Result<u64> {
         check_speed(speed)?;
         let start = clock.now_ns();
         let mut first_t = None;
@@ -235,9 +255,15 @@ impl Replay {
             let t0 = *first_t.get_or_insert(rec.t_mono_ns);
             let offset = rec.t_mono_ns.saturating_sub(t0);
             let target = start.saturating_add((offset as f64 / speed) as u64);
-            let wait = target.saturating_sub(clock.now_ns());
-            if wait > 0 {
-                clock.sleep_ns(wait);
+            loop {
+                if stop.load(Ordering::SeqCst) {
+                    return Ok(n);
+                }
+                let wait = target.saturating_sub(clock.now_ns());
+                if wait == 0 {
+                    break;
+                }
+                clock.sleep_ns(wait.min(STOP_CHECK_NS));
             }
             bus.publish(&rec.source, rec.payload);
             n += 1;
@@ -781,6 +807,55 @@ mod tests {
         assert_eq!(n, fixture_records().len() as u64);
         assert_eq!(gaps(&bus), original_gaps());
         assert_eq!(clock.now_ns(), 20_000 * 1_000_000);
+    }
+
+    /// A play clock that raises `stop` once it has slept past `at_ns`.
+    struct StopAt<'a> {
+        inner: ManualPlayClock,
+        at_ns: u64,
+        stop: &'a std::sync::atomic::AtomicBool,
+    }
+
+    impl PlayClock for StopAt<'_> {
+        fn now_ns(&self) -> u64 {
+            self.inner.now_ns()
+        }
+        fn sleep_ns(&self, ns: u64) {
+            self.inner.sleep_ns(ns);
+            if self.inner.now_ns() >= self.at_ns {
+                self.stop.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+
+    #[test]
+    fn play_until_stops_between_records_when_told() {
+        use std::sync::atomic::AtomicBool;
+        // Raised before play: nothing is published.
+        let (bus, clock) = replay_bus();
+        let stop = AtomicBool::new(true);
+        let n = Replay::open(Path::new(FIXTURE))
+            .unwrap()
+            .play_until(&bus, 1.0, &clock, &stop)
+            .unwrap();
+        assert_eq!((n, bus.head()), (0, 0));
+
+        // Raised 5 s into a 20 s log: play stops there, well short of the end.
+        let (bus, _) = replay_bus();
+        let stop = AtomicBool::new(false);
+        let clock = StopAt {
+            inner: ManualPlayClock::new(),
+            at_ns: 5_000_000_000,
+            stop: &stop,
+        };
+        let n = Replay::open(Path::new(FIXTURE))
+            .unwrap()
+            .play_until(&bus, 1.0, &clock, &stop)
+            .unwrap();
+        let total = fixture_records().len() as u64;
+        assert!(n > 0 && n < total, "published {n} of {total}");
+        assert_eq!(bus.head(), n);
+        assert!(clock.now_ns() < 6_000_000_000, "{}", clock.now_ns());
     }
 
     #[test]

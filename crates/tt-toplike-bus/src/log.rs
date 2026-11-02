@@ -80,6 +80,53 @@ const DISK_RETRY_MS: u64 = 10_000;
 /// How many records a subscription fetches per read.
 const SUBSCRIPTION_BATCH: usize = 512;
 
+thread_local! {
+    /// True on this thread while [`Inner::append`] runs the reducer.
+    static IN_REDUCER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Sets [`IN_REDUCER`] for its lifetime. Clearing it in `Drop` means it is
+/// cleared after an unwinding reducer too.
+struct InReducer;
+
+impl InReducer {
+    fn enter() -> InReducer {
+        IN_REDUCER.with(|f| f.set(true));
+        InReducer
+    }
+}
+
+impl Drop for InReducer {
+    fn drop(&mut self) {
+        IN_REDUCER.with(|f| f.set(false));
+    }
+}
+
+/// Keep reducer panics off stderr.
+///
+/// `publish` catches a panicking reducer, so the bus keeps running, but the
+/// process's panic hook runs first and by default prints the panic to
+/// stderr. Under a TUI in raw mode that text lands in the middle of the
+/// screen. This wraps the current hook: a panic raised while a reducer runs
+/// on this thread is not passed on; every other panic is passed to the
+/// previous hook unchanged.
+///
+/// Call it once, early, from the program that hosts the bus, after any hook
+/// of its own is installed (a hook set later replaces this one). Later calls
+/// do nothing.
+pub fn install_quiet_reducer_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if IN_REDUCER.with(|f| f.get()) {
+                return;
+            }
+            prev(info);
+        }));
+    });
+}
+
 /// Folds records into derived state (the world, in Task 3).
 ///
 /// The bus calls [`Reducer::apply`] under the same lock that assigns the
@@ -220,6 +267,8 @@ struct State {
 enum Msg {
     Rec(Record),
     Flush(SyncSender<()>),
+    /// Apply retention, flush, then acknowledge. See [`Bus::maintain`].
+    Maintain(SyncSender<()>),
 }
 
 struct Inner {
@@ -246,6 +295,10 @@ struct WriterGuard {
     /// Disconnects when the writer thread returns. In a `Mutex` only
     /// because `Receiver` is not `Sync` and `Bus` must be.
     done: Mutex<Option<Receiver<()>>>,
+    /// The open `<dir>/.lock` file holding the directory's exclusive lock.
+    /// Closing it (when this guard drops, after the writer has finished)
+    /// releases the lock. `None` for a memory-only bus.
+    _dir_lock: Option<File>,
 }
 
 impl Drop for WriterGuard {
@@ -309,8 +362,22 @@ impl Bus {
         let mut done = None;
         let mut disk = None;
         let mut startup_failure = None;
+        let mut dir_lock = None;
 
         if let Some(dir) = cfg.dir.clone() {
+            // One writer per directory, across processes. A held lock is the
+            // only error `open` returns for a directory problem: two writers
+            // would corrupt each other's segments. A lock that cannot be
+            // taken for another reason (the directory cannot be created or
+            // is not writable) is a disk outage like any other, below.
+            let lock_failure = match lock_dir(&dir) {
+                Ok(f) => {
+                    dir_lock = Some(f);
+                    None
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Err(e),
+                Err(e) => Some(format!("cannot lock log directory {dir:?}: {e}")),
+            };
             let d = Arc::new(Disk {
                 dir: dir.clone(),
                 table: Mutex::new(SegTable::default()),
@@ -333,6 +400,9 @@ impl Bus {
                     }
                 }
                 Err(e) => startup_failure = Some(format!("cannot use log directory {dir:?}: {e}")),
+            }
+            if startup_failure.is_none() {
+                startup_failure = lock_failure;
             }
             if let Some(why) = &startup_failure {
                 d.fail(why.clone());
@@ -394,6 +464,7 @@ impl Bus {
                 inner: inner.clone(),
                 thread: thread_handle,
                 done: Mutex::new(done),
+                _dir_lock: dir_lock,
             }),
             inner,
         };
@@ -527,12 +598,31 @@ impl Bus {
     /// no log directory it returns true at once. For tests and shutdown;
     /// `publish` never calls it.
     pub fn flush(&self, timeout: Duration) -> bool {
+        self.ask_writer(Msg::Flush, timeout)
+    }
+
+    /// Apply retention now and flush, then wait up to `timeout` for the
+    /// writer to finish. Returns false on timeout or when the writer has
+    /// stopped. With no log directory it returns true at once.
+    ///
+    /// The writer applies retention when it rotates a segment, and a
+    /// segment rotates only when a record arrives. A bus that publishes
+    /// nothing for a long time would never age anything out, so a host calls
+    /// this on a timer (`BusHost` does every 60 s). It never rotates: the
+    /// open segment is never deleted, as with every other retention pass.
+    pub fn maintain(&self, timeout: Duration) -> bool {
+        self.ask_writer(Msg::Maintain, timeout)
+    }
+
+    /// Send the writer a message that carries an acknowledgement channel and
+    /// wait for the acknowledgement.
+    fn ask_writer(&self, make: fn(SyncSender<()>) -> Msg, timeout: Duration) -> bool {
         // Clone the sender and release the lock before a send that may wait.
         let Some(tx) = lock(&self.inner.state).tx.clone() else {
             return true;
         };
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
-        if tx.send(Msg::Flush(ack_tx)).is_err() {
+        if tx.send(make(ack_tx)).is_err() {
             return false;
         }
         ack_rx.recv_timeout(timeout).is_ok()
@@ -645,7 +735,11 @@ impl Inner {
         };
         // A panicking reducer must not take `publish` down with it.
         let reducer = &mut st.reducer;
-        let _ = catch_unwind(AssertUnwindSafe(|| reducer.apply(&rec)));
+        {
+            // Lets `install_quiet_reducer_hook` tell a reducer panic apart.
+            let _flag = InReducer::enter();
+            let _ = catch_unwind(AssertUnwindSafe(|| reducer.apply(&rec)));
+        }
         if let (Some(tx), Some(d)) = (&st.tx, &self.disk) {
             match tx.try_send(Msg::Rec(rec.clone())) {
                 Ok(()) => {}
@@ -703,6 +797,40 @@ fn read_either(
         }
     }
     Ok(None)
+}
+
+/// Name of the lock file inside a log directory.
+pub const LOCK_FILE: &str = ".lock";
+
+/// Create `dir` if needed and take a non-blocking exclusive lock on
+/// `<dir>/.lock` (mode 0600). The lock is `flock` on Unix and `LockFileEx`
+/// on Windows, through [`File::try_lock`]; it belongs to the returned file
+/// and is released when the file is closed, including when the process
+/// dies. Another holder gives `WouldBlock` with the message
+/// `log directory is in use by another process: <dir>`. The lock file is
+/// never deleted: deleting it would let a third opener lock a new file
+/// while the second still holds the old one.
+fn lock_dir(dir: &Path) -> io::Result<File> {
+    segment::create_dir_secure(dir)?;
+    let mut o = std::fs::OpenOptions::new();
+    o.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        o.mode(0o600);
+    }
+    let f = o.open(dir.join(LOCK_FILE))?;
+    match f.try_lock() {
+        Ok(()) => Ok(f),
+        Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            format!(
+                "log directory is in use by another process: {}",
+                dir.display()
+            ),
+        )),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
+    }
 }
 
 /// Create the directory, list existing segments and find the newest
@@ -803,6 +931,12 @@ impl Writer {
             Msg::Rec(r) => self.write_record(&r),
             Msg::Flush(ack) => {
                 self.flush_open();
+                let _ = ack.send(());
+            }
+            Msg::Maintain(ack) => {
+                self.flush_open();
+                let now = self.clock.wall_ms();
+                self.retain(now);
                 let _ = ack.send(());
             }
         }
@@ -1394,6 +1528,7 @@ mod tests {
         let names: Vec<String> = fs::read_dir(dir.path())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != LOCK_FILE)
             .collect();
         assert_eq!(names, vec![file_name(9, false)], "only the open segment");
         let s = bus.stats();
@@ -1451,7 +1586,7 @@ mod tests {
             assert_eq!(mode(&p), 0o600, "{p:?}");
             n += 1;
         }
-        assert_eq!(n, 2, "one compressed and one open segment");
+        assert_eq!(n, 3, "the lock file, one compressed and one open segment");
     }
 
     /// True when the current user can write into a 0500 directory (root).
@@ -1671,6 +1806,81 @@ mod tests {
         let r = segment::read_segment(&dir.path().join(file_name(1, false))).unwrap();
         assert_eq!(seqs(&r.records), (1..=1000).collect::<Vec<_>>());
         drop(sub);
+    }
+
+    #[test]
+    fn a_second_bus_on_one_directory_is_refused_until_the_first_is_dropped() {
+        let dir = TempDir::new("lock");
+        let clock = ManualClock::new(T0);
+        let first = Bus::open(disk_cfg(dir.path(), &clock)).unwrap();
+        let err = Bus::open(disk_cfg(dir.path(), &clock)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::WouldBlock, "{err}");
+        assert!(
+            err.to_string()
+                .contains("log directory is in use by another process"),
+            "{err}"
+        );
+        // A clone shares the lock; only dropping the last handle frees it.
+        let clone = first.clone();
+        drop(first);
+        assert!(Bus::open(disk_cfg(dir.path(), &clock)).is_err());
+        drop(clone);
+        let again = Bus::open(disk_cfg(dir.path(), &clock)).unwrap();
+        assert!(again.stats().disk_on);
+    }
+
+    #[test]
+    fn two_threads_opening_one_directory_get_exactly_one_bus() {
+        for round in 0..20 {
+            let dir = TempDir::new("lockrace");
+            let clock = ManualClock::new(T0);
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let cfg = disk_cfg(dir.path(), &clock);
+                    let b = barrier.clone();
+                    thread::spawn(move || {
+                        b.wait();
+                        Bus::open(cfg)
+                    })
+                })
+                .collect();
+            let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+            let ok = results.iter().filter(|r| r.is_ok()).count();
+            assert_eq!(ok, 1, "round {round}: {ok} buses opened");
+        }
+    }
+
+    #[test]
+    fn maintain_applies_age_retention_on_an_idle_bus() {
+        let dir = TempDir::new("maintain");
+        let clock = ManualClock::new(T0);
+        let bus = Bus::open(BusConfig {
+            window_records: 1,
+            segment_secs: 10,
+            retain_secs: 60,
+            ..disk_cfg(dir.path(), &clock)
+        })
+        .unwrap();
+        // Segment 1 closes at T0+10s when record 2 rotates the log.
+        bus.publish("t", sample(0));
+        clock.advance_secs(10);
+        bus.publish("t", sample(1));
+        flush(&bus);
+        assert!(exists(dir.path(), 1, true));
+        // Nothing is published for two minutes. Retention used to run only
+        // at a rotation, so segment 1 stayed forever on an idle bus.
+        clock.advance_secs(120);
+        flush(&bus);
+        assert!(exists(dir.path(), 1, true), "flush alone does not age");
+        assert!(bus.maintain(Duration::from_secs(10)));
+        assert!(!exists(dir.path(), 1, true), "maintain deleted it");
+        assert!(exists(dir.path(), 2, false), "the open segment is kept");
+    }
+
+    #[test]
+    fn maintain_on_a_memory_bus_returns_at_once() {
+        assert!(mem_bus(4).maintain(Duration::from_millis(1)));
     }
 
     #[test]

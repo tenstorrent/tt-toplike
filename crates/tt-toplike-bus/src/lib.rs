@@ -36,7 +36,7 @@ pub mod world;
 pub use client::{ClientError, RemoteSubscription, RemoteView, RemoteWorld, SocketClient};
 pub use config::{BusConfig, Clock, ManualClock, SystemClock};
 pub use entity::{EntityKey, EntityKind};
-pub use log::{Bus, BusStats, ReadError, Reducer, Subscription};
+pub use log::{install_quiet_reducer_hook, Bus, BusStats, ReadError, Reducer, Subscription};
 pub use record::{
     DecodeError, Event, Gap, Header, HeaderKind, Payload, Provenance, RawFrame, Record, Sample,
     Sweep, Value, SCHEMA_VERSION,

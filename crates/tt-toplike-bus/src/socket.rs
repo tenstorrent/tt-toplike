@@ -132,7 +132,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -323,6 +323,10 @@ pub struct SocketServer {
     /// Device and inode of the socket file this server bound, so `Drop`
     /// removes only its own file.
     ident: (u64, u64),
+    /// The open `<path>.lock` file holding this path's exclusive lock.
+    /// Dropped after the socket file is removed, so the next server can
+    /// only start once this one is gone.
+    _lock: fs::File,
 }
 
 impl std::fmt::Debug for SocketServer {
@@ -342,10 +346,21 @@ impl SocketServer {
 
     /// Serve `bus` on a socket at `path` with `opts`.
     ///
-    /// Fails with `AddrInUse` when a server is listening at `path`, and
-    /// with `AlreadyExists` when `path` is something other than a socket.
+    /// Fails with `AddrInUse` when a server is listening at `path` or
+    /// another server holds its lock, with `AlreadyExists` when `path` is
+    /// something other than a socket, and with `PermissionDenied` when the
+    /// directory is not private to this user.
+    ///
+    /// Before it looks at the path, the server takes a non-blocking
+    /// exclusive lock on `<path>.lock` (`flock`, through
+    /// [`fs::File::try_lock`]) and holds it until it is dropped. Two servers
+    /// starting at once on a path that holds a stale socket could otherwise
+    /// both find it stale, and the slower one would delete the faster one's
+    /// new socket. The lock file is left in place when the server stops.
     pub fn spawn_with(bus: Bus, path: &Path, opts: ServerOptions) -> io::Result<SocketServer> {
-        prepare_path(path)?;
+        prepare_dir(path)?;
+        let lock = lock_path(path)?;
+        clear_stale(path)?;
         let listener = UnixListener::bind(path)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         let meta = fs::symlink_metadata(path)?;
@@ -366,6 +381,7 @@ impl SocketServer {
             accept: Some(accept),
             path: path.to_path_buf(),
             ident: (meta.dev(), meta.ino()),
+            _lock: lock,
         })
     }
 
@@ -412,9 +428,8 @@ impl Drop for SocketServer {
     }
 }
 
-/// Create the parent directory if needed, check it is private, and clear
-/// a stale socket file.
-fn prepare_path(path: &Path) -> io::Result<()> {
+/// Create the parent directory if needed and check it is private.
+fn prepare_dir(path: &Path) -> io::Result<()> {
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -440,6 +455,44 @@ fn prepare_path(path: &Path) -> io::Result<()> {
             ),
         ));
     }
+    Ok(())
+}
+
+/// `<path>.lock`: the socket path with `.lock` appended to its file name.
+pub(crate) fn lock_file_for(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// Take the exclusive lock on `<path>.lock`, creating it with mode 0600.
+/// Another holder gives `AddrInUse`.
+fn lock_path(path: &Path) -> io::Result<fs::File> {
+    let lock = lock_file_for(path);
+    let f = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(&lock)?;
+    match f.try_lock() {
+        Ok(()) => Ok(f),
+        Err(fs::TryLockError::WouldBlock) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "the socket {} is in use by another process (it holds {})",
+                path.display(),
+                lock.display()
+            ),
+        )),
+        Err(fs::TryLockError::Error(e)) => Err(e),
+    }
+}
+
+/// Remove a stale socket file at `path`. Fails when a server answers there
+/// or the path is not a socket. Call only while holding the path's lock.
+fn clear_stale(path: &Path) -> io::Result<()> {
     let meta = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),

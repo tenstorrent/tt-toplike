@@ -290,6 +290,53 @@ fn a_client_that_never_reads_is_cut_and_others_keep_receiving() {
     }
 }
 
+/// Two servers start at once on a path holding a stale socket. Without the
+/// lock both could see the stale file, the slower one could delete the
+/// faster one's fresh socket, and both would run. Exactly one may win.
+#[test]
+fn two_servers_racing_for_one_path_leave_exactly_one() {
+    for round in 0..50 {
+        let (_d, path) = sock("race");
+        let bus = world_bus();
+        // Create the private directory and leave a stale socket in it.
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::set_permissions(path.parent().unwrap(), fs::Permissions::from_mode(0o700)).unwrap();
+        drop(UnixListener::bind(&path).unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let (b, bus, path) = (barrier.clone(), bus.clone(), path.clone());
+                thread::spawn(move || {
+                    b.wait();
+                    SocketServer::spawn(bus, &path)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        assert_eq!(ok, 1, "round {round}: {ok} servers started");
+        for r in &results {
+            if let Err(e) = r {
+                assert_eq!(e.kind(), io::ErrorKind::AddrInUse, "round {round}: {e}");
+            }
+        }
+        // The winner's socket is the one on disk.
+        SocketClient::connect(&path).unwrap().snapshot().unwrap();
+    }
+}
+
+#[test]
+fn the_socket_lock_is_released_when_the_server_drops() {
+    let (_d, path) = sock("relock");
+    let bus = world_bus();
+    let first = SocketServer::spawn(bus.clone(), &path).unwrap();
+    let err = SocketServer::spawn(bus.clone(), &path).unwrap_err();
+    assert!(err.to_string().contains("in use"), "{err}");
+    drop(first);
+    assert!(!path.exists(), "the socket file is removed");
+    let _second = SocketServer::spawn(bus, &path).unwrap();
+}
+
 #[test]
 fn a_live_socket_is_refused_and_a_stale_one_replaced() {
     let (_d, path) = sock("live");
