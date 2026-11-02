@@ -39,6 +39,7 @@ pub(crate) mod proc_scan;
 pub(crate) mod reset_status;
 pub mod throttle;
 pub use throttle::ThrottleState;
+mod hivemind_bus;
 mod hivemind_view;
 pub(crate) mod inference_bus;
 pub(crate) mod inference_panel;
@@ -967,6 +968,8 @@ fn run_app(
     // advanced once per animated redraw in the draw branch below, driven by
     // total board activity (`FeedAgg::total_rate`).
     let mut kitt = hivemind_view::KittScanner::new();
+    // What the sweeper last read from the bus (see `hivemind_bus`).
+    let mut hm_bus = hivemind_bus::HivemindBus::default();
     // Stashed argv from a first `/wrap <argv…>` — `/wrap` is the one command
     // in this subsystem with a real side effect (it spawns the given
     // command), so it's gated behind a confirmation: typing the exact same
@@ -1632,6 +1635,8 @@ fn run_app(
                     if let Some(h) = hivemind.as_mut() {
                         h.poll();
                     }
+                    // The bus strip, bus feed rows and the scanner's bus input.
+                    hm_bus.update(tui_bus, backend.as_ref());
                 }
                 DisplayMode::Training => {
                     if train_view.is_none() {
@@ -1978,12 +1983,13 @@ fn run_app(
                                 // and wide; busy slows down and focuses into a
                                 // bright core (see `hivemind_view::KittScanner`).
                                 let kitt_activity =
-                                    hivemind_view::kitt_activity_norm(h.feed().total_rate());
+                                    hm_bus.kitt_activity(h.feed().total_rate(), Instant::now());
                                 kitt.advance(kitt_activity);
                                 hivemind_view::render_hivemind(
                                     f,
                                     f.area(),
                                     h,
+                                    &hm_bus,
                                     hm_cursor,
                                     hm_auto,
                                     hm_unified,

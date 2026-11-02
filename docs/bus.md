@@ -737,6 +737,41 @@ attached TUI refuses it too (`backend switch is disabled while attached to a bus
 backend would put mock chips at the PCI addresses real boards use, under the host's measured
 readings. A memory-only bus follows the switch.
 
+### The `~` view (HivemindSweeper)
+
+The `~` view reads the bus the way Die 3D does (`TuiBus::read`, limited to local chips when
+attached), at the data rate, in `src/ui/tui/hivemind_bus.rs`. It draws three things from it.
+
+* **A strip under the title.** One cell per local chip that runs a model (`model_on_chip`):
+  `D<n>`, Die 3D's flag text (label, phase word, progress, tokens per second, waiting count),
+  and an eight-cell bar. The bar follows the reported progress while the model compiles or
+  loads and is full once it is ready. The cell takes the phase colour (`phase_rgb`). An
+  estimated model starts with `~` (`model_text_is_estimated`). With no model on any chip the
+  strip takes no row, and the view draws what it drew before the bus.
+* **Bus rows in the feed.** `ModelLoading`, `ModelReady`, `ModelGone`, `RequestsCompleted`,
+  `KernelCompiled`, `Spark` and `Reset` become feed rows that start with `bus: `. They coalesce
+  like the sweeper's rows and follow the same `s` floor and `f` unified mode. Severity: a
+  model coming up is `notice`, a model going away or a reset is `warn`, requests, kernel
+  compiles and sparks are `info`. The module doc has the full table. A re-announcement with an
+  unchanged phase and chips adds nothing.
+* **The KITT scanner's input.** The larger of the board's rate (as before) and a bus rate: the
+  smoothed `RequestsCompleted` rate (4 requests a second is full activity) or the summed
+  `tokens_per_s` of the local models (100 a second is full), plus a one-second surge when
+  requests complete. With no bus signal the scanner moves exactly as before.
+
+Events already in the world when `~` first reads it, and events that arrived while it was off
+screen, are history. They appear dimmed under the live rows and give no surge. The rule and
+its constant are Die 3D's.
+
+On a bus this TUI hosts, `Spark`, `KernelCompiled` and `Reset` came from this sweeper's own
+collectors and reset detector, so they are not shown twice. Attached to a headless host, they
+are the host's sparks, and they show. Events that name only chips this TUI does not have show
+nothing. Attached to a host on another machine, no chip counts as local.
+
+The scanner's motion and the surge's shape are decoration that responds to measured rates.
+The strip's text and bar come from the reported readings. The collectors still run only
+while `~` is on screen.
+
 ---
 
 ## 9. Privacy

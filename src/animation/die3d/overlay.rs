@@ -284,7 +284,7 @@ fn number(v: &Value) -> Option<f64> {
 }
 
 /// Pulse strength for `n` completed requests.
-fn strength(n: u32) -> f32 {
+pub(crate) fn strength(n: u32) -> f32 {
     (0.3 + 0.1 * n as f32).min(1.0)
 }
 
@@ -512,7 +512,7 @@ pub(crate) fn model_text_is_estimated(world: &dyn WorldRead, m: &ModelView) -> b
 }
 
 /// The flag of model `m`.
-fn flag_of(world: &dyn WorldRead, m: &ModelView) -> ModelFlag {
+pub(crate) fn flag_of(world: &dyn WorldRead, m: &ModelView) -> ModelFlag {
     let estimated = model_text_is_estimated(world, m);
     ModelFlag {
         label: m.label.clone(),
