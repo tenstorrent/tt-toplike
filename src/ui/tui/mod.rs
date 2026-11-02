@@ -1660,6 +1660,11 @@ fn run_app(
                         train_active = tm.state().proc.is_some();
                     }
                     if let Some(ref mut tv) = train_view {
+                        // The bus: a run seen through the world, step pulses,
+                        // the sky's pace, the run's chips and the models beside
+                        // it (see `train_bus`).
+                        tv.set_bus(Some(&tui_bus.read()), backend);
+                        train_active |= tv.shows_bus_run();
                         tv.update();
                     }
                 }
@@ -4534,7 +4539,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 DisplayMode::Insights => insights_legend_lines(bar, bg, dim),
                 DisplayMode::Grid => grid_legend_lines(bar, bg, dim),
                 DisplayMode::HivemindSweeper => hivemind_view::legend_lines(bar, bg, dim),
-                DisplayMode::Training => train_legend_lines(bar, bg, dim),
+                DisplayMode::Training => {
+                    let mut v = train_legend_lines(bar, bg, dim);
+                    v.extend(crate::animation::train_bus::legend_lines(bar, bg, dim));
+                    v
+                }
                 DisplayMode::Die3d => die3d_legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => {
                     // All four combined.
@@ -4930,7 +4939,11 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     "stream can't be read after the fact: relaunch with",
                     "'> train.log' and the view picks it up automatically.",
                     "Press l for the symbol legend.",
-                ],
+                ]
+                .iter()
+                .chain(crate::animation::train_bus::EXPLAIN_TEXT)
+                .copied()
+                .collect::<Vec<&str>>(),
                 cols,
             ),
         },

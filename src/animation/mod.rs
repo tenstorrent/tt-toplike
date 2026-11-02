@@ -37,6 +37,7 @@ pub mod snake;
 pub mod starfield;
 pub mod takeover;
 pub mod topology;
+pub mod train_bus;
 pub mod train_canvas;
 pub mod train_sky;
 pub mod train_tapestry;

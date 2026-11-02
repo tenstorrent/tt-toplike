@@ -176,6 +176,10 @@ pub struct TrainState {
     /// Surfaced in the header: this tool's premise is that every pixel maps
     /// to a real signal, so synthetic data has to say so.
     pub is_mock: bool,
+    /// This run was read from the signal bus (`animation::train_bus`), not
+    /// from a local trainer. The header then says `bus`, and `is_mock` means
+    /// the bus marked the readings as estimates.
+    pub seen_on_bus: bool,
 }
 
 impl TrainState {

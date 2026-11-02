@@ -777,6 +777,33 @@ The scanner's motion and the surge's shape are decoration that responds to measu
 The strip's text and bar come from the reported readings. The collectors still run only
 while `~` is on screen.
 
+### The Training view on the bus
+
+The Training view (`t`) reads the bus on every update through `TrainFx::from_world`
+(`src/animation/train_bus.rs`), limited to local chips when attached. Views find the run
+through `WorldRead::entities(EntityKind::TrainingRun)`: a run key holds the trainer's pid and
+start time, so a view cannot build it. The view shows the run whose `toplike.train.step`
+reading is newest, while that reading is at most 30 s old.
+
+The world keeps only the latest reading of each signal, so the view keeps its own history of
+successive reads. Each read in which the step went up adds one loss point and, when a step
+time is known, one step sample. Several steps that land between two reads give one point.
+
+| What | Signal | Measured, derived or decoration |
+|---|---|---|
+| With no trainer on this machine, the run seen on the bus, drawn with the view's usual look: header, step band, LIVE panel and loss mountains. The title says `TRAINING · bus` | `toplike.train.step`, `max_steps`, `loss`, `step_ms`, `cpu_pct`, `rss_bytes` | as the source reports them. A step time the source marks `Derived` (timed from a progress bar) puts "(from bar)" in the band's title |
+| `~bus` in the title | any of the run's readings `Estimated` or `Decoration` | provenance |
+| A pulse on the newest columns of the step band when a step lands: amber for a plain step, mint and brighter when the loss fell by more than 1% of its last value, dim coral when it rose by more than 1% | the step going up between two reads, and the loss change | the step and loss are read; the pulse's width (one column per percent of loss change, up to six) is derived from them; its colour, glyph `┊` and fade are decoration |
+| The sky's aurora drift and star twinkle at half to twice their usual speed | `toplike.train.step_ms`, fresh | the mapping from step time to speed is decoration |
+| `▸` before a chip's tag in the CHIPS row | `toplike.train.chips`, cut to the TUI's own chips | as the source reports it |
+| `SAME CHIPS` under the CHIPS row: each model announced on one of the run's chips (not `Down`), with its phase and tokens/s, in its phase colour | `models()` and the run's chips | as the source reports them; `~` through `model_text_is_estimated` |
+
+A local trainer always wins over the bus run: its state has the log path, the config and the
+checkpoints, which the bus does not carry. A step already in the world when the view first
+reads it makes no pulse, and neither does a step that landed while the view was off screen.
+The rule and its constants are Die 3D's. With an empty world the view draws the frames it drew
+before the bus; a test pins them by hash.
+
 ---
 
 ## 9. Privacy

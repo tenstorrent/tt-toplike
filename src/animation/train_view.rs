@@ -29,6 +29,7 @@
 
 use crate::animation::common::hsv_to_rgb;
 use crate::animation::inference_load::{fmt_bytes, fmt_elapsed, group_thousands};
+use crate::animation::train_bus::{PulseKind, TrainBusState, TrainFx};
 use crate::animation::train_canvas::{
     braille_char, median_cell_row, place_stars, weave_columns, y_range, StarKind, DOTS_X,
 };
@@ -84,6 +85,14 @@ pub(crate) fn legend_channels(loss_color: Color) -> [(char, &'static str, Color)
         ('░', "aurora", Color::Rgb(120, 180, 150)),
     ]
 }
+
+/// The training amber of the shared workload colours
+/// (`activity_lanes::TRAIN_RGB`): the bus's step pulse and the `▸` on the
+/// run's chips.
+const BUS_TRAIN_AMBER: Color = {
+    let c = crate::animation::activity_lanes::TRAIN_RGB;
+    Color::Rgb(c[0], c[1], c[2])
+};
 
 /// The pre-2026-08-31 fixed ceiling, kept for runs with no vocabulary.
 const LEGACY_LOSS_CEILING: f32 = 4.6;
@@ -277,6 +286,21 @@ pub struct TrainView {
     /// at 0, and a backlog read at attach can start the new run at the old
     /// run's last number. `sample` clears `history` when this changes.
     run_id: StdCell<Option<(i32, Option<std::time::Instant>)>>,
+    /// What the bus puts on the view (see `train_bus`), worked out in
+    /// `set_bus` at each update, with the bus time it was worked out at.
+    bus_fx: TrainFx,
+    bus_state: TrainBusState,
+    bus_now: u64,
+    /// The sky's own clock, in frames. It runs at the frame rate times the
+    /// bus pace (`TrainFx::sky_pace`), so the step time sets how fast the
+    /// aurora drifts and the stars twinkle. With no pace it equals `frame`.
+    sky_clock: StdCell<f64>,
+    /// The `frame` the sky clock was last advanced to.
+    sky_seen: StdCell<u64>,
+    /// The band rows the last `draw_tapestry` gave to the starfield and the
+    /// weave, as `start..end`. A step pulse is drawn only in these rows, so it
+    /// never covers the band's text rows.
+    pulse_rows: StdCell<(usize, usize)>,
 }
 
 /// One weave row: its label, one cell per data column (`None` for a column
@@ -324,7 +348,64 @@ impl TrainView {
             swell_phase: StdCell::new(0.0),
             swell_frame: StdCell::new(0),
             run_id: StdCell::new(None),
+            bus_fx: TrainFx::default(),
+            bus_state: TrainBusState::default(),
+            bus_now: 0,
+            sky_clock: StdCell::new(0.0),
+            sky_seen: StdCell::new(0),
+            pulse_rows: StdCell::new((0, 0)),
         }
+    }
+
+    /// Hand the view the signal bus's world (`TuiBus::read`), once per
+    /// update. It works out what the bus puts on the view (see `train_bus`):
+    /// a run seen through the world, step pulses, the sky's pace, the run's
+    /// chips and the models beside it. Only `backend`'s chips are drawn on.
+    /// With `None` the view draws what it drew before the bus, and the next
+    /// world is read as a first sight.
+    pub fn set_bus(
+        &mut self,
+        world: Option<&dyn tt_toplike_bus::WorldRead>,
+        backend: &dyn TelemetryBackend,
+    ) {
+        match world {
+            Some(w) => {
+                // The bus names a chip by its PCI address, never by position.
+                let chips: Vec<(usize, tt_toplike_bus::EntityKey)> = backend
+                    .devices()
+                    .iter()
+                    .filter(|d| !d.bus_id.is_empty())
+                    .map(|d| (d.index, tt_toplike_bus::EntityKey::chip(&d.bus_id)))
+                    .collect();
+                let now = w.now_mono_ns();
+                self.bus_fx = TrainFx::from_world(w, &chips, now, &mut self.bus_state);
+                self.bus_now = now;
+            }
+            None => {
+                self.bus_fx = TrainFx::default();
+                self.bus_state = TrainBusState::default();
+            }
+        }
+    }
+
+    /// Whether the view has a run seen on the bus to draw when there is no
+    /// local trainer.
+    pub fn shows_bus_run(&self) -> bool {
+        self.bus_state.world_state().is_some()
+    }
+
+    /// Advance the sky clock to the current frame at the bus pace.
+    fn advance_sky(&self) {
+        let frames = self.frame.saturating_sub(self.sky_seen.get());
+        let pace = f64::from(self.bus_fx.sky_pace());
+        self.sky_clock
+            .set(self.sky_clock.get() + frames as f64 * pace);
+        self.sky_seen.set(self.frame);
+    }
+
+    /// The sky clock as a frame number, for `sky_cell`.
+    fn sky_frame(&self) -> u64 {
+        self.sky_clock.get() as u64
     }
 
     pub fn update(&mut self) {
@@ -334,6 +415,13 @@ impl TrainView {
     pub fn render(&self, st: &TrainState, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
         let mut buf = vec![vec![Cell::default(); self.width]; self.height];
         self.draw_frame(&mut buf);
+        self.advance_sky();
+        // With no local trainer, a run seen on the bus is drawn instead (see
+        // `train_bus`). A local trainer always wins.
+        let st = match (st.proc.as_ref(), self.bus_state.world_state()) {
+            (None, Some(w)) => w,
+            _ => st,
+        };
 
         match st.proc.as_ref() {
             None => self.draw_scanning(&mut buf),
@@ -341,6 +429,20 @@ impl TrainView {
                 self.sample(st, backend);
                 self.draw_header(&mut buf, st);
                 match st.log.as_ref() {
+                    // A run read from the bus has no log of its own, but its
+                    // stream of steps and losses is the log's: it is drawn
+                    // as a run with a log.
+                    _ if st.seen_on_bus => {
+                        let (show_model, show_live) = self.panel_fit();
+                        if show_model {
+                            self.draw_model_card(&mut buf, st);
+                        }
+                        self.draw_tapestry(&mut buf, st, backend);
+                        if show_live {
+                            self.draw_live_stats(&mut buf, st);
+                        }
+                        self.draw_river(&mut buf, st);
+                    }
                     Some(LogSource::File(_)) => {
                         // Side panels degrade gracefully rather than
                         // overlapping at narrow widths: the model card and
@@ -384,6 +486,7 @@ impl TrainView {
                 }
                 self.draw_chips(&mut buf, backend);
                 self.draw_legend(&mut buf, st);
+                self.draw_bus(&mut buf);
             }
         }
         self.to_lines(buf)
@@ -537,7 +640,7 @@ impl TrainView {
         for y in top..bottom {
             let rel_y = (y - top) as f32 / span as f32;
             for x in 1..self.width {
-                if let Some(sc) = sky_cell(x, y, rel_y, self.frame) {
+                if let Some(sc) = sky_cell(x, y, rel_y, self.sky_frame()) {
                     self.put(buf, x, y, sc.ch, sc.color, false);
                 }
             }
@@ -595,7 +698,17 @@ impl TrainView {
         // A fabricated run says so, right in the title. This tool's premise
         // is that every pixel maps to a real signal; synthetic data that
         // looked identical to a real run would quietly break that promise.
-        let left = if st.is_mock {
+        let left = if st.seen_on_bus {
+            // Read from the bus: `~bus` when the bus marked the readings as
+            // estimates (a mock backend). `run:local` has no pid to show.
+            let tilde = if st.is_mock { "~" } else { "" };
+            let pid_part = if pid > 0 {
+                format!(" · pid {pid}")
+            } else {
+                String::new()
+            };
+            format!("═[ TRAINING · {tilde}bus ]  {binary}{pid_part} ")
+        } else if st.is_mock {
             format!("═[ TRAINING · mock ]  {binary} ")
         } else {
             format!("═[ TRAINING ]  {binary} · pid {pid} ")
@@ -654,6 +767,7 @@ impl TrainView {
 
         // Second header row: how we attached, plus the step counter.
         let attach_desc = match st.log.as_ref() {
+            _ if st.seen_on_bus => " seen on the signal bus".to_string(),
             Some(LogSource::File(p)) => format!(" auto-attached  {}", p.display()),
             Some(LogSource::NotRedirected) => " auto-attached  stdout not redirected".to_string(),
             None => " scanning for log".to_string(),
@@ -1367,6 +1481,7 @@ impl TrainView {
             self.draw_weave_row(buf, x0, y, geom, row);
             y += 1;
         }
+        self.pulse_rows.set((y_stars, y));
 
         // ── diagnosis ────────────────────────────────────────────────
         if let (true, Some((kind, line))) = (plan.verdict_row, verdict.as_ref()) {
@@ -1566,7 +1681,7 @@ impl TrainView {
             for x in 1..self.width {
                 for y in river_top..river_bottom {
                     let rel_y = (y - river_top) as f32 / sky_rows.max(1) as f32;
-                    if let Some(sc) = sky_cell(x, y, rel_y, self.frame) {
+                    if let Some(sc) = sky_cell(x, y, rel_y, self.sky_frame()) {
                         self.put(buf, x, y, sc.ch, sc.color, false);
                     }
                 }
@@ -1648,7 +1763,7 @@ impl TrainView {
                     // top of the band, 1 at the mountain line, so it's the
                     // inverse of `row_from_bottom`.
                     let rel_y = 1.0 - (row_from_bottom as f32 / sky_rows.max(1) as f32);
-                    if let Some(sc) = sky_cell(x, y, rel_y, self.frame) {
+                    if let Some(sc) = sky_cell(x, y, rel_y, self.sky_frame()) {
                         self.put(buf, x, y, sc.ch, sc.color, false);
                     }
                 }
@@ -1754,6 +1869,11 @@ impl TrainView {
             let tcolor = colors::temp_color(temp);
             let tag = Self::chip_tag(idx, temp, power);
             let tag = Self::clip(&tag, self.width.saturating_sub(x + 1));
+            // The training run uses this chip (from the bus, `train_bus`).
+            // The column before a tag is always blank.
+            if self.bus_fx.run_devices.contains(&idx) {
+                self.put(buf, x - 1, y, '▸', BUS_TRAIN_AMBER, true);
+            }
             self.text(buf, x, y, &tag, tcolor, false);
             x += tag.chars().count();
 
@@ -1793,7 +1913,7 @@ impl TrainView {
         // screen the viewer is not looking at. Only the channels that survive
         // that state are listed. `log` is `None` while still scanning, which
         // is also a state with no curve.
-        let has_stream = matches!(st.log, Some(LogSource::File(_)));
+        let has_stream = matches!(st.log, Some(LogSource::File(_))) || st.seen_on_bus;
         let all = legend_channels(loss_color);
         // Every channel is drawn without a stream *except* the ones that need
         // a loss value: the tapestry band and the river (nightscape, aurora,
@@ -1827,6 +1947,113 @@ impl TrainView {
             let n = text.chars().count();
             self.text(buf, x, y, &text, Color::Rgb(170, 170, 190), false);
             x += n + 2;
+        }
+    }
+
+    /// What is left (1 down to 0) of a pulse that started at `start`, at the
+    /// bus time of the last update, stepped to 12 steps a second as Die 3D's
+    /// effects are; 0 once `PULSE_NS` has passed.
+    fn pulse_left(&self, start: u64) -> f32 {
+        use crate::animation::die3d::overlay::PULSE_NS;
+        let dt = self.bus_now.saturating_sub(start);
+        if dt >= PULSE_NS {
+            return 0.0;
+        }
+        let steps = (dt as f64 / PULSE_NS as f64 * 12.0).floor() / 12.0;
+        (1.0 - steps as f32).max(0.0)
+    }
+
+    /// Draw the bus's step pulses and the `SAME CHIPS` strip (see
+    /// `train_bus`). Arithmetic on `bus_fx` only. An empty `bus_fx` changes
+    /// nothing. The chips' `▸` marks are drawn by `draw_chips`.
+    fn draw_bus(&self, buf: &mut [Vec<Cell>]) {
+        let fx = &self.bus_fx;
+        if fx.pulses.is_empty() && fx.neighbours.is_empty() {
+            return;
+        }
+        let blank = Cell::default();
+        let rgb = |c: Color| match c {
+            Color::Rgb(r, g, b) => [r, g, b],
+            _ => [200, 200, 200],
+        };
+        let mix = |a: Color, b: [u8; 3], t: f32| {
+            let c = crate::animation::die3d::overlay::lerp(rgb(a), b, t.clamp(0.0, 1.0));
+            Color::Rgb(c[0], c[1], c[2])
+        };
+
+        // Step pulses on the newest data columns of the step band.
+        let (x0, w) = self.network_bounds();
+        let geom = Self::band_geom(x0, w);
+        let end = geom.x_data + geom.data_w;
+        let (top, bottom) = self.pulse_rows.get();
+        for p in &fx.pulses {
+            let left = self.pulse_left(p.start_ns);
+            if left <= 0.0 {
+                continue;
+            }
+            // Decoration: the colour, the glyph and the fade. The width is
+            // derived from the measured loss change (`StepPulse::cols`).
+            let (colour, weight, bold) = match p.kind {
+                PulseKind::Step => (BUS_TRAIN_AMBER, 0.6, false),
+                PulseKind::LossFall => (Color::Rgb(120, 230, 190), 1.0, true),
+                PulseKind::LossRise => (Color::Rgb(255, 140, 120), 0.35, false),
+            };
+            let t = weight * left;
+            let cols = p.cols().min(geom.data_w);
+            for x in end.saturating_sub(cols)..end {
+                for y in top..bottom.min(self.height) {
+                    let Some(c) = buf.get(y).and_then(|r| r.get(x)).copied() else {
+                        continue;
+                    };
+                    if c.ch == ' ' {
+                        self.put(buf, x, y, '┊', mix(blank.fg, rgb(colour), t), bold);
+                    } else {
+                        self.put(buf, x, y, c.ch, mix(c.fg, rgb(colour), t), bold || c.bold);
+                    }
+                }
+            }
+        }
+
+        // The models served on the run's chips, under the CHIPS row.
+        let Layout {
+            chips_row,
+            legend_row,
+            ..
+        } = self.layout();
+        let y = chips_row + 1;
+        if fx.neighbours.is_empty() || y >= legend_row {
+            return;
+        }
+        const LABEL: &str = "SAME CHIPS";
+        let mut x = 2 + LABEL.chars().count() + 1;
+        let room = |x: usize| self.width.saturating_sub(x + 1);
+        let mut drawn = false;
+        for n in &fx.neighbours {
+            let dev_w = n.devices_text.chars().count();
+            // The longest form that fits with its chips, else alone.
+            let with_dev = n
+                .texts
+                .iter()
+                .find(|t| t.chars().count() + dev_w <= room(x));
+            let (text, dev) = match with_dev {
+                Some(t) => (t, true),
+                None => match n.texts.iter().find(|t| t.chars().count() <= room(x)) {
+                    Some(t) => (t, false),
+                    None => break,
+                },
+            };
+            let c = n.flag.colour;
+            self.text(buf, x, y, text, Color::Rgb(c[0], c[1], c[2]), true);
+            x += text.chars().count();
+            if dev {
+                self.text(buf, x, y, &n.devices_text, Color::Rgb(150, 160, 190), false);
+                x += dev_w;
+            }
+            x += 2;
+            drawn = true;
+        }
+        if drawn {
+            self.text(buf, 2, y, LABEL, Color::Rgb(180, 200, 255), true);
         }
     }
 
