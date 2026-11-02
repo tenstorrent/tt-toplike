@@ -1,6 +1,6 @@
 # Saga: a generative quest drawn from the machine's own signals
 
-Working title. Date: 2026-11-02. Status: draft for review. Author: Claude, with Taylor Singletary.
+Date: 2026-11-02. Status: name and defaults approved by the user (2026-11-02); ready for an implementation plan. Author: Claude, with Taylor Singletary.
 
 ## 1. Intent
 
@@ -254,6 +254,30 @@ text file in a human-editable format (loosely like the Ming Mecca world packs: r
 tiles and sprites, missing parts fall back to the defaults). Phase 4 builds the loader. Before then
 the same data is a Rust table so the format can follow what the code needs.
 
+### 7.1 The lexicon
+
+The user: "real model and process names, but also names and words from Tenstorrent, our chips,
+branding, and AI and ML -- so many good words and concepts to gamify." The default pack carries a
+large lexicon, grouped by what a name stands for so every name fits its meaning (a tag such as
+`monster:thermal`, `monster:ecc`, `npc:model`, `item:request`, `place:vault`, `title:honorific`).
+Names combine as "adjective noun" or "noun of the noun", seeded like everything else.
+
+Starter sources, to be grown by whoever writes the pack:
+- **Tenstorrent and its chips:** Tenstorrent, Grayskull, Wormhole, Blackhole, Tensix, the NoC, Ethernet
+  links between chips, QuietBox, the SFPU and matrix engine, tt-smi, TT-Metalium, TTNN, tt-lang, tt-kmd,
+  tt-station, tensixinet, the hivemind sweeper, gozer (the warden who grants leases), "Season of Models".
+- **AI and ML:** attention, heads, softmax, logits, temperature, top-p, tokens, tokenizers, the context
+  window, the KV cache, prefill and decode, embeddings, the residual stream, layer norm, mixture of
+  experts and their router, quantization, LoRA, distillation, gradients, loss, epochs, checkpoints,
+  overfitting, vanishing gradients, hallucination, prompt injection, benchmarks.
+- **Real names from the box:** model names (the sage "Llama-3.1-8B"), service and process names, never
+  command lines.
+
+The default look uses the Tenstorrent brand palette (dark forest teal `#092221`, blue accent `#1B8EB1`,
+teal `#74C5DF`, green `#6FABA0`, yellow `#F6BC42`, orange `#FA512E`; the docs-site theme is the source of
+truth). Product and chip names are used as names of things in the world, with respect, and a pack can
+replace any word. Flavour never changes the cause: a Softmax Wyrm is still a throttle.
+
 Phase 4 may also add a **glitch mode** after the manual's idea: terrain drawn from real raw data
 (tt-smi words, NoC counter arrays, log records), shown only when switched on and labelled raw.
 
@@ -329,11 +353,17 @@ Calls made while writing this, so they can be checked (see sections 3.5 to 3.10)
 - One dungeon floor per chip. Blackhole first.
 - Mock and replay stories are labelled.
 
-Still the user's:
-- Working title "Saga". Alternatives: Silicon Saga, Rogue Tensix, Tensix Tales, Dungeon Die. The user
-  likes a fun name (the Wafer Waffler).
-- Real model and process names in the story by default, with `names = "generated"` as an opt-in. My
-  guess is real names, since the `i` view already shows them.
-- The core as a separate crate (`tt-toplike-saga`) beside the bus crate. My guess is yes, so tensixinet
-  and tt-station can depend on it.
+Decided by the user on 2026-11-02:
+- The name is Saga.
+- Real model and process names by default, plus the Tenstorrent and AI/ML lexicon (7.1).
+  `names = "generated"` stays as an opt-in for screen sharing.
+- The crate: tt-station is unlikely to use the game and the user did not need a separate crate, but said
+  "if separation of concerns is better for iteration and more rustlike, do it". Decision: a separate
+  crate in the same workspace and repository, `crates/tt-toplike-saga`, because (a) the pure core
+  compiles and tests in seconds without the TUI, (b) its dependency list enforces determinism (the bus
+  crate's types and a seeded generator only: no clock, no terminal, no OS randomness, no I/O), (c) the
+  headless host and the TUI both drive it, and (d) the view stays in `tt-toplike`. It is not a separate
+  repository.
+
+Still open:
 - The local-model narrator is a later, optional step. The grammar is the baseline.
