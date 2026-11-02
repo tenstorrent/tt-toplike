@@ -35,6 +35,20 @@
 //! since the last failed attempt; when a retry succeeds, the outage is over
 //! and the next failure publishes a new gap.
 //!
+//! A segment whose write failed is closed where it stopped. It stays in the
+//! segment list with its size on disk, so its records can still be read, it
+//! counts toward [`BusStats`], and retention deletes it in time. The next
+//! successful write opens a new segment.
+//!
+//! # Shutdown
+//!
+//! Dropping the last [`Bus`] handle disconnects the writer queue. The writer
+//! writes every record still queued, flushes and exits, and the drop waits
+//! up to two seconds for it. A writer stuck on a hung disk is detached with a
+//! message on stderr. A [`Subscription`] does not keep the writer running:
+//! it holds the in-memory log only, so it keeps reading after the last `Bus`
+//! is gone.
+//!
 //! When disk records are lost (a dropped write, a corrupt line, a deleted
 //! segment), a read that reaches the hole stops there. A read that starts
 //! inside a hole returns [`ReadError::Dropped`] with the next readable
@@ -165,6 +179,18 @@ struct Disk {
     gap_pending: AtomicBool,
     reason: Mutex<String>,
     dropped: AtomicU64,
+    #[cfg(test)]
+    hooks: TestHooks,
+}
+
+/// Fault injection for tests. Not compiled into normal builds.
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct TestHooks {
+    /// Every record write fails as if the disk were full.
+    fail_writes: AtomicBool,
+    /// The writer sleeps this long after receiving each batch.
+    batch_delay_ms: AtomicU64,
 }
 
 impl Disk {
@@ -184,6 +210,9 @@ struct State {
     window: VecDeque<Record>,
     reducer: Box<dyn Reducer>,
     dropped_non_finite: u64,
+    /// Queue to the disk writer. `None` with no log directory, and after the
+    /// last `Bus` handle is dropped (that disconnect stops the writer).
+    tx: Option<SyncSender<Msg>>,
 }
 
 enum Msg {
@@ -196,8 +225,43 @@ struct Inner {
     cond: Condvar,
     window_records: usize,
     clock: Arc<dyn Clock>,
-    tx: Option<SyncSender<Msg>>,
     disk: Option<Arc<Disk>>,
+}
+
+/// How long dropping the last `Bus` handle waits for the writer to finish.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(2);
+
+/// Owns the writer thread. Only `Bus` handles hold it, so the writer stops
+/// when the last `Bus` is dropped even while subscriptions are alive.
+/// Subscriptions hold the shared `Inner` (read-only use) and keep working
+/// on what is in memory and on disk.
+struct WriterGuard {
+    inner: Arc<Inner>,
+    thread: Option<thread::JoinHandle<()>>,
+    /// Disconnects when the writer thread returns. In a `Mutex` only
+    /// because `Receiver` is not `Sync` and `Bus` must be.
+    done: Mutex<Option<Receiver<()>>>,
+}
+
+impl Drop for WriterGuard {
+    /// Disconnect the queue so the writer drains it, flushes and exits, then
+    /// wait for it. If it does not finish within [`SHUTDOWN_WAIT`] (a hung
+    /// disk), detach it and say so on stderr.
+    fn drop(&mut self) {
+        drop(lock(&self.inner.state).tx.take());
+        let done = lock(&self.done).take();
+        if let Some(done) = done {
+            if let Err(mpsc::RecvTimeoutError::Timeout) = done.recv_timeout(SHUTDOWN_WAIT) {
+                eprintln!(
+                    "tt-toplike-bus: log writer did not finish within {SHUTDOWN_WAIT:?}; detaching it"
+                );
+                return;
+            }
+        }
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
+    }
 }
 
 /// Lock a mutex, recovering it if a thread panicked while holding it. A
@@ -210,6 +274,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 #[derive(Clone)]
 pub struct Bus {
     inner: Arc<Inner>,
+    _writer: Arc<WriterGuard>,
 }
 
 impl fmt::Debug for Bus {
@@ -235,6 +300,8 @@ impl Bus {
         let window_records = cfg.window_records.max(1);
         let mut head = 0;
         let mut tx = None;
+        let mut thread_handle = None;
+        let mut done = None;
         let mut disk = None;
         let mut startup_failure = None;
 
@@ -246,6 +313,8 @@ impl Bus {
                 gap_pending: AtomicBool::new(false),
                 reason: Mutex::new(String::new()),
                 dropped: AtomicU64::new(0),
+                #[cfg(test)]
+                hooks: TestHooks::default(),
             });
             let mut first = None;
             match prepare(&dir) {
@@ -283,27 +352,42 @@ impl Bus {
                 }),
                 last_attempt_ms: None,
             };
-            thread::Builder::new()
-                .name("tt-toplike-bus-writer".into())
-                .spawn(move || writer.run(receiver))?;
+            let (done_tx, done_rx) = mpsc::sync_channel::<()>(0);
+            thread_handle = Some(
+                thread::Builder::new()
+                    .name("tt-toplike-bus-writer".into())
+                    .spawn(move || {
+                        // Dropped when this thread returns, which tells
+                        // `WriterGuard::drop` the writer has finished.
+                        let _done = done_tx;
+                        writer.run(receiver);
+                    })?,
+            );
+            done = Some(done_rx);
             tx = Some(sender);
             disk = Some(d);
         }
 
-        let bus = Bus {
-            inner: Arc::new(Inner {
-                state: Mutex::new(State {
-                    head,
-                    window: VecDeque::new(),
-                    reducer,
-                    dropped_non_finite: 0,
-                }),
-                cond: Condvar::new(),
-                window_records,
-                clock: cfg.clock,
+        let inner = Arc::new(Inner {
+            state: Mutex::new(State {
+                head,
+                window: VecDeque::new(),
+                reducer,
+                dropped_non_finite: 0,
                 tx,
-                disk,
             }),
+            cond: Condvar::new(),
+            window_records,
+            clock: cfg.clock,
+            disk,
+        });
+        let bus = Bus {
+            _writer: Arc::new(WriterGuard {
+                inner: inner.clone(),
+                thread: thread_handle,
+                done: Mutex::new(done),
+            }),
+            inner,
         };
         if let Some(why) = startup_failure {
             bus.publish(BUS_SOURCE, Payload::Gap(Gap { reason: why }));
@@ -350,28 +434,7 @@ impl Bus {
     /// returns [`ReadError::Dropped`]. 0 is read as 1. Records that have
     /// left memory are read from the segment files.
     pub fn read_from(&self, seq: u64, max: usize) -> Result<Vec<Record>, ReadError> {
-        let seq = seq.max(1);
-        let mem_oldest = {
-            let st = lock(&self.inner.state);
-            if seq > st.head + 1 {
-                return Err(ReadError::Future { head: st.head });
-            }
-            let mem_oldest = st.window.front().map_or(st.head + 1, |r| r.seq);
-            if seq >= mem_oldest {
-                return Ok(copy_window(&st.window, seq, max));
-            }
-            mem_oldest
-        };
-        // Older than memory: read from disk, then top up from memory.
-        let mut out = self.read_disk(seq, max, mem_oldest)?;
-        if out.len() < max {
-            let next = seq + out.len() as u64;
-            let st = lock(&self.inner.state);
-            if st.window.front().is_some_and(|r| r.seq <= next) {
-                out.extend(copy_window(&st.window, next, max - out.len()));
-            }
-        }
-        Ok(out)
+        self.inner.read_from(seq, max)
     }
 
     /// Follow the log from just after `seq`.
@@ -389,9 +452,11 @@ impl Bus {
         let buf: VecDeque<Record> = self.read_from(seq + 1, SUBSCRIPTION_BATCH)?.into();
         let next = buf.back().map_or(seq + 1, |r| r.seq + 1);
         Ok(Subscription {
-            bus: self.clone(),
+            inner: self.inner.clone(),
             next,
             buf,
+            #[cfg(test)]
+            reads: 0,
         })
     }
 
@@ -421,7 +486,8 @@ impl Bus {
     /// no log directory it returns true at once. For tests and shutdown;
     /// `publish` never calls it.
     pub fn flush(&self, timeout: Duration) -> bool {
-        let Some(tx) = &self.inner.tx else {
+        // Clone the sender and release the lock before a send that may wait.
+        let Some(tx) = lock(&self.inner.state).tx.clone() else {
             return true;
         };
         let (ack_tx, ack_rx) = mpsc::sync_channel(1);
@@ -440,10 +506,37 @@ impl Bus {
         let any: &dyn Any = &*st.reducer;
         any.downcast_ref::<R>().map(|r| f(r, st.head))
     }
+}
+
+impl Inner {
+    fn read_from(&self, seq: u64, max: usize) -> Result<Vec<Record>, ReadError> {
+        let seq = seq.max(1);
+        let mem_oldest = {
+            let st = lock(&self.state);
+            if seq > st.head + 1 {
+                return Err(ReadError::Future { head: st.head });
+            }
+            let mem_oldest = st.window.front().map_or(st.head + 1, |r| r.seq);
+            if seq >= mem_oldest {
+                return Ok(copy_window(&st.window, seq, max));
+            }
+            mem_oldest
+        };
+        // Older than memory: read from disk, then top up from memory.
+        let mut out = self.read_disk(seq, max, mem_oldest)?;
+        if out.len() < max {
+            let next = seq + out.len() as u64;
+            let st = lock(&self.state);
+            if st.window.front().is_some_and(|r| r.seq <= next) {
+                out.extend(copy_window(&st.window, next, max - out.len()));
+            }
+        }
+        Ok(out)
+    }
 
     /// Read `[seq, limit)` from the segment files, at most `max` records.
     fn read_disk(&self, seq: u64, max: usize, limit: u64) -> Result<Vec<Record>, ReadError> {
-        let Some(d) = &self.inner.disk else {
+        let Some(d) = &self.disk else {
             return Err(ReadError::Dropped { oldest: limit });
         };
         let segs = lock(&d.table).all();
@@ -496,9 +589,7 @@ impl Bus {
         }
         Ok(out)
     }
-}
 
-impl Inner {
     /// Assign the next sequence number and timestamps, run the reducer,
     /// keep the record in memory and queue it for disk. Caller holds the
     /// state lock.
@@ -514,7 +605,7 @@ impl Inner {
         // A panicking reducer must not take `publish` down with it.
         let reducer = &mut st.reducer;
         let _ = catch_unwind(AssertUnwindSafe(|| reducer.apply(&rec)));
-        if let (Some(tx), Some(d)) = (&self.tx, &self.disk) {
+        if let (Some(tx), Some(d)) = (&st.tx, &self.disk) {
             match tx.try_send(Msg::Rec(rec.clone())) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
@@ -638,6 +729,10 @@ impl Writer {
         let _ = self.compress_closed();
         self.retain(now);
         while let Ok(msg) = rx.recv() {
+            #[cfg(test)]
+            thread::sleep(Duration::from_millis(
+                self.disk.hooks.batch_delay_ms.load(Ordering::SeqCst),
+            ));
             self.handle(msg);
             while let Ok(msg) = rx.try_recv() {
                 self.handle(msg);
@@ -660,7 +755,8 @@ impl Writer {
     fn flush_open(&mut self) {
         if let Some(o) = &mut self.open {
             if let Err(e) = o.file.flush() {
-                self.open = None;
+                let now = self.clock.wall_ms();
+                let _ = self.retire_open(now);
                 self.failed(format!("log write failed: {e}"));
             }
         }
@@ -682,8 +778,9 @@ impl Writer {
                 self.last_attempt_ms = None;
             }
             Err(e) => {
-                self.open = None;
-                lock(&self.disk.table).open = None;
+                // Keep what reached the disk as a closed segment; the next
+                // successful write opens a new one.
+                let _ = self.retire_open(rec.t_wall_ms);
                 self.disk.dropped.fetch_add(1, Ordering::SeqCst);
                 self.last_attempt_ms = Some(rec.t_wall_ms);
                 self.failed(format!("log write failed: {e}"));
@@ -721,6 +818,10 @@ impl Writer {
         let Some(o) = &mut self.open else {
             return Ok(());
         };
+        #[cfg(test)]
+        if self.disk.hooks.fail_writes.load(Ordering::SeqCst) {
+            return Err(io::Error::other("injected write failure"));
+        }
         let line = rec.to_line();
         o.file.write_all(line.as_bytes())?;
         o.file.write_all(b"\n")?;
@@ -734,22 +835,37 @@ impl Writer {
     /// Close the open segment, compress every closed plain segment, then
     /// apply retention.
     fn rotate(&mut self, now: u64) -> io::Result<()> {
-        if let Some(mut o) = self.open.take() {
-            let flushed = o.file.flush();
-            let mut t = lock(&self.disk.table);
-            t.open = None;
-            t.closed.push(SegInfo {
-                first_seq: o.first_seq,
-                compressed: false,
-                bytes: o.bytes,
-                end_ms: now,
-            });
-            drop(t);
-            flushed?;
-        }
+        self.retire_open(now)?;
         let compressed = self.compress_closed();
         self.retain(now);
         compressed
+    }
+
+    /// Close the open segment (if any) and move it to the closed list with
+    /// its size on disk, so it is counted, compressed, read and deleted by
+    /// retention like any other. Used on rotation and after a write error.
+    /// Returns the result of the final flush.
+    fn retire_open(&mut self, now: u64) -> io::Result<()> {
+        let Some(mut o) = self.open.take() else {
+            lock(&self.disk.table).open = None;
+            return Ok(());
+        };
+        let flushed = o.file.flush();
+        drop(o.file);
+        let size =
+            std::fs::metadata(segment::path(&self.disk.dir, o.first_seq, false)).map(|m| m.len());
+        let mut t = lock(&self.disk.table);
+        t.open = None;
+        // A file that is gone (deleted under us) is not kept in the table.
+        if let Ok(bytes) = size {
+            t.closed.push(SegInfo {
+                first_seq: o.first_seq,
+                compressed: false,
+                bytes,
+                end_ms: now,
+            });
+        }
+        flushed
     }
 
     /// Compress every closed segment still in plain form.
@@ -799,10 +915,16 @@ impl Writer {
 }
 
 /// A live feed of records after a given sequence number.
+///
+/// A subscription keeps the in-memory log alive but not the disk writer:
+/// dropping the last [`Bus`] still flushes and stops the writer.
 pub struct Subscription {
-    bus: Bus,
+    inner: Arc<Inner>,
     next: u64,
     buf: VecDeque<Record>,
+    /// Number of log reads, so tests can tell waiting from spinning.
+    #[cfg(test)]
+    reads: u64,
 }
 
 impl fmt::Debug for Subscription {
@@ -815,24 +937,33 @@ impl fmt::Debug for Subscription {
 }
 
 impl Subscription {
-    /// The next record, waiting up to `timeout` for one. `Ok(None)` is a
-    /// timeout. An error means the subscriber fell so far behind that its
-    /// next record is gone ([`ReadError::Dropped`]) or a segment could not be
-    /// read; the subscription stays at the same place, so the caller should
-    /// resubscribe from a fresh snapshot.
-    pub fn try_next(&mut self, timeout: Duration) -> Result<Option<Record>, ReadError> {
+    /// The next record, waiting up to `timeout` for one.
+    ///
+    /// * `Ok(Some(record))`: the next record in sequence.
+    /// * `Ok(None)`: `timeout` passed with nothing new. The call blocks on a
+    ///   condition variable while it waits; it does not poll.
+    /// * `Err(_)`: the subscription cannot continue. [`ReadError::Dropped`]
+    ///   means the subscriber fell so far behind that its next record is no
+    ///   longer kept; [`ReadError::Io`] means a segment could not be read.
+    ///   The error comes back at once. The caller must resubscribe from a
+    ///   fresh snapshot; calling `next` again returns the same error.
+    pub fn next(&mut self, timeout: Duration) -> Result<Option<Record>, ReadError> {
         if let Some(r) = self.buf.pop_front() {
             return Ok(Some(r));
         }
         let deadline = Instant::now() + timeout;
         loop {
-            let got = self.bus.read_from(self.next, SUBSCRIPTION_BATCH)?;
+            #[cfg(test)]
+            {
+                self.reads += 1;
+            }
+            let got = self.inner.read_from(self.next, SUBSCRIPTION_BATCH)?;
             if let Some(last) = got.last() {
                 self.next = last.seq + 1;
                 self.buf.extend(got);
                 return Ok(self.buf.pop_front());
             }
-            let inner = &self.bus.inner;
+            let inner = &self.inner;
             let mut st = lock(&inner.state);
             while st.head < self.next {
                 let now = Instant::now();
@@ -846,12 +977,6 @@ impl Subscription {
                     .0;
             }
         }
-    }
-
-    /// Like [`Subscription::try_next`], with errors and timeouts both as
-    /// `None`. Use `try_next` to tell them apart.
-    pub fn next(&mut self, timeout: Duration) -> Option<Record> {
-        self.try_next(timeout).ok().flatten()
     }
 }
 
@@ -867,6 +992,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use std::thread;
+    use std::time::Instant;
 
     const T0: u64 = 1_700_000_000_000;
 
@@ -1000,7 +1126,7 @@ mod tests {
         }
         let h = bus.head();
         let mut sub = bus.subscribe_from(h).unwrap();
-        assert!(sub.next(Duration::from_millis(20)).is_none());
+        assert!(sub.next(Duration::from_millis(20)).unwrap().is_none());
         let b2 = bus.clone();
         let t = thread::spawn(move || {
             for i in 0..50 {
@@ -1009,7 +1135,7 @@ mod tests {
         });
         let mut got = Vec::new();
         while got.len() < 50 {
-            match sub.next(Duration::from_secs(5)) {
+            match sub.next(Duration::from_secs(5)).unwrap() {
                 Some(r) => got.push(r.seq),
                 None => break,
             }
@@ -1017,7 +1143,7 @@ mod tests {
         t.join().unwrap();
         assert_eq!(got, (h + 1..=h + 50).collect::<Vec<_>>());
         assert!(
-            sub.next(Duration::from_millis(20)).is_none(),
+            sub.next(Duration::from_millis(20)).unwrap().is_none(),
             "nothing twice"
         );
     }
@@ -1041,7 +1167,10 @@ mod tests {
             Err(ReadError::Dropped { oldest: 41 })
         ));
         let mut sub = bus.subscribe_from(40).unwrap();
-        assert_eq!(sub.next(Duration::from_secs(1)).map(|r| r.seq), Some(41));
+        assert_eq!(
+            sub.next(Duration::from_secs(1)).unwrap().map(|r| r.seq),
+            Some(41)
+        );
     }
 
     #[test]
@@ -1307,7 +1436,10 @@ mod tests {
         assert_eq!(recs.len(), 21);
         let mut sub = bus.subscribe_from(bus.head()).unwrap();
         let s = bus.publish("t", sample(99));
-        assert_eq!(sub.next(Duration::from_secs(1)).map(|r| r.seq), Some(s));
+        assert_eq!(
+            sub.next(Duration::from_secs(1)).unwrap().map(|r| r.seq),
+            Some(s)
+        );
     }
 
     #[cfg(unix)]
@@ -1366,5 +1498,129 @@ mod tests {
             })
             .unwrap();
         assert!(!g.is_empty());
+    }
+
+    // ---- fix round 1 ----
+
+    /// A subscription that fell behind the window gets a visible error at
+    /// once. The old `next` turned it into `None`, and a view loop calling it
+    /// spun at full CPU (over four million calls in 300 ms).
+    #[test]
+    fn lagged_subscription_returns_dropped_promptly() {
+        let bus = mem_bus(10);
+        let mut sub = bus.subscribe_from(bus.head()).unwrap();
+        for i in 0..50 {
+            bus.publish("t", sample(i));
+        }
+        let start = Instant::now();
+        let r = sub.next(Duration::from_secs(5));
+        assert!(matches!(r, Err(ReadError::Dropped { oldest: 41 })), "{r:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            start.elapsed()
+        );
+        // It stays an error: the caller must resubscribe.
+        assert!(sub.next(Duration::from_secs(5)).is_err());
+    }
+
+    /// An idle subscription sleeps until the timeout. It does not poll.
+    #[test]
+    fn idle_subscription_waits_without_spinning() {
+        let bus = mem_bus(10);
+        bus.publish("t", sample(0));
+        let mut sub = bus.subscribe_from(bus.head()).unwrap();
+        let timeout = Duration::from_millis(200);
+        let start = Instant::now();
+        assert!(sub.next(timeout).unwrap().is_none());
+        assert!(start.elapsed() >= timeout, "{:?}", start.elapsed());
+        assert!(
+            sub.reads <= 2,
+            "read the log {} times while idle",
+            sub.reads
+        );
+    }
+
+    #[test]
+    fn failed_segment_is_kept_counted_readable_and_retained() {
+        let dir = TempDir::new("failseg");
+        let clock = ManualClock::new(T0);
+        let bus = Bus::open(BusConfig {
+            window_records: 1,
+            segment_secs: 30,
+            retain_secs: 60,
+            ..disk_cfg(dir.path(), &clock)
+        })
+        .unwrap();
+        for i in 0..5 {
+            bus.publish("t", sample(i));
+        }
+        flush(&bus);
+        let d = bus.inner.disk.clone().unwrap();
+        d.hooks.fail_writes.store(true, Ordering::SeqCst);
+        bus.publish("t", sample(5));
+        flush(&bus);
+        let on_disk = fs::metadata(dir.path().join(file_name(1, false)))
+            .unwrap()
+            .len();
+        let s = bus.stats();
+        assert!(!s.disk_on);
+        assert_eq!(s.segments, 1, "failed segment still counted");
+        assert_eq!(s.bytes, on_disk, "with its real size");
+        // Records 1..=5 reached the disk and left memory; they are readable.
+        assert_eq!(seqs(&bus.read_from(1, 5).unwrap()), vec![1, 2, 3, 4, 5]);
+
+        // The disk recovers: a new segment opens on the next retry.
+        d.hooks.fail_writes.store(false, Ordering::SeqCst);
+        clock.advance_secs(11);
+        bus.publish("t", sample(6));
+        flush(&bus);
+        assert!(bus.stats().disk_on);
+        assert_eq!(bus.stats().segments, 2);
+        // Once old enough, retention removes the failed segment.
+        clock.advance_secs(61);
+        bus.publish("t", sample(7));
+        flush(&bus);
+        assert!(!exists(dir.path(), 1, false) && !exists(dir.path(), 1, true));
+    }
+
+    #[test]
+    fn dropping_the_bus_flushes_every_queued_record() {
+        let dir = TempDir::new("dropflush");
+        let clock = ManualClock::new(T0);
+        let bus = Bus::open(disk_cfg(dir.path(), &clock)).unwrap();
+        // Keep the writer behind the publisher.
+        let d = bus.inner.disk.clone().unwrap();
+        d.hooks.batch_delay_ms.store(50, Ordering::SeqCst);
+        for i in 0..1000 {
+            bus.publish("t", sample(i));
+        }
+        drop(bus);
+        let r = segment::read_segment(&dir.path().join(file_name(1, false))).unwrap();
+        assert_eq!(seqs(&r.records), (1..=1000).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn dropping_the_bus_flushes_even_with_a_live_subscription() {
+        let dir = TempDir::new("dropsub");
+        let clock = ManualClock::new(T0);
+        let bus = Bus::open(disk_cfg(dir.path(), &clock)).unwrap();
+        let d = bus.inner.disk.clone().unwrap();
+        d.hooks.batch_delay_ms.store(50, Ordering::SeqCst);
+        let sub = bus.subscribe_from(0).unwrap();
+        for i in 0..1000 {
+            bus.publish("t", sample(i));
+        }
+        drop(bus);
+        let r = segment::read_segment(&dir.path().join(file_name(1, false))).unwrap();
+        assert_eq!(seqs(&r.records), (1..=1000).collect::<Vec<_>>());
+        drop(sub);
+    }
+
+    #[test]
+    fn bus_and_subscription_are_send_and_sync() {
+        fn check<T: Send + Sync>() {}
+        check::<Bus>();
+        check::<Subscription>();
     }
 }
