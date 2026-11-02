@@ -31,8 +31,8 @@ list is a summary and is not kept for every release.
 - `--headless` runs the host with no screen, for systemd. It locks the log directory and the
   socket, so two hosts cannot write one log. `--bus-dir DIR` sets the directory.
   `--mock-workloads` makes a `--headless --mock` host also scan this box's real processes and
-  model servers and record them against the mock chips, so its log holds real process names
-  and model names.
+  model servers and record them against the mock chips, so its log holds the names of the
+  processes that hold a Tenstorrent device or are inference servers, and the model names.
 - Sources: the chip backend, the inference monitor, training runs, hivemind, the process scan,
   `--remote` scrapes and gozer leases. The gozer governor permits only what the lease list shows.
   It can be up to 60 seconds stale after a failed refresh.
@@ -46,7 +46,8 @@ list is a summary and is not kept for every release.
   sparks and per-channel DRAM rows. The legend and explain text name them, and `~` marks
   estimated values.
 - The `i` view reads an attached host's world, and marks a host that has disconnected.
-- Limits: not yet run on real hardware with the bus. The tile glow is still an estimate. The
+- Limits: not yet run on real hardware with the bus. Log volume is estimated from the code at roughly
+  1.7 to 3 GB a day on a 4-chip box (`docs/bus.md` section 4 has the numbers). The tile glow is still an estimate. The
   per-tile counter sidecar is not included, because a live reader on a chip blocks gozer reset
   and release. The order of DRAM rows within a side is not documented. Deferred review findings
   are in `docs/bus.md` section 13.

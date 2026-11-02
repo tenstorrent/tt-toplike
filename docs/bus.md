@@ -91,7 +91,7 @@ All flags:
 | `--entity KEY`, `--signal NAME` | With `--bus-inspect` only: show one entity or one signal. |
 | `--bus-attach PATH` | TUI: attach to the host at `PATH` or fail at start-up. Cannot be combined with `--headless`, `--bus-socket`, `--record`, `--bus-dir` or `--bus-retain`. |
 | `--no-bus-attach` | TUI: skip the start-up probe. Cannot be combined with `--headless` or `--bus-attach`. |
-| `--mock-workloads` | With `--headless --mock`: also scan this box's real processes and model servers and record them against the mock chips. Needs `--mock`. |
+| `--mock-workloads` | With `--headless --mock`: also scan this box's real processes and model servers and record them against the mock chips. The log then holds only processes that hold a Tenstorrent device or are inference servers. Needs `--mock`. |
 
 ---
 
@@ -335,6 +335,14 @@ The log is a directory of segment files.
   closed segment is deleted. The open segment is never deleted. Retention runs at start-up, at
   each rotation, and when the host asks for maintenance (every 60 seconds), so an idle bus
   still ages out old segments.
+* **Expected volume.** This estimate comes from reading `BackendSource`. Nobody has measured it on
+  hardware. The source takes one sweep per chip per tick (10 per second per chip by default).
+  Slow-lane samples are written only when a value changes, and a raw frame only when the tt-smi
+  text changes. On a real 4-chip box that is roughly 55 to 95 records per second, about 20 to
+  35 KB/s, or about 1.7 to 3 GB a day before compression. The mock backend changes every DRAM
+  temperature on every tick and writes about 370 records per second for 2 chips, so a mock run
+  is much larger than a real one. Retention (24 hours and 5 GB, gzip after rotation) bounds the
+  disk in both cases.
 * **Permissions.** A directory the bus creates has mode 0700. Segment files and the lock file
   have mode 0600. A directory that already exists keeps its mode. The log holds process
   command lines (after redaction), model names and raw tt-smi snapshots.
@@ -961,6 +969,11 @@ Until the sidecar exists, the Die 3D tile glow stays an estimate and says so.
   16,384; a TUI that serves no socket uses 4,096 and 2,048). A tiny window can report
   spurious `dropped` errors.
 * Records lost from the end of a log (a deleted last segment) cannot be detected.
+* After a late lock moves the head forward (the log directory already holds higher sequence
+  numbers), the in-memory window keeps a gap in its numbering. A socket subscriber reading
+  across the jump can stall or skip records until the older records leave the window. Local
+  views are unaffected. The trigger is rare: a disk outage followed by a lock retake.
+* Only a test (in `src/cli.rs`) checks `window_records > writer_queue`. The bus config does not enforce it.
 * A compress error repeats at every rotation. Retention does not run on a segment whose
   metadata cannot be read.
 * If the open cannot list the log directory, the bus numbers from 1 in memory. When the lock is
@@ -986,6 +999,8 @@ Until the sidecar exists, the Die 3D tile glow stays an estimate and says so.
   under the publish lock.
 * A socket replay at speed 1 plays a pause longer than 1 second as 1 second, and a replay at
   speed 0.01 of a 59-second recorded gap waits 1 second.
+* A socket path whose parent is missing, where the nearest existing ancestor is not writable by
+  the user, passes the pre-check and fails later.
 * The client's start-up probe uses a blocking connect with no timeout of its own. A full
   listen backlog can stall it.
 * The socket is marked as this process's after a successful bind and unmarked before the server
@@ -1016,6 +1031,9 @@ Until the sidecar exists, the Die 3D tile glow stays an estimate and says so.
 * The `i` view keeps the local monitor when the TUI hosts its own bus.
 * The TUI's bus label can be dropped at very narrow widths (the label is dropped when fewer than
   5 characters remain after the camera caption), so a mismatch warning such as `(other host)` can go silent.
+* After the second update at a slow `--interval` (for example 2000 ms), Die 3D treats the first
+  2 s gap as "away" once and drops that update's events. A data stall longer than 1 second at a
+  100 ms tick does the same.
 * The Die 3D legend and explain text list three phase colours and omit Down (grey).
 * Die 3D cannot tell a restarted host from the old one when the new sequence number is already
   past the old one, because `WorldRead` carries no instance id.

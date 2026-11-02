@@ -17,8 +17,8 @@
 //! 3. runs [`BusHost::tick`];
 //! 4. when a broadcast sink is given (`--serve`), builds the `/telemetry`
 //!    frame from the bus: [`compat::telemetry_frame`] with the
-//!    `tt_toplike` extension built from this tick's processes and
-//!    inference snapshot, or [`compat::relay_frame`] (the origin's frame,
+//!    `tt_toplike` extension built from the last workload poll (taken every
+//!    2 s) and not filtered to TT rows, or [`compat::relay_frame`] (the origin's frame,
 //!    byte for byte) for a `--remote` relay. Nothing is sent before the
 //!    first `tt-smi` raw frame is on the bus;
 //! 5. waits `interval`, checking the stop flag at least every 50 ms.
