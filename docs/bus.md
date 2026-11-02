@@ -925,7 +925,10 @@ time is known, one step sample. Several steps that land between two reads give o
 | `SAME CHIPS` under the CHIPS row: each model announced on one of the run's chips (not `Down`), with its phase and tokens/s, in its phase colour | `models()` and the run's chips | as the source reports them; `~` through `model_text_is_estimated` |
 
 A local trainer always wins over the bus run: its state has the log path, the config and the
-checkpoints, which the bus does not carry. A step already in the world when the view first
+checkpoints, which the bus does not carry. The pulses, the sky's pace, the `▸` marks and the
+`SAME CHIPS` strip describe the bus run, so they are drawn on a local trainer's view only when
+the bus run is that trainer (the same pid and start time). The `v` rotation also asks the bus
+for a fresh run, so an attached TUI visits Training while the host sees a trainer. A step already in the world when the view first
 reads it makes no pulse, and neither does a step that landed while the view was off screen.
 The rule and its constants are Die 3D's. With an empty world the view draws the frames it drew
 before the bus; a test pins them by hash.

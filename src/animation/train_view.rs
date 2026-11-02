@@ -394,10 +394,10 @@ impl TrainView {
         self.bus_state.world_state().is_some()
     }
 
-    /// Advance the sky clock to the current frame at the bus pace.
-    fn advance_sky(&self) {
+    /// Advance the sky clock to the current frame at the pace `fx` sets.
+    fn advance_sky(&self, fx: &TrainFx) {
         let frames = self.frame.saturating_sub(self.sky_seen.get());
-        let pace = f64::from(self.bus_fx.sky_pace());
+        let pace = f64::from(fx.sky_pace());
         self.sky_clock
             .set(self.sky_clock.get() + frames as f64 * pace);
         self.sky_seen.set(self.frame);
@@ -415,7 +415,17 @@ impl TrainView {
     pub fn render(&self, st: &TrainState, backend: &dyn TelemetryBackend) -> Vec<Line<'static>> {
         let mut buf = vec![vec![Cell::default(); self.width]; self.height];
         self.draw_frame(&mut buf);
-        self.advance_sky();
+        // The bus run's effects (pulses, sky pace, chip marks, SAME CHIPS)
+        // describe the bus run. They are drawn when that run is the one on
+        // screen: with no local trainer, or when the bus run is the local
+        // trainer itself (the same pid and start time). A local trainer next
+        // to a different run on an attached host draws none of them.
+        let no_fx = TrainFx::default();
+        let fx = match st.proc.as_ref() {
+            Some(p) if !self.bus_state.is_run_of(p) => &no_fx,
+            _ => &self.bus_fx,
+        };
+        self.advance_sky(fx);
         // With no local trainer, a run seen on the bus is drawn instead (see
         // `train_bus`). A local trainer always wins.
         let st = match (st.proc.as_ref(), self.bus_state.world_state()) {
@@ -484,9 +494,9 @@ impl TrainView {
                         self.draw_no_log_notice(&mut buf, st);
                     }
                 }
-                self.draw_chips(&mut buf, backend);
+                self.draw_chips(&mut buf, backend, fx);
                 self.draw_legend(&mut buf, st);
-                self.draw_bus(&mut buf);
+                self.draw_bus(&mut buf, fx);
             }
         }
         self.to_lines(buf)
@@ -1854,7 +1864,7 @@ impl TrainView {
         format!("dev{idx} {temp:>5.1}°C {power:>3.0}W ")
     }
 
-    fn draw_chips(&self, buf: &mut [Vec<Cell>], backend: &dyn TelemetryBackend) {
+    fn draw_chips(&self, buf: &mut [Vec<Cell>], backend: &dyn TelemetryBackend, fx: &TrainFx) {
         let y = self.layout().chips_row;
         let label = Color::Rgb(180, 200, 255);
         self.text(buf, 2, y, "CHIPS", label, true);
@@ -1871,7 +1881,7 @@ impl TrainView {
             let tag = Self::clip(&tag, self.width.saturating_sub(x + 1));
             // The training run uses this chip (from the bus, `train_bus`).
             // The column before a tag is always blank.
-            if self.bus_fx.run_devices.contains(&idx) {
+            if fx.run_devices.contains(&idx) {
                 self.put(buf, x - 1, y, '▸', BUS_TRAIN_AMBER, true);
             }
             self.text(buf, x, y, &tag, tcolor, false);
@@ -1964,10 +1974,9 @@ impl TrainView {
     }
 
     /// Draw the bus's step pulses and the `SAME CHIPS` strip (see
-    /// `train_bus`). Arithmetic on `bus_fx` only. An empty `bus_fx` changes
+    /// `train_bus`). Arithmetic on `fx` only. An empty `fx` changes
     /// nothing. The chips' `▸` marks are drawn by `draw_chips`.
-    fn draw_bus(&self, buf: &mut [Vec<Cell>]) {
-        let fx = &self.bus_fx;
+    fn draw_bus(&self, buf: &mut [Vec<Cell>], fx: &TrainFx) {
         if fx.pulses.is_empty() && fx.neighbours.is_empty() {
             return;
         }

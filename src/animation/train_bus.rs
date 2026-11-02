@@ -37,7 +37,9 @@
 //! [`TrainBusState::world_state`]) that the view draws with its usual look
 //! when this machine has no trainer of its own, for example when the TUI is
 //! attached to a headless host that sees one. A local trainer always wins:
-//! its state has more in it (the log path, the config, checkpoints).
+//! its state has more in it (the log path, the config, checkpoints). The
+//! effects below describe the bus run, so a local trainer's view draws them
+//! only when the bus run is that trainer ([`TrainBusState::is_run_of`]).
 //!
 //! # What drives what
 //!
@@ -201,6 +203,19 @@ impl TrainBusState {
     /// world has no fresh run. See the module doc.
     pub fn world_state(&self) -> Option<&TrainState> {
         self.state.as_ref()
+    }
+
+    /// Whether the run shown from the bus is the trainer `local`: the same
+    /// pid and start time, as `TrainingSource` names it in the run key
+    /// (`run:<binary>:<pid>@<start>`, with 0 for an unknown start). No run on
+    /// the bus is no match.
+    pub fn is_run_of(&self, local: &TrainProcess) -> bool {
+        self.run.as_ref().is_some_and(|k| {
+            let p = proc_of_key(k);
+            p.pid == local.pid
+                && p.pid != 0
+                && p.start_time.unwrap_or(0) == local.start_time.unwrap_or(0)
+        })
     }
 }
 

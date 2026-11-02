@@ -510,6 +510,51 @@ fn a_local_trainer_wins_over_the_bus_run() {
     });
 }
 
+/// Group D S2: a TUI with its own trainer, attached to a host that sees a
+/// different run. The title and curves are the local run's, so the bus run's
+/// pulses, sky pace, chip marks and SAME CHIPS strip must not be drawn on it:
+/// the frame is the frame of a view that never read the bus. When the bus run
+/// is the local trainer's own (same pid and start time), its effects are
+/// drawn.
+#[test]
+fn a_local_trainers_view_draws_no_effects_from_another_run() {
+    tc(|| {
+        let (mut v, b, mut bus, now) = view_fed(30, Provenance::Measured);
+        bus.chips("chip:0000:01:00.0");
+        model_ready(&mut bus, "llama", vec![chip(0)], Provenance::Measured);
+        // One more step lands, so a pulse is live when the frame is drawn.
+        bus.run(31, 2.0, 300.0, Provenance::Measured);
+        v.set_bus(Some(&bus.view(now + TICK)), &b);
+        v.update();
+        assert!(!v.bus_fx.pulses.is_empty());
+        assert_eq!(v.bus_fx.run_devices, vec![0]);
+        assert_eq!(v.bus_fx.neighbours.len(), 1);
+        assert!(v.bus_fx.sky_pace() > 1.0);
+        // A view with the same number of updates that never read the bus.
+        let mut twin = TrainView::new(W, H);
+        for _ in 0..31 {
+            twin.update();
+        }
+
+        // The local trainer is pid 777: another run than the bus's 4242@99.
+        let mut other = pinned_states()[1].clone();
+        other.proc = Some(proc_of(777));
+        assert_eq!(
+            frame_hash(&v.render(&other, &b)),
+            frame_hash(&twin.render(&other, &b)),
+            "another run's effects were drawn on the local trainer's view"
+        );
+
+        // The local trainer is the bus run itself: the effects are drawn.
+        let own = pinned_states()[1].clone();
+        assert_eq!(own.proc.as_ref().map(|p| p.pid), Some(4242));
+        assert_ne!(
+            frame_hash(&v.render(&own, &b)),
+            frame_hash(&twin.render(&own, &b))
+        );
+    });
+}
+
 #[test]
 fn a_stale_run_is_not_shown() {
     let (mut v, b, bus, now) = view_fed(3, Provenance::Measured);
