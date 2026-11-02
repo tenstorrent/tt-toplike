@@ -247,9 +247,7 @@ pub fn run_headless(
         .insert("backend".into(), cfg.backend_name.clone());
     bus_cfg.header_tags.insert("mode".into(), mode.into());
     let mut host = BusHost::with_gozer(bus_cfg, backend, gozer)?;
-    if cfg.synthetic {
-        host.set_backend_provenance(tt_toplike_bus::Provenance::Estimated);
-    }
+    host.set_synthetic(cfg.synthetic);
     let server = serve_socket(host.bus(), cfg.socket.as_deref())?;
     let mut report = HeadlessReport::default();
 

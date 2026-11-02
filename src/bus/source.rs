@@ -64,6 +64,9 @@ pub struct BackendSource {
 
 impl BackendSource {
     /// A source for a real backend: its readings are `Measured`.
+    /// The source's name ([`Source::name`]).
+    pub const NAME: &'static str = "backend";
+
     pub fn new() -> Self {
         Self::with_provenance(Provenance::Measured)
     }
@@ -283,7 +286,7 @@ impl Default for BackendSource {
 
 impl Source for BackendSource {
     fn name(&self) -> &'static str {
-        "backend"
+        Self::NAME
     }
     fn poll(&mut self, ctx: &PollCtx<'_>, _now: Instant, out: &mut dyn FnMut(Payload)) {
         self.poll_backend(ctx.backend, out);

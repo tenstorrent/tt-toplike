@@ -105,6 +105,12 @@ pub struct BusHost {
     gozer: GozerSource,
     /// False for a replay host: no live source is polled.
     live: bool,
+    /// The backend makes its values up (`--mock`): every reading any
+    /// source publishes is marked `Estimated` (see [`BusHost::set_synthetic`]).
+    synthetic: bool,
+    /// A backend switch happened and the backend source has not published
+    /// a raw frame since (see [`BusHost::raw_is_current`]).
+    swap_pending: bool,
     last_maintain: Option<Instant>,
     last_resend: Option<Instant>,
     maintenance_runs: u64,
@@ -197,6 +203,8 @@ impl BusHost {
             gozer,
             identity,
             live: true,
+            synthetic: false,
+            swap_pending: false,
             last_maintain: None,
             last_resend: None,
             maintenance_runs: 0,
@@ -213,8 +221,10 @@ impl BusHost {
             // 1. Identity first: index-only sources below resolve against
             //    this tick's device list.
             self.identity.refresh(backend.devices());
+            let synthetic = self.synthetic;
             for r in self.identity.resolve_pending() {
-                self.bus.publish(IDENTITY_SOURCE, r.payload);
+                self.bus
+                    .publish(IDENTITY_SOURCE, mark_synthetic(r.payload, synthetic));
             }
 
             // 2. Resend what is otherwise sent only on change.
@@ -229,18 +239,26 @@ impl BusHost {
             // emits.
             let ctx = PollCtx { backend };
             let bus = self.bus.clone();
+            let mut backend_raw = false;
             for s in self.sources_mut() {
                 let name = s.name();
+                let is_backend = name == BackendSource::NAME;
                 s.poll(&ctx, now, &mut |p| {
                     // A raw frame is labelled with its own source (`tt-smi`):
                     // the world keeps raw frames by record source, and the
                     // `/telemetry` helpers look them up by that name.
                     let label = match &p {
-                        Payload::Raw(f) => f.source.clone(),
+                        Payload::Raw(f) => {
+                            backend_raw |= is_backend;
+                            f.source.clone()
+                        }
                         _ => name.to_string(),
                     };
-                    bus.publish(&label, p);
+                    bus.publish(&label, mark_synthetic(p, synthetic));
                 });
+            }
+            if backend_raw {
+                self.swap_pending = false;
             }
         }
 
@@ -271,6 +289,44 @@ impl BusHost {
     /// replaces the backend source and its change cache.
     pub fn set_backend_provenance(&mut self, prov: Provenance) {
         self.backend = BackendSource::with_provenance(prov);
+    }
+
+    /// Mark the run as synthetic (`--mock`) or not. A synthetic run's
+    /// readings, from every source (backend, inference, training, processes,
+    /// `--remote`, identity), are published as `Estimated`: a mock roster or
+    /// training run must never reach the log or the socket as `Measured`.
+    /// `Decoration` stays as it is. Also resets the backend source (its
+    /// change cache and raw-frame dedupe), so the next tick sends everything
+    /// afresh.
+    pub fn set_synthetic(&mut self, synthetic: bool) {
+        self.synthetic = synthetic;
+        self.set_backend_provenance(if synthetic {
+            Provenance::Estimated
+        } else {
+            Provenance::Measured
+        });
+    }
+
+    /// Whether readings are being marked `Estimated` ([`BusHost::set_synthetic`]).
+    pub fn synthetic(&self) -> bool {
+        self.synthetic
+    }
+
+    /// The caller swapped the backend (`b` or `/remote` in the TUI). Resets
+    /// the backend source, so the new backend's first values and first raw
+    /// frame are published even when equal to the old ones, and holds back
+    /// [`BusHost::raw_is_current`] until that raw frame arrives.
+    pub fn mark_backend_switch(&mut self) {
+        let synthetic = self.synthetic;
+        self.set_synthetic(synthetic);
+        self.swap_pending = true;
+    }
+
+    /// False between a backend switch and the backend source's first raw
+    /// frame after it. While false, the world's newest raw frame may be the
+    /// old backend's and must not be broadcast.
+    pub fn raw_is_current(&self) -> bool {
+        !self.swap_pending
     }
 
     /// The inference monitor's latest snapshot.
@@ -371,6 +427,29 @@ impl BusHost {
     /// How many times `tick` has asked the sources to resend.
     pub fn resends(&self) -> u64 {
         self.resends
+    }
+}
+
+/// `p` with `Measured` and `Derived` readings marked `Estimated` when the
+/// run is synthetic. Events, raw frames and gaps carry no provenance.
+fn mark_synthetic(p: Payload, synthetic: bool) -> Payload {
+    if !synthetic {
+        return p;
+    }
+    let est = |v: Provenance| match v {
+        Provenance::Measured | Provenance::Derived => Provenance::Estimated,
+        other => other,
+    };
+    match p {
+        Payload::Sample(mut s) => {
+            s.prov = est(s.prov);
+            Payload::Sample(s)
+        }
+        Payload::Sweep(mut s) => {
+            s.prov = est(s.prov);
+            Payload::Sweep(s)
+        }
+        other => other,
     }
 }
 

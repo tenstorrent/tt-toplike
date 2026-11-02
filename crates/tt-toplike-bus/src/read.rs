@@ -276,6 +276,9 @@ mod tests {
             seq: world.seq(),
             instance: 7,
             kind: HeaderKind::Replay,
+            host: "h".into(),
+            backend: "b".into(),
+            mode: "replay".into(),
             world: WorldSummary::from_world(&world, now),
         })
         .unwrap();

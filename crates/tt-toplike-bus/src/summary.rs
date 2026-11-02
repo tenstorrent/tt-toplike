@@ -17,6 +17,8 @@
 //! {"seq":N,                         // the snapshot is current to record N
 //!  "instance":I,                    // the server bus's random id (Bus::instance)
 //!  "kind":"Live",                   // the server bus's header kind: Live or Replay
+//!  "host":"box/1a2b...",            // the server machine's identity (crate::ident)
+//!  "backend":"hybrid","mode":"live",// the server bus's header tags
 //!  "world":{
 //!    "now_mono_ns":T,               // server monotonic time the ages are taken at
 //!    "entities":["chip:0000:03:00.0", ...],        // every entity seen, key order
@@ -42,6 +44,12 @@
 //! * `kind` says whether the server's bus is live or a replay
 //!   ([`crate::Bus::header`]). A server that predates the field sends none,
 //!   and a reader takes it as `Live`.
+//! * `host` is the server machine's identity ([`crate::ident`]): its host
+//!   name and a hash of its machine id, never the raw id. `backend` and
+//!   `mode` are the bus header's tags of those names (`mode` is `live`,
+//!   `mock` or `replay`). A reader uses them to decide whether a remote
+//!   world describes its own chips. Older servers send none of the three;
+//!   they read as empty strings.
 //!
 //! # What `apply` does not copy from `World`
 //!
@@ -120,6 +128,17 @@ pub struct RemoteSnapshot {
     /// `Live` then.
     #[serde(default = "live")]
     pub kind: HeaderKind,
+    /// The server machine's identity ([`crate::ident::host_identity`]).
+    /// Empty from older servers.
+    #[serde(default)]
+    pub host: String,
+    /// The server bus's `backend` header tag. Empty when absent.
+    #[serde(default)]
+    pub backend: String,
+    /// The server bus's `mode` header tag (`live`, `mock`, `replay`).
+    /// Empty when absent.
+    #[serde(default)]
+    pub mode: String,
     pub world: WorldSummary,
 }
 
@@ -453,12 +472,18 @@ mod tests {
             seq: snap.seq,
             instance: bus.instance(),
             kind: HeaderKind::Replay,
+            host: "box/0011223344556677".into(),
+            backend: "mock".into(),
+            mode: "replay".into(),
             world: WorldSummary::from_world(&snap.world, bus.now_mono_ns()),
         };
         let line = serde_json::to_string(&s).unwrap();
         assert!(line.contains("\"phase\":\"ready\""), "{line}");
         assert_eq!(serde_json::from_str::<RemoteSnapshot>(&line).unwrap(), s);
         assert!(line.contains("\"kind\":\"Replay\""), "{line}");
+        assert!(line.contains("\"host\":\"box/0011223344556677\""), "{line}");
+        assert!(line.contains("\"mode\":\"replay\""), "{line}");
+        assert!(line.contains("\"backend\":\"mock\""), "{line}");
     }
 
     /// A snapshot line from a server that sends no `kind` is read as live.
@@ -467,6 +492,10 @@ mod tests {
         let line = r#"{"seq":0,"instance":1,"world":{"now_mono_ns":0,"entities":[],"readings":[],"models":[],"events":[],"resets":[],"raw":[]}}"#;
         let s: RemoteSnapshot = serde_json::from_str(line).unwrap();
         assert_eq!(s.kind, HeaderKind::Live);
+        assert_eq!(
+            (s.host.as_str(), s.backend.as_str(), s.mode.as_str()),
+            ("", "", "")
+        );
     }
 
     #[test]

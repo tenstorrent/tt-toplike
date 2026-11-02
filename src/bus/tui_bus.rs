@@ -9,8 +9,13 @@
 //!    not answer within [`ATTACH_TIMEOUT`], start-up fails with a message
 //!    naming the path.
 //! 2. Otherwise, unless the probe is off, try the default socket path once
-//!    ([`probe`], [`PROBE_TIMEOUT`]). When a `--headless` host answers,
-//!    attach to it and host nothing. The probe is off with
+//!    ([`probe`], [`PROBE_TIMEOUT`]). When a `--headless` host answers AND
+//!    its world describes this machine's chips ([`origin_mismatch`] finds
+//!    nothing: the same host identity, mode `live`, a live header, and at
+//!    least one chip key among the local backend's devices), attach to it
+//!    and host nothing. Otherwise host a bus here; the reason goes to the
+//!    debug log (the in-app log buffer; stderr is off under the TUI). The
+//!    probe is off with
 //!    `--no-bus-attach`, `--bus-socket` (the TUI then serves its own bus),
 //!    `--record`/`--bus-dir` (the TUI then records its own bus), and for a
 //!    `--mock` or `--remote` backend, whose chips are not the chips a local
@@ -21,7 +26,22 @@
 //!
 //! An attached TUI still reads chip telemetry from its own backend. Only
 //! the views that read the bus (Die 3D and `i`, in later tasks) read the
-//! attached world.
+//! attached world, and [`TuiBus::read`] limits it to the local chips
+//! ([`ReadView::only_chips`]), so overlays never land on another machine's
+//! chips. An explicit `--bus-attach` attaches even when the origin does not
+//! match, and the label says why: `bus: <path> (other host)`, `(mock)`,
+//! `(replay)` or `(no matching chips)`. A lost connection adds
+//! `(reconnecting)`, then `(disconnected)` once a reconnect has failed.
+//!
+//! # Backend switches
+//!
+//! A bus that records (`--record`/`--bus-dir`) or serves (`--bus-socket`)
+//! refuses a backend switch ([`TuiBus::switch_refusal`]): its log header
+//! names one backend and mode for the whole run. A memory-only bus follows
+//! the switch ([`TuiBus::backend_switched`]): it re-derives whether the run
+//! is synthetic and whether it relays a `--remote` box, resets the backend
+//! source, and keeps `/serve` off the world's raw frame until the new
+//! backend has published one ([`BusHost::raw_is_current`]).
 //!
 //! The caller must build the TUI's panic hook BEFORE calling `start`:
 //! [`BusHost`] installs the quiet reducer hook, which wraps whatever hook
@@ -48,9 +68,11 @@ use crate::bus::view::{BusView, ReadCache, ReadView};
 use crate::workload::host_processes::ProcRow;
 use crate::workload::inference_server::ServiceState;
 use crate::workload::train::monitor::TrainState;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tt_toplike_bus::BusConfig;
+use tt_toplike_bus::{BusConfig, EntityKey, HeaderKind};
 
 /// How long the start-up probe of the default socket waits for a snapshot.
 /// A live local host answers in well under a millisecond.
@@ -90,6 +112,9 @@ pub struct TuiBusOptions {
     /// Feed this box's process rows and inference monitor (see
     /// [`crate::bus::headless::uses_local_workloads`]).
     pub local_workloads: bool,
+    /// This machine's identity, compared with an attached host's
+    /// ([`tt_toplike_bus::host_identity`]; tests pass another).
+    pub local_host: String,
 }
 
 impl TuiBusOptions {
@@ -140,8 +165,95 @@ impl TuiBusOptions {
                 synthetic,
                 cli.mock_workloads,
             ),
+            local_host: tt_toplike_bus::host_identity().to_string(),
         }
     }
+}
+
+/// Why a remote world does not describe this machine's chips.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Mismatch {
+    /// The host replays a recorded log.
+    Replay,
+    /// The host's backend is a mock (`mode mock`).
+    Mock,
+    /// The host runs on another machine (or did not say which).
+    OtherHost,
+    /// The host's mode is neither `live`, `mock` nor `replay` (an older
+    /// host that sends no mode).
+    UnknownMode,
+    /// None of the remote world's chips is one of the local backend's.
+    NoMatchingChips,
+}
+
+impl Mismatch {
+    /// The label suffix.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Mismatch::Replay => "(replay)",
+            Mismatch::Mock => "(mock)",
+            Mismatch::OtherHost => "(other host)",
+            Mismatch::UnknownMode => "(unknown mode)",
+            Mismatch::NoMatchingChips => "(no matching chips)",
+        }
+    }
+}
+
+/// What the attached host says about itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    pub kind: HeaderKind,
+    pub host: String,
+    pub mode: String,
+    pub chips: Vec<EntityKey>,
+}
+
+#[cfg(unix)]
+impl Origin {
+    fn of(r: &tt_toplike_bus::RemoteWorld) -> Origin {
+        let (host, _backend, mode) = r.origin();
+        Origin {
+            kind: r.header_kind(),
+            host,
+            mode,
+            chips: r.chips(),
+        }
+    }
+}
+
+/// The first reason the remote world in `o` is not this machine's live
+/// chips, or `None` when it is. Checked in this order: a replay, a mock,
+/// another host, an unknown mode, no chip in common with `local_chips`.
+pub fn origin_mismatch(
+    o: &Origin,
+    local_host: &str,
+    local_chips: &BTreeSet<EntityKey>,
+) -> Option<Mismatch> {
+    if o.kind == HeaderKind::Replay || o.mode == "replay" {
+        return Some(Mismatch::Replay);
+    }
+    if o.mode == "mock" {
+        return Some(Mismatch::Mock);
+    }
+    if o.host != local_host {
+        return Some(Mismatch::OtherHost);
+    }
+    if o.mode != "live" {
+        return Some(Mismatch::UnknownMode);
+    }
+    if !o.chips.iter().any(|c| local_chips.contains(c)) {
+        return Some(Mismatch::NoMatchingChips);
+    }
+    None
+}
+
+/// The chip keys of `backend`'s devices.
+pub fn chip_keys(backend: &dyn TelemetryBackend) -> BTreeSet<EntityKey> {
+    backend
+        .devices()
+        .iter()
+        .map(|d| EntityKey::chip(&d.bus_id))
+        .collect()
 }
 
 /// Try the socket at `path` once: `Some` when a bus host answers a
@@ -163,6 +275,14 @@ pub fn probe(_path: &Path, _timeout: Duration) -> Option<()> {
     None
 }
 
+/// What the label shows, to rebuild it only on a change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LabelKey {
+    Local(HeaderKind),
+    #[cfg(unix)]
+    Attached(tt_toplike_bus::Link, Option<Mismatch>),
+}
+
 /// The TUI's bus. See the module doc.
 pub struct TuiBus {
     view: BusView,
@@ -171,6 +291,17 @@ pub struct TuiBus {
     _server: Option<tt_toplike_bus::SocketServer>,
     relay: bool,
     local_workloads: bool,
+    synthetic: bool,
+    /// The log directory, when the local bus records.
+    records: Option<PathBuf>,
+    /// The local bus is served on a socket.
+    serves: bool,
+    local_host: String,
+    /// The local backend's chips; an attached world is read only for these.
+    local_chips: Arc<BTreeSet<EntityKey>>,
+    /// The label, rebuilt only when `label_key` changes.
+    label: String,
+    label_key: Option<LabelKey>,
     /// The last view name published, so a redraw publishes nothing.
     last_view: Option<String>,
     ticks: u64,
@@ -188,7 +319,7 @@ impl TuiBus {
         match &opts.attach {
             Attach::Required(p) => {
                 return tt_toplike_bus::RemoteWorld::connect_within(p, ATTACH_TIMEOUT)
-                    .map(|r| TuiBus::attached(r, opts))
+                    .map(|r| TuiBus::attached(r, opts, backend))
                     .map_err(|e| {
                         format!(
                             "--bus-attach {}: no bus host answered there ({e}). Start one \
@@ -201,8 +332,21 @@ impl TuiBus {
             }
             Attach::Probe(p) => {
                 if let Some(r) = probe(p, PROBE_TIMEOUT) {
-                    log::info!("bus: attached to the host at {}", p.display());
-                    return Ok(TuiBus::attached(r, opts));
+                    let local = chip_keys(backend);
+                    match origin_mismatch(&Origin::of(&r), &opts.local_host, &local) {
+                        None => {
+                            log::info!("bus: attached to the host at {}", p.display());
+                            return Ok(TuiBus::attached(r, opts, backend));
+                        }
+                        Some(m) => {
+                            // Debug log only: the TUI owns the terminal.
+                            log::debug!(
+                                "bus: not attaching to the host at {}: {:?}; hosting a bus here",
+                                p.display(),
+                                m
+                            );
+                        }
+                    }
                 }
             }
             Attach::Off => {}
@@ -226,9 +370,7 @@ impl TuiBus {
                 None => format!("cannot open the bus: {e}"),
             }
         })?;
-        if opts.synthetic {
-            host.set_backend_provenance(tt_toplike_bus::Provenance::Estimated);
-        }
+        host.set_synthetic(opts.synthetic);
         #[cfg(unix)]
         let server = match &opts.serve_socket {
             None => None,
@@ -240,6 +382,7 @@ impl TuiBus {
         let mut b = TuiBus::local(host, opts);
         #[cfg(unix)]
         {
+            b.serves = server.is_some();
             b._server = server;
         }
         Ok(b)
@@ -247,13 +390,24 @@ impl TuiBus {
 
     /// A TUI bus around a host this process owns.
     pub fn local(host: BusHost, opts: &TuiBusOptions) -> TuiBus {
-        TuiBus::with_view(BusView::Local(Box::new(host)), opts)
+        let records = host.bus().dir().map(Path::to_path_buf);
+        let mut b = TuiBus::with_view(BusView::Local(Box::new(host)), opts);
+        b.records = records;
+        b.refresh_label();
+        b
     }
 
-    /// A TUI bus reading another process's host.
+    /// A TUI bus reading another process's host, for `backend`'s chips.
     #[cfg(unix)]
-    pub fn attached(remote: tt_toplike_bus::RemoteWorld, opts: &TuiBusOptions) -> TuiBus {
-        TuiBus::with_view(BusView::Attached(remote), opts)
+    pub fn attached(
+        remote: tt_toplike_bus::RemoteWorld,
+        opts: &TuiBusOptions,
+        backend: &dyn TelemetryBackend,
+    ) -> TuiBus {
+        let mut b = TuiBus::with_view(BusView::Attached(remote), opts);
+        b.local_chips = Arc::new(chip_keys(backend));
+        b.refresh_label();
+        b
     }
 
     fn with_view(view: BusView, opts: &TuiBusOptions) -> TuiBus {
@@ -264,10 +418,59 @@ impl TuiBus {
             _server: None,
             relay: opts.relay,
             local_workloads: opts.local_workloads,
+            synthetic: opts.synthetic,
+            records: None,
+            serves: false,
+            local_host: opts.local_host.clone(),
+            local_chips: Arc::new(BTreeSet::new()),
+            label: String::new(),
+            label_key: None,
             last_view: None,
             ticks: 0,
             view_changes: 0,
             hivemind_seen: 0,
+        }
+    }
+
+    /// Recompute the label when what it shows changed: for an attached bus
+    /// the link state and the origin mismatch; a local bus's label is fixed.
+    fn refresh_label(&mut self) {
+        let key = self.label_state();
+        if self.label_key.as_ref() == Some(&key) && !self.label.is_empty() {
+            return;
+        }
+        self.label = match (&self.view, &key) {
+            (BusView::Local(_), LabelKey::Local(HeaderKind::Replay)) => "bus: replay".to_string(),
+            (BusView::Local(_), _) => "bus: local".to_string(),
+            #[cfg(unix)]
+            (BusView::Attached(r), LabelKey::Attached(link, mismatch)) => {
+                let mut l = format!("bus: {}", r.path().display());
+                if let Some(m) = mismatch {
+                    l.push(' ');
+                    l.push_str(m.label());
+                }
+                match link {
+                    tt_toplike_bus::Link::Connected => {}
+                    tt_toplike_bus::Link::Reconnecting => l.push_str(" (reconnecting)"),
+                    tt_toplike_bus::Link::Disconnected => l.push_str(" (disconnected)"),
+                }
+                l
+            }
+            #[cfg(unix)]
+            (BusView::Attached(r), _) => format!("bus: {}", r.path().display()),
+        };
+        self.label_key = Some(key);
+    }
+
+    /// What the label depends on, read now.
+    fn label_state(&self) -> LabelKey {
+        match &self.view {
+            BusView::Local(h) => LabelKey::Local(h.bus().header().kind),
+            #[cfg(unix)]
+            BusView::Attached(r) => LabelKey::Attached(
+                r.link(),
+                origin_mismatch(&Origin::of(r), &self.local_host, &self.local_chips),
+            ),
         }
     }
 
@@ -299,6 +502,12 @@ impl TuiBus {
         self.ticks += 1;
         let relay = self.relay;
         let Some(host) = self.host_mut() else {
+            // Attached: keep the local chip set and the label current.
+            let chips = chip_keys(backend);
+            if *self.local_chips != chips {
+                self.local_chips = Arc::new(chips);
+            }
+            self.refresh_label();
             return;
         };
         if relay {
@@ -398,9 +607,76 @@ impl TuiBus {
         self.view_changes
     }
 
-    /// The world for a view, once per frame. See [`crate::bus::view`].
+    /// The world for a view, once per frame. See [`crate::bus::view`]. An
+    /// attached world answers only for the local backend's chips
+    /// ([`ReadView::only_chips`]).
     pub fn read(&self) -> ReadView {
-        self.view.read(&self.cache)
+        let v = self.view.read(&self.cache);
+        if self.is_attached() {
+            v.only_chips(self.local_chips.clone())
+        } else {
+            v
+        }
+    }
+
+    /// The local chip keys an attached world is read for (empty for a local
+    /// bus, whose world is built from the local backend).
+    pub fn local_chips(&self) -> &BTreeSet<EntityKey> {
+        &self.local_chips
+    }
+
+    /// Why a backend switch must be refused, as one status line, or `None`
+    /// when it may go ahead. A bus that records or serves names one backend
+    /// and mode in its log header for the whole run.
+    pub fn switch_refusal(&self) -> Option<String> {
+        if let Some(d) = &self.records {
+            return Some(format!(
+                "backend switch refused: the bus is recording to {} for this backend; \
+                 restart to switch",
+                d.display()
+            ));
+        }
+        if self.serves {
+            return Some(
+                "backend switch refused: the bus is served on --bus-socket for this \
+                 backend; restart to switch"
+                    .to_string(),
+            );
+        }
+        None
+    }
+
+    /// The TUI swapped its backend (`b` or `/remote`). A local bus re-derives
+    /// whether the run is synthetic and whether it relays a `--remote` box,
+    /// resets the backend source, and holds `/serve` off the old raw frame
+    /// ([`BusHost::mark_backend_switch`]). Call only when
+    /// [`TuiBus::switch_refusal`] said nothing.
+    pub fn backend_switched(
+        &mut self,
+        backend_type: crate::cli::BackendType,
+        backend_info: &str,
+        mock_workloads: bool,
+    ) {
+        let synthetic = crate::cli::backend_tag(backend_type, backend_info) == "mock";
+        let relay = backend_type == crate::cli::BackendType::Remote;
+        self.synthetic = synthetic;
+        self.relay = relay;
+        self.local_workloads =
+            crate::bus::headless::uses_local_workloads(relay, synthetic, mock_workloads);
+        if let Some(h) = self.host_mut() {
+            h.set_synthetic(synthetic);
+            h.mark_backend_switch();
+        }
+    }
+
+    /// Whether this bus feeds a `--remote` frame's extension each tick.
+    pub fn relays(&self) -> bool {
+        self.relay
+    }
+
+    /// Whether readings are marked `Estimated` (a mock backend).
+    pub fn synthetic(&self) -> bool {
+        self.synthetic
     }
 
     /// How many times [`TuiBus::read`] had to copy the world.
@@ -408,9 +684,16 @@ impl TuiBus {
         self.cache.rebuilds()
     }
 
-    /// `bus: local`, `bus: replay` or `bus: <socket path>` (attached).
+    /// `bus: local`, `bus: replay`, or `bus: <socket path>` (attached) with
+    /// a mismatch and link suffix (see the module doc). Built only when it
+    /// changes (on a data tick); this clones it.
     pub fn bus_label(&self) -> String {
-        self.view.label()
+        self.label.clone()
+    }
+
+    /// [`TuiBus::bus_label`] without the copy, for a per-frame caller.
+    pub fn bus_label_str(&self) -> &str {
+        &self.label
     }
 }
 
@@ -459,7 +742,10 @@ pub fn serve_frame(
 ) -> Option<String> {
     use crate::bus::compat;
     let frame = backend_frame?;
-    let host = bus.and_then(TuiBus::host);
+    // After a backend switch the world's newest raw frame can be the old
+    // backend's until the new one publishes; use the backend frame until
+    // then.
+    let host = bus.and_then(TuiBus::host).filter(|h| h.raw_is_current());
     if relay {
         let from_bus = host.and_then(|h| h.with_world(|w, _| compat::relay_frame(w)));
         return Some(from_bus.unwrap_or(frame));

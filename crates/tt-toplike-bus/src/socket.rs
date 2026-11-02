@@ -24,8 +24,12 @@
 //!                                           {"done":COUNT}, then the server closes
 //! ```
 //!
-//! * `snapshot`: the reply is `{"seq":N,"instance":I,"kind":K,"world":{...}}`,
-//!   where `K` is the bus's header kind (`Live` or `Replay`).
+//! * `snapshot`: the reply is
+//!   `{"seq":N,"instance":I,"kind":K,"host":H,"backend":B,"mode":M,"world":{...}}`,
+//!   where `K` is the bus's header kind (`Live` or `Replay`), `H` the
+//!   machine's identity ([`crate::ident`]) and `B`, `M` the header's
+//!   `backend` and `mode` tags. The `subscribed` line carries `host`,
+//!   `backend` and `mode` too. Older servers send none of them.
 //!   `world` is a [`WorldSummary`]; its fields are documented in
 //!   [`crate::summary`]. `seq` and `world` are taken under one lock, so the
 //!   world holds every record up to `seq` and none after it. `instance` is
@@ -780,10 +784,15 @@ fn serve(shared: &Shared, stream: UnixStream) {
 /// apply it twice or never see it.
 fn snapshot_line(bus: &Bus) -> Option<String> {
     let snap = bus.snapshot()?;
+    let header = bus.header();
+    let tag = |k: &str| header.tool_versions.get(k).cloned().unwrap_or_default();
     let reply = RemoteSnapshot {
         seq: snap.seq,
         instance: bus.instance(),
-        kind: bus.header().kind,
+        kind: header.kind,
+        host: crate::ident::host_identity().to_string(),
+        backend: tag("backend"),
+        mode: tag("mode"),
         world: WorldSummary::from_world(&snap.world, bus.now_mono_ns()),
     };
     Some(serde_json::to_string(&reply).expect("snapshot encodes"))
@@ -855,15 +864,25 @@ impl Watch {
 }
 
 /// The line that starts a subscription: where it starts and which bus.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SubscribedLine {
     pub(crate) subscribed: Subscribed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Subscribed {
     pub(crate) from: u64,
     pub(crate) instance: u64,
+    /// The server machine's identity, as in the snapshot. Empty from older
+    /// servers.
+    #[serde(default)]
+    pub(crate) host: String,
+    /// The bus header's `backend` tag.
+    #[serde(default)]
+    pub(crate) backend: String,
+    /// The bus header's `mode` tag.
+    #[serde(default)]
+    pub(crate) mode: String,
 }
 
 /// Stream live records after `from` until the client closes, an error
@@ -874,10 +893,15 @@ fn stream_live(c: &Conn<'_>, from: u64) {
         Ok(s) => s,
         Err(e) => return c.fail(&read_error_line(&e)),
     };
+    let h = bus.header();
+    let tag = |k: &str| h.tool_versions.get(k).cloned().unwrap_or_default();
     let header = SubscribedLine {
         subscribed: Subscribed {
             from,
             instance: bus.instance(),
+            host: crate::ident::host_identity().to_string(),
+            backend: tag("backend"),
+            mode: tag("mode"),
         },
     };
     if c.reply(&serde_json::to_string(&header).expect("header encodes"))

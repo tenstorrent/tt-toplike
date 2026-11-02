@@ -279,9 +279,10 @@ fn view_name(mode: DisplayMode) -> &'static str {
 
 /// The status-bar hint for the bus: shown only when the bus is not this
 /// process's own live bus (attached to a headless host, or a replay), so a
-/// default run's status bar is unchanged.
-fn bus_status_hint(bus: &crate::bus::tui_bus::TuiBus) -> Option<String> {
-    let label = bus.bus_label();
+/// default run's status bar is unchanged. Borrows the label the bus keeps
+/// (rebuilt only when it changes), so a frame allocates nothing.
+fn bus_status_hint(bus: &crate::bus::tui_bus::TuiBus) -> Option<&str> {
+    let label = bus.bus_label_str();
     (label != "bus: local").then_some(label)
 }
 
@@ -711,9 +712,6 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         cli,
         &mut tui_bus,
     );
-    // Drop the bus before the terminal is restored: a recording flushes, and
-    // a served socket file is removed.
-    drop(tui_bus);
 
     // Re-enable stderr output before exiting
     crate::logging::enable_stderr();
@@ -729,6 +727,12 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     terminal
         .show_cursor()
         .map_err(|e| TTTopError::Terminal(e.to_string()))?;
+
+    // Drop the bus after the terminal is restored, so a slow shutdown never
+    // leaves the screen frozen in the alternate screen: a recording
+    // flushes, a served socket file is removed, and an attached follower
+    // gets at most half a second to stop (`RemoteWorld`'s drop).
+    drop(tui_bus);
 
     res
 }
@@ -1809,8 +1813,7 @@ fn run_app(
             let serve_hint: Option<&str> = None;
             // `bus: <path>` / `bus: replay` when the bus is not this
             // process's own live bus; nothing otherwise.
-            let bus_status = bus_status_hint(tui_bus);
-            let bus_hint = bus_status.as_deref();
+            let bus_hint = bus_status_hint(tui_bus);
             // Whether `proc_rows` above was actually built via the TT-filtered
             // path this cycle — only possible on Linux/procfs builds (see the
             // proc_rows assignments). Drives the process panel's empty-state
@@ -2072,21 +2075,33 @@ fn run_app(
                                             .unwrap_or("")
                                             .trim()
                                             .to_string();
-                                        // Show progress immediately; the worker
-                                        // replaces this when it finishes.
-                                        cmd_message = Some((
-                                            if arg.is_empty() {
-                                                "discovering boxes…".to_string()
-                                            } else {
-                                                format!("connecting to {}…", arg)
-                                            },
-                                            false,
-                                        ));
-                                        pending_remote = Some(spawn_remote_worker(
-                                            arg,
-                                            remote_boxes.clone(),
-                                            config.clone(),
-                                        ));
+                                        // Connecting swaps the backend, which a
+                                        // recording or served bus refuses.
+                                        // Discovery alone (no argument) is fine.
+                                        let refusal = if arg.is_empty() {
+                                            None
+                                        } else {
+                                            tui_bus.switch_refusal()
+                                        };
+                                        if let Some(why) = refusal {
+                                            cmd_message = Some((why, true));
+                                        } else {
+                                            // Show progress immediately; the worker
+                                            // replaces this when it finishes.
+                                            cmd_message = Some((
+                                                if arg.is_empty() {
+                                                    "discovering boxes…".to_string()
+                                                } else {
+                                                    format!("connecting to {}…", arg)
+                                                },
+                                                false,
+                                            ));
+                                            pending_remote = Some(spawn_remote_worker(
+                                                arg,
+                                                remote_boxes.clone(),
+                                                config.clone(),
+                                            ));
+                                        }
                                     }
                                     #[cfg(not(feature = "remote"))]
                                     {
@@ -2758,42 +2773,54 @@ fn run_app(
                                 // Switch to next backend
                                 log::info!("Attempting to switch from {:?} backend", backend_type);
 
-                                match factory::switch_to_next_backend(
-                                    backend_type,
-                                    config.clone(),
-                                    cli,
-                                ) {
-                                    Ok((new_backend, new_type)) => {
-                                        *backend = new_backend;
-                                        backend_type = new_type;
-                                        log::info!(
-                                            "Successfully switched to {:?} backend",
-                                            backend_type
-                                        );
+                                // A recording or served bus names one backend
+                                // for the whole run.
+                                if let Some(why) = tui_bus.switch_refusal() {
+                                    cmd_message = Some((why, true));
+                                    force_redraw = true;
+                                } else {
+                                    match factory::switch_to_next_backend(
+                                        backend_type,
+                                        config.clone(),
+                                        cli,
+                                    ) {
+                                        Ok((new_backend, new_type)) => {
+                                            *backend = new_backend;
+                                            backend_type = new_type;
+                                            tui_bus.backend_switched(
+                                                backend_type,
+                                                &backend.backend_info(),
+                                                cli.mock_workloads,
+                                            );
+                                            log::info!(
+                                                "Successfully switched to {:?} backend",
+                                                backend_type
+                                            );
 
-                                        // Reinitialize visualizations with new backend
-                                        if let DisplayMode::Starfield = display_mode {
-                                            starfield = None;
+                                            // Reinitialize visualizations with new backend
+                                            if let DisplayMode::Starfield = display_mode {
+                                                starfield = None;
+                                            }
+                                            if let DisplayMode::MemoryCastle = display_mode {
+                                                memory_castle = None;
+                                            }
+                                            if let DisplayMode::MemoryFlow = display_mode {
+                                                memory_flow = None;
+                                            }
+                                            if let DisplayMode::Arcade = display_mode {
+                                                arcade = None;
+                                            }
+                                            if let DisplayMode::Defrag = display_mode {
+                                                defrag = None;
+                                            }
+                                            // Drop any fleet drill-down: the new backend
+                                            // may expose a different (smaller) device count.
+                                            fleet_zoom_start = None;
+                                            fleet_cursor = 0;
                                         }
-                                        if let DisplayMode::MemoryCastle = display_mode {
-                                            memory_castle = None;
+                                        Err(e) => {
+                                            log::error!("Failed to switch backend: {}", e);
                                         }
-                                        if let DisplayMode::MemoryFlow = display_mode {
-                                            memory_flow = None;
-                                        }
-                                        if let DisplayMode::Arcade = display_mode {
-                                            arcade = None;
-                                        }
-                                        if let DisplayMode::Defrag = display_mode {
-                                            defrag = None;
-                                        }
-                                        // Drop any fleet drill-down: the new backend
-                                        // may expose a different (smaller) device count.
-                                        fleet_zoom_start = None;
-                                        fleet_cursor = 0;
-                                    }
-                                    Err(e) => {
-                                        log::error!("Failed to switch backend: {}", e);
                                     }
                                 }
                             }
@@ -2989,6 +3016,13 @@ fn run_app(
                             // to Box<dyn TelemetryBackend> on assignment).
                             *backend = ws;
                             backend_type = BackendType::Remote;
+                            // Start feeding the remote frame's extension and
+                            // keep `/serve` off the old local raw frame.
+                            tui_bus.backend_switched(
+                                backend_type,
+                                &backend.backend_info(),
+                                cli.mock_workloads,
+                            );
                             log::info!("/remote: hot-swapped to WsBackend @ {}", target);
                             // Reset per-mode visualizations so they rebuild against
                             // the new device set (mirrors the `b` backend-cycle path).
@@ -12937,7 +12971,8 @@ mod bus_wiring_tests {
         )
         .unwrap();
         let hint = bus_status_hint(&attached).unwrap();
-        assert_eq!(hint, format!("bus: {}", sock.display()));
+        // The served bus is a mock run, so the attached label says so.
+        assert_eq!(hint, format!("bus: {} (mock)", sock.display()));
         assert!(bar(&b, Some(&hint)).contains(&hint));
     }
 }

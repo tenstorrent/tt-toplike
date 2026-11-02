@@ -10,6 +10,7 @@ use crate::error::BackendResult;
 use crate::models::device::Device;
 use crate::models::telemetry::{SmbusTelemetry, Telemetry};
 use clap::Parser;
+use std::collections::BTreeSet;
 use tt_toplike_bus::{EntityKey, Event, HeaderKind, Replay, World, WorldRead};
 
 const A: &str = "0000:01:00.0";
@@ -211,13 +212,31 @@ fn bus_socket_serves_a_snapshot() {
 
 // ---- attach -------------------------------------------------------------------------
 
-/// A headless-style host serving `sock`, ticked once against `backend`.
+/// A headless-style live host (`mode live`) serving `sock`, ticked once
+/// against `backend`.
 #[cfg(unix)]
 fn serving_host(
     sock: &Path,
     backend: &dyn TelemetryBackend,
 ) -> (BusHost, tt_toplike_bus::SocketServer) {
-    let mut host = BusHost::with_gozer(BusConfig::default(), backend, GozerSource::fed()).unwrap();
+    serving_host_with(sock, backend, "live", HeaderKind::Live)
+}
+
+/// [`serving_host`] with the header's `mode` tag and kind.
+#[cfg(unix)]
+fn serving_host_with(
+    sock: &Path,
+    backend: &dyn TelemetryBackend,
+    mode: &str,
+    kind: HeaderKind,
+) -> (BusHost, tt_toplike_bus::SocketServer) {
+    let mut cfg = BusConfig {
+        header_kind: kind,
+        ..BusConfig::default()
+    };
+    cfg.header_tags.insert("mode".into(), mode.into());
+    cfg.header_tags.insert("backend".into(), "test".into());
+    let mut host = BusHost::with_gozer(cfg, backend, GozerSource::fed()).unwrap();
     host.tick(backend, Instant::now());
     let server = tt_toplike_bus::SocketServer::spawn(host.bus().clone(), sock).unwrap();
     (host, server)
@@ -634,4 +653,449 @@ fn only_tt_relevant_rows_are_fed_and_not_for_a_mock_run() {
         ..mock_opts(&[])
     };
     assert_eq!(run(real), 1, "only the inference row");
+}
+
+// ---- fix round 1: attach only to a matching live host ------------------------------
+
+/// A backend whose devices have the given PCI addresses and no telemetry.
+#[derive(Default)]
+struct Devices(Vec<Device>);
+
+impl Devices {
+    fn with(ids: &[&str]) -> Devices {
+        Devices(
+            ids.iter()
+                .enumerate()
+                .map(|(i, b)| Device::new(i, "p150".into(), (*b).into(), String::new()))
+                .collect(),
+        )
+    }
+}
+
+impl TelemetryBackend for Devices {
+    fn init(&mut self) -> BackendResult<()> {
+        Ok(())
+    }
+    fn update(&mut self) -> BackendResult<()> {
+        Ok(())
+    }
+    fn devices(&self) -> &[Device] {
+        &self.0
+    }
+    fn telemetry(&self, _: usize) -> Option<&Telemetry> {
+        None
+    }
+    fn smbus_telemetry(&self, _: usize) -> Option<&SmbusTelemetry> {
+        None
+    }
+    fn backend_info(&self) -> String {
+        "devices".into()
+    }
+}
+
+/// Probe a host serving `sock` from a TUI on `local`, as this machine.
+#[cfg(unix)]
+fn probe_from(sock: &Path, local: &dyn TelemetryBackend) -> TuiBus {
+    TuiBus::start(&probe_opts(Attach::Probe(sock.to_path_buf())), local).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn the_probe_refuses_a_mock_host() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let b = mock(2);
+    let (_h, _s) = serving_host_with(&sock, &b, "mock", HeaderKind::Live);
+    assert!(!probe_from(&sock, &b).is_attached());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_probe_refuses_a_replay_host() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let b = mock(2);
+    let (_h, _s) = serving_host_with(&sock, &b, "replay", HeaderKind::Replay);
+    assert!(!probe_from(&sock, &b).is_attached());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_probe_refuses_a_host_with_another_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let b = mock(2);
+    let (_h, _s) = serving_host(&sock, &b);
+    let opts = TuiBusOptions {
+        local_host: "another-box/0123456789abcdef".into(),
+        ..probe_opts(Attach::Probe(sock.clone()))
+    };
+    assert!(!TuiBus::start(&opts, &b).unwrap().is_attached());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_probe_refuses_a_live_host_with_no_chip_in_common() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let b = mock(2);
+    let (_h, _s) = serving_host(&sock, &b);
+    let local = Devices::with(&["0000:41:00.0", "0000:42:00.0"]);
+    assert!(!probe_from(&sock, &local).is_attached());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_probe_attaches_to_a_live_same_host_world_with_a_chip_in_common() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let b = mock(2);
+    let (_h, _s) = serving_host(&sock, &b);
+    // One chip in common is enough.
+    let local = Devices::with(&[A, "0000:42:00.0"]);
+    let bus = probe_from(&sock, &local);
+    assert!(bus.is_attached());
+    assert_eq!(bus.bus_label(), format!("bus: {}", sock.display()));
+}
+
+/// The mismatch rule itself, case by case.
+#[test]
+fn origin_mismatch_checks_kind_mode_host_and_chips() {
+    let local: BTreeSet<EntityKey> = [EntityKey::chip(A)].into_iter().collect();
+    let o = |kind, host: &str, mode: &str, chips: &[&str]| Origin {
+        kind,
+        host: host.into(),
+        mode: mode.into(),
+        chips: chips.iter().map(|c| EntityKey::chip(c)).collect(),
+    };
+    let live = HeaderKind::Live;
+    assert_eq!(
+        origin_mismatch(&o(live, "me", "live", &[A]), "me", &local),
+        None
+    );
+    assert_eq!(
+        origin_mismatch(&o(HeaderKind::Replay, "me", "live", &[A]), "me", &local),
+        Some(Mismatch::Replay)
+    );
+    assert_eq!(
+        origin_mismatch(&o(live, "me", "mock", &[A]), "me", &local),
+        Some(Mismatch::Mock)
+    );
+    assert_eq!(
+        origin_mismatch(&o(live, "you", "live", &[A]), "me", &local),
+        Some(Mismatch::OtherHost)
+    );
+    assert_eq!(
+        origin_mismatch(&o(live, "me", "", &[A]), "me", &local),
+        Some(Mismatch::UnknownMode),
+        "an older host that sends no mode"
+    );
+    assert_eq!(
+        origin_mismatch(&o(live, "me", "live", &[B]), "me", &local),
+        Some(Mismatch::NoMatchingChips)
+    );
+}
+
+/// An explicit `--bus-attach` attaches to a mismatching host, and the label
+/// says why.
+#[cfg(unix)]
+#[test]
+fn bus_attach_to_a_mismatching_host_warns_in_the_label() {
+    let tmp = tempfile::tempdir().unwrap();
+    let b = mock(2);
+    let cases: [(&str, HeaderKind, &str, &str); 3] = [
+        ("mock", HeaderKind::Live, "me", "(mock)"),
+        ("replay", HeaderKind::Replay, "me", "(replay)"),
+        ("live", HeaderKind::Live, "other", "(other host)"),
+    ];
+    for (i, (mode, kind, who, want)) in cases.into_iter().enumerate() {
+        let sock = tmp.path().join(format!("run{i}")).join("bus.sock");
+        let (_h, _s) = serving_host_with(&sock, &b, mode, kind);
+        let local_host = if who == "me" {
+            tt_toplike_bus::host_identity().to_string()
+        } else {
+            "elsewhere".to_string()
+        };
+        let opts = TuiBusOptions {
+            local_host,
+            ..probe_opts(Attach::Required(sock.clone()))
+        };
+        let bus = TuiBus::start(&opts, &b).unwrap();
+        assert!(bus.is_attached());
+        assert_eq!(bus.bus_label(), format!("bus: {} {want}", sock.display()));
+    }
+    // No chip in common.
+    let sock = tmp.path().join("run9").join("bus.sock");
+    let (_h, _s) = serving_host(&sock, &b);
+    let local = Devices::with(&["0000:41:00.0"]);
+    let bus = TuiBus::start(&probe_opts(Attach::Required(sock.clone())), &local).unwrap();
+    assert_eq!(
+        bus.bus_label(),
+        format!("bus: {} (no matching chips)", sock.display())
+    );
+}
+
+/// An attached world answers only for local chips: a reading of a remote
+/// chip that is not local (or of its DRAM channel) is `None`.
+#[cfg(unix)]
+#[test]
+fn an_attached_world_is_read_only_for_local_chips() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let b = mock(2);
+    let (_h, _s) = serving_host(&sock, &b);
+    let local = Devices::with(&[A]);
+    let bus = TuiBus::start(&probe_opts(Attach::Required(sock.clone())), &local).unwrap();
+    let v = bus.read();
+    let (a, bb) = (EntityKey::chip(A), EntityKey::chip(B));
+    assert!(v.reading(&a, sig::TDP_W).is_some());
+    assert!(
+        v.reading(&bb, sig::TDP_W).is_none(),
+        "a chip that is not local"
+    );
+    assert!(v
+        .reading(&EntityKey::dram_channel(&bb, 0), "dram.temp_c")
+        .is_none());
+    assert!(v.reset_seq(&bb).is_none());
+    assert_eq!(bus.local_chips().len(), 1);
+}
+
+/// A dead host shows in the label: reconnecting, then disconnected.
+#[cfg(unix)]
+#[test]
+fn the_label_says_when_the_attached_host_is_gone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let mut b = mock(2);
+    let (host, server) = serving_host(&sock, &b);
+    let mut bus = TuiBus::start(&probe_opts(Attach::Required(sock.clone())), &b).unwrap();
+    assert_eq!(bus.bus_label(), format!("bus: {}", sock.display()));
+    drop(server);
+    drop(host);
+    let end = Instant::now() + Duration::from_secs(6);
+    let mut seen = Vec::new();
+    while Instant::now() < end {
+        bus.data_tick(&b, Instant::now());
+        let l = bus.bus_label();
+        if seen.last() != Some(&l) {
+            seen.push(l.clone());
+        }
+        if l.ends_with("(disconnected)") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+        b.update().unwrap();
+    }
+    assert!(
+        seen.iter().any(|l| l.ends_with("(reconnecting)")),
+        "{seen:?}"
+    );
+    assert!(seen.last().unwrap().ends_with("(disconnected)"), "{seen:?}");
+}
+
+// ---- fix round 1: synthetic data is Estimated ------------------------------------
+
+/// Every reading in `w` and its provenance.
+fn provenances(w: &World) -> Vec<(String, tt_toplike_bus::Provenance)> {
+    w.readings()
+        .map(|(e, s, r)| (format!("{e} {s}"), r.prov))
+        .collect()
+}
+
+/// A TUI on `opts` fed the mock roster and training run, ticked twice.
+fn fed_world(opts: TuiBusOptions) -> World {
+    let mut b = mock(2);
+    let mut bus = TuiBus::start(&opts, &b).unwrap();
+    let services = crate::workload::inference_server::mock::mock_services(30.0);
+    let train = crate::workload::train::MockTrainRun::new().state_at(30.0);
+    let t0 = Instant::now();
+    for i in 0..2u64 {
+        bus.feed_workloads(&[], Some(&services), Some(&train));
+        bus.data_tick(&b, t0 + Duration::from_secs(i));
+        b.update().unwrap();
+    }
+    bus.host().unwrap().world()
+}
+
+#[test]
+fn a_mock_tui_world_has_no_measured_reading() {
+    let w = fed_world(mock_opts(&[]));
+    let p = provenances(&w);
+    assert!(p.iter().any(|(k, _)| k.starts_with("model:")), "{p:?}");
+    assert!(p.iter().any(|(k, _)| k.starts_with("run:")), "{p:?}");
+    let measured: Vec<_> = p
+        .iter()
+        .filter(|(_, v)| {
+            matches!(
+                v,
+                tt_toplike_bus::Provenance::Measured | tt_toplike_bus::Provenance::Derived
+            )
+        })
+        .collect();
+    assert!(measured.is_empty(), "{measured:?}");
+}
+
+#[test]
+fn a_real_run_keeps_measured_readings() {
+    let opts = TuiBusOptions {
+        synthetic: false,
+        ..mock_opts(&[])
+    };
+    let w = fed_world(opts);
+    assert!(provenances(&w)
+        .iter()
+        .any(|(k, v)| k.starts_with("model:") && *v == tt_toplike_bus::Provenance::Measured));
+}
+
+// ---- fix round 1: backend switches ------------------------------------------------
+
+#[test]
+fn a_switch_while_recording_or_serving_is_refused_with_a_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("bus");
+    let b = mock(2);
+    let bus = TuiBus::start(&mock_opts(&["--record", dir.to_str().unwrap()]), &b).unwrap();
+    let why = bus.switch_refusal().expect("refused while recording");
+    assert!(
+        why.contains("refused") && why.contains(&dir.display().to_string()),
+        "{why}"
+    );
+    assert!(!why.contains('\n'));
+
+    #[cfg(unix)]
+    {
+        let sock = tmp.path().join("run").join("bus.sock");
+        let bus = TuiBus::start(&mock_opts(&["--bus-socket", sock.to_str().unwrap()]), &b).unwrap();
+        assert!(bus
+            .switch_refusal()
+            .is_some_and(|w| w.contains("--bus-socket")));
+    }
+    assert_eq!(
+        local_bus(&b).switch_refusal(),
+        None,
+        "a memory-only bus follows"
+    );
+}
+
+/// In a memory-only bus, a switch into mock makes the next readings
+/// `Estimated`, and a switch back makes them `Measured` again.
+#[test]
+fn a_switch_in_a_memory_bus_retags_the_next_readings() {
+    let mut b = mock(2);
+    let opts = TuiBusOptions {
+        synthetic: false,
+        ..mock_opts(&[])
+    };
+    let mut bus = TuiBus::start(&opts, &b).unwrap();
+    let chip = EntityKey::chip(A);
+    let t0 = Instant::now();
+    bus.data_tick(&b, t0);
+    let prov = |bus: &TuiBus| bus.read().reading(&chip, sig::TDP_W).unwrap().prov;
+    assert_eq!(prov(&bus), tt_toplike_bus::Provenance::Measured);
+
+    bus.backend_switched(BackendType::Mock, "Mock (2 devices)", false);
+    assert!(bus.synthetic());
+    b.update().unwrap();
+    bus.data_tick(&b, t0 + Duration::from_secs(1));
+    assert_eq!(prov(&bus), tt_toplike_bus::Provenance::Estimated);
+
+    bus.backend_switched(BackendType::Json, "JSON", false);
+    b.update().unwrap();
+    bus.data_tick(&b, t0 + Duration::from_secs(2));
+    assert_eq!(prov(&bus), tt_toplike_bus::Provenance::Measured);
+}
+
+/// Right after a switch, `/serve` never sends the old backend's frame: the
+/// new backend's frame is used until the bus has the new raw frame.
+#[cfg(feature = "remote")]
+#[test]
+fn serve_frame_after_a_switch_never_returns_the_old_frame() {
+    let old = TT_SMI_FRAME.to_string();
+    let new = TT_SMI_FRAME
+        .replace("\"", "\"")
+        .replacen('{', "{\"switched\":1,", 1);
+    assert_ne!(old, new);
+    let mut b = WithRaw(mock(2), old.clone());
+    let mut bus = local_bus(&b);
+    bus.data_tick(&b, Instant::now());
+    let ext = || crate::backend::build_extension(&one_proc(), &[]);
+
+    // Swap: the backend now serves `new`; the bus has not ticked yet.
+    b.1 = new.clone();
+    bus.backend_switched(BackendType::Json, "JSON", false);
+    let got = serve_frame(Some(&bus), b.snapshot_json(), false, ext).unwrap();
+    assert_eq!(got, crate::backend::inject_extension(&new, &ext()));
+    let got = serve_frame(Some(&bus), b.snapshot_json(), true, ext).unwrap();
+    assert_eq!(got, new, "relay");
+
+    // After the next tick the world's frame is the new one.
+    bus.data_tick(&b, Instant::now());
+    assert!(bus.host().unwrap().raw_is_current());
+    let got = serve_frame(Some(&bus), Some("stale".into()), false, ext).unwrap();
+    assert_eq!(got, crate::backend::inject_extension(&new, &ext()));
+}
+
+/// A backend with a `--remote` frame extension: one ready model.
+#[cfg(feature = "remote")]
+struct RemoteBox(MockBackend);
+
+#[cfg(feature = "remote")]
+impl TelemetryBackend for RemoteBox {
+    fn init(&mut self) -> BackendResult<()> {
+        self.0.init()
+    }
+    fn update(&mut self) -> BackendResult<()> {
+        self.0.update()
+    }
+    fn devices(&self) -> &[Device] {
+        self.0.devices()
+    }
+    fn telemetry(&self, i: usize) -> Option<&Telemetry> {
+        self.0.telemetry(i)
+    }
+    fn smbus_telemetry(&self, i: usize) -> Option<&SmbusTelemetry> {
+        self.0.smbus_telemetry(i)
+    }
+    fn backend_info(&self) -> String {
+        "Remote (ws)".into()
+    }
+    fn remote_inference(&self) -> Option<Vec<crate::backend::RemoteInference>> {
+        Some(vec![crate::backend::RemoteInference {
+            key: "box-llama".into(),
+            label: "Llama".into(),
+            phase: "ready".into(),
+            progress: None,
+            serving: None,
+            media: None,
+            port: None,
+            chips: vec![0],
+        }])
+    }
+}
+
+/// `/remote` mid-session: the bus starts feeding the remote frame's
+/// extension.
+#[cfg(feature = "remote")]
+#[test]
+fn a_switch_to_remote_starts_remote_feeding() {
+    let mut b = RemoteBox(mock(2));
+    let opts = TuiBusOptions {
+        synthetic: false,
+        ..mock_opts(&[])
+    };
+    let mut bus = TuiBus::start(&opts, &b).unwrap();
+    bus.data_tick(&b, Instant::now());
+    assert!(bus.read().models().is_empty(), "not fed before the switch");
+    bus.backend_switched(BackendType::Remote, "Remote (ws)", false);
+    assert!(bus.relays());
+    b.update().unwrap();
+    bus.data_tick(&b, Instant::now());
+    assert!(
+        bus.read()
+            .models()
+            .iter()
+            .any(|m| m.label.contains("Llama")),
+        "{:?}",
+        bus.read().models()
+    );
 }

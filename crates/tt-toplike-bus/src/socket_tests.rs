@@ -862,8 +862,15 @@ fn a_subscribe_reply_starts_with_the_instance_header() {
     assert_eq!(snap["instance"], bus.instance());
     assert_eq!(
         c.line(),
-        serde_json::json!({"subscribed":{"from":0,"instance":bus.instance()}})
+        serde_json::json!({"subscribed":{
+            "from":0,
+            "instance":bus.instance(),
+            "host":crate::host_identity(),
+            "backend":"",
+            "mode":""
+        }})
     );
+    assert_eq!(snap["host"], crate::host_identity());
     assert_eq!(c.line()["q"], 1);
     // A second bus has a different id.
     assert_ne!(world_bus().instance(), bus.instance());
@@ -961,6 +968,9 @@ fn snap_line(seq: u64, instance: u64, sig: &str) -> String {
         seq,
         instance,
         kind: crate::HeaderKind::Live,
+        host: String::new(),
+        backend: String::new(),
+        mode: String::new(),
         world: w,
     })
     .unwrap()
@@ -1177,4 +1187,65 @@ fn a_symlink_at_the_socket_path_is_refused() {
         .unwrap()
         .file_type()
         .is_symlink());
+}
+
+// ---- Task 10b fix round 1 ----------------------------------------------------
+
+/// The link goes from connected to reconnecting when the server goes away,
+/// and to disconnected once a reconnect has failed.
+#[test]
+fn link_reports_reconnecting_then_disconnected() {
+    use crate::client::Link;
+    let bus = world_bus();
+    bus.publish("t", sample(&chip(1), "a", Value::U64(1)));
+    let (_d, path) = sock("link");
+    let server = SocketServer::spawn(bus.clone(), &path).unwrap();
+    let rw = RemoteWorld::connect(&path).unwrap();
+    assert_eq!(rw.link(), Link::Connected);
+    drop(server);
+    assert!(
+        wait_for(3, || rw.link() == Link::Reconnecting),
+        "{:?}",
+        rw.link()
+    );
+    // Nothing listens any more: the first retry (after 1 s) fails.
+    assert!(
+        wait_for(5, || rw.link() == Link::Disconnected),
+        "{:?}",
+        rw.link()
+    );
+}
+
+/// Dropping a remote world whose follower is stuck waiting on a hung host
+/// returns within about half a second.
+#[test]
+fn dropping_a_remote_world_on_a_hung_host_is_bounded() {
+    use std::os::unix::net::UnixListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let bus = world_bus();
+    let (_d, path) = sock("hung");
+    let server = SocketServer::spawn(bus.clone(), &path).unwrap();
+    let rw = RemoteWorld::connect(&path).unwrap();
+    drop(server);
+    // A host that accepts and never answers.
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).unwrap();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let a = accepted.clone();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for c in listener.incoming() {
+            a.fetch_add(1, Ordering::SeqCst);
+            held.push(c);
+        }
+    });
+    assert!(
+        wait_for(10, || accepted.load(Ordering::SeqCst) > 0),
+        "the follower never reconnected"
+    );
+    let t = std::time::Instant::now();
+    drop(rw);
+    let took = t.elapsed();
+    assert!(took < Duration::from_millis(900), "{took:?}");
 }

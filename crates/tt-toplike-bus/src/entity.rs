@@ -91,6 +91,22 @@ impl EntityKey {
             _ => EntityKind::Other,
         }
     }
+    /// The chip this entity belongs to: the chip itself, or the chip a
+    /// DRAM channel, Ethernet port or tile key names. `None` for anything
+    /// else (models, processes, boards, ...).
+    pub fn chip_owner(&self) -> Option<EntityKey> {
+        match self.kind() {
+            EntityKind::Chip => Some(self.clone()),
+            EntityKind::DramChannel | EntityKind::EthPort | EntityKind::Tile => {
+                let rest = self.0.split_once(':')?.1;
+                let chip = rest.split_once('/').map_or(rest, |(c, _)| c);
+                chip.starts_with("chip:")
+                    .then(|| EntityKey(chip.to_string()))
+            }
+            _ => None,
+        }
+    }
+
     /// The key as text.
     pub fn as_str(&self) -> &str {
         &self.0
@@ -100,5 +116,21 @@ impl EntityKey {
 impl fmt::Display for EntityKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+#[cfg(test)]
+mod chip_owner_tests {
+    use super::*;
+
+    #[test]
+    fn chip_owner_names_the_chip_of_chip_parts() {
+        let c = EntityKey::chip("0000:01:00.0");
+        assert_eq!(c.chip_owner(), Some(c.clone()));
+        assert_eq!(EntityKey::dram_channel(&c, 3).chip_owner(), Some(c.clone()));
+        assert_eq!(EntityKey::eth_port(&c, 1).chip_owner(), Some(c.clone()));
+        assert_eq!(EntityKey::tile(&c, 1, 2).chip_owner(), Some(c.clone()));
+        assert_eq!(EntityKey::model("m").chip_owner(), None);
+        assert_eq!(EntityKey::board("b").chip_owner(), None);
     }
 }

@@ -329,7 +329,7 @@ pub struct Cli {
     #[arg(
         long,
         value_name = "PATH",
-        conflicts_with_all = ["headless", "bus_socket", "record", "bus_dir"]
+        conflicts_with_all = ["headless", "bus_socket", "record", "bus_dir", "bus_retain"]
     )]
     pub bus_attach: Option<PathBuf>,
 
@@ -1994,6 +1994,7 @@ mod tests {
             &["--bus-dir", "/d"],
             &["--headless"],
             &["--no-bus-attach"],
+            &["--bus-retain", "2"],
         ] {
             let mut args = vec!["--bus-attach", "/a"];
             args.extend_from_slice(other);

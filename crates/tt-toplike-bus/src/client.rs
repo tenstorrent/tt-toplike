@@ -350,6 +350,14 @@ pub struct RemoteView {
     /// The server bus's header kind: `Replay` when it republishes a
     /// recorded log.
     pub header_kind: HeaderKind,
+    /// The server machine's identity ([`crate::ident`]); empty from older
+    /// servers.
+    pub host: String,
+    /// The server bus's `backend` header tag; empty when absent.
+    pub backend: String,
+    /// The server bus's `mode` header tag (`live`, `mock`, `replay`); empty
+    /// when absent.
+    pub mode: String,
     pub world: WorldSummary,
 }
 
@@ -359,6 +367,9 @@ impl Default for RemoteView {
             seq: 0,
             instance: 0,
             header_kind: HeaderKind::Live,
+            host: String::new(),
+            backend: String::new(),
+            mode: String::new(),
             world: WorldSummary::default(),
         }
     }
@@ -370,6 +381,9 @@ impl From<RemoteSnapshot> for RemoteView {
             seq: s.seq,
             instance: s.instance,
             header_kind: s.kind,
+            host: s.host,
+            backend: s.backend,
+            mode: s.mode,
             world: s.world,
         }
     }
@@ -404,7 +418,22 @@ struct RemoteShared {
     path: PathBuf,
     state: Mutex<ViewState>,
     connected: AtomicBool,
+    /// At least one reconnect attempt has failed since the connection was
+    /// lost (see [`Link`]).
+    retry_failed: AtomicBool,
     stop: AtomicBool,
+}
+
+/// The state of a [`RemoteWorld`]'s connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Link {
+    /// A subscription is open; the view is current.
+    Connected,
+    /// The connection was lost and the first reconnect is pending.
+    Reconnecting,
+    /// A reconnect attempt has failed; the follower keeps trying with
+    /// backoff. The view is the last one received and goes stale.
+    Disconnected,
 }
 
 impl RemoteShared {
@@ -473,6 +502,7 @@ impl RemoteWorld {
                 learned: Instant::now(),
             }),
             connected: AtomicBool::new(true),
+            retry_failed: AtomicBool::new(false),
             stop: AtomicBool::new(false),
         });
         let s = shared.clone();
@@ -499,6 +529,41 @@ impl RemoteWorld {
     /// True while a subscription to the server is open.
     pub fn connected(&self) -> bool {
         self.shared.connected.load(Ordering::SeqCst)
+    }
+
+    /// The connection's state: connected, waiting for the first reconnect,
+    /// or down after a failed reconnect.
+    pub fn link(&self) -> Link {
+        if self.connected() {
+            Link::Connected
+        } else if self.shared.retry_failed.load(Ordering::SeqCst) {
+            Link::Disconnected
+        } else {
+            Link::Reconnecting
+        }
+    }
+
+    /// The server machine's identity, `backend` tag and `mode` tag, from the
+    /// latest snapshot.
+    pub fn origin(&self) -> (String, String, String) {
+        let st = self.shared.state();
+        (
+            st.view.host.clone(),
+            st.view.backend.clone(),
+            st.view.mode.clone(),
+        )
+    }
+
+    /// The chip keys the remote world knows, in key order.
+    pub fn chips(&self) -> Vec<EntityKey> {
+        let st = self.shared.state();
+        st.view
+            .world
+            .entities
+            .iter()
+            .filter(|e| e.kind() == crate::EntityKind::Chip)
+            .cloned()
+            .collect()
     }
 
     /// The sequence number the view is current to. One lock and no copy, so
@@ -534,13 +599,26 @@ impl RemoteWorld {
     }
 }
 
+/// How long dropping a [`RemoteWorld`] waits for its thread.
+const DROP_WAIT: Duration = Duration::from_millis(500);
+
 impl Drop for RemoteWorld {
+    /// Ask the thread to stop and wait at most [`DROP_WAIT`] for it. The
+    /// thread checks the flag every [`TICK`], but it can be inside a
+    /// reconnect waiting up to [`REPLY_TIMEOUT`] on a hung server. Past the
+    /// wait it is left to finish on its own (it holds only its own `Arc`
+    /// and exits at its next check), so a program quitting is never held
+    /// up by a dead host.
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
         if let Some(t) = self.thread.take() {
-            // The thread wakes every TICK (and a reply wait is bounded by
-            // REPLY_TIMEOUT), so this join is bounded.
-            let _ = t.join();
+            let end = Instant::now() + DROP_WAIT;
+            while !t.is_finished() && Instant::now() < end {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if t.is_finished() {
+                let _ = t.join();
+            }
         }
     }
 }
@@ -558,6 +636,7 @@ fn follow(shared: &RemoteShared, first: RemoteSubscription) {
     loop {
         if let Some(mut s) = sub.take() {
             shared.connected.store(true, Ordering::SeqCst);
+            shared.retry_failed.store(false, Ordering::SeqCst);
             let at_once = match drain(shared, &mut s) {
                 None => return,
                 Some(at_once) => at_once,
@@ -582,6 +661,7 @@ fn follow(shared: &RemoteShared, first: RemoteSubscription) {
                 backoff = BACKOFF_FIRST;
             }
             Err(_) => {
+                shared.retry_failed.store(true, Ordering::SeqCst);
                 if !shared.pause(backoff) {
                     return;
                 }

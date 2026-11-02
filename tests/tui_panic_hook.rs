@@ -56,6 +56,7 @@ fn a_reducer_panic_is_silent_and_an_ordinary_panic_reaches_the_tui_hook() {
         relay: false,
         gozer: false,
         local_workloads: false,
+        local_host: tt_toplike_bus::host_identity().to_string(),
     };
     // As run_tui does: the TUI's hook, then the bus (which installs the
     // quiet reducer hook around it).

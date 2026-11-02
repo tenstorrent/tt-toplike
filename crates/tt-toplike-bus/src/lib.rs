@@ -21,6 +21,7 @@
 pub mod client;
 pub mod config;
 pub mod entity;
+pub mod ident;
 pub mod inspect;
 pub mod log;
 pub mod read;
@@ -36,9 +37,10 @@ mod testutil;
 pub mod world;
 
 #[cfg(unix)]
-pub use client::{ClientError, RemoteSubscription, RemoteView, RemoteWorld, SocketClient};
+pub use client::{ClientError, Link, RemoteSubscription, RemoteView, RemoteWorld, SocketClient};
 pub use config::{BusConfig, Clock, ManualClock, SystemClock};
 pub use entity::{EntityKey, EntityKind};
+pub use ident::host_identity;
 pub use log::{install_quiet_reducer_hook, Bus, BusStats, ReadError, Reducer, Subscription};
 pub use read::{LocalView, WorldRead};
 pub use record::{
