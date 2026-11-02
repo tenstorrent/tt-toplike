@@ -33,7 +33,7 @@ const EVENT_LIST_MAX: usize = 50;
 pub struct Filter {
     /// Keep only this entity, for example `model:llama-8b`.
     pub entity: Option<String>,
-    /// Keep only this signal, for example `chip.temp_c`.
+    /// Keep only this signal, for example `tt_asic_temperature_celsius`.
     pub signal: Option<String>,
 }
 

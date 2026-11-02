@@ -1737,3 +1737,98 @@ Decisions worth keeping:
 Process. Subagent-driven: one implementer per task, a separate review per task, and a ledger
 of decisions, kept outside the repo, for every gap between the plan and the code. Tasks 12 to 19 were added after the plan, one per round of Taylor's feedback. The
 12 Hz wave step has been judged in recordings only; Taylor is to look at it in Konsole.
+
+---
+
+## Signal bus (Nov 1-2 2026, branch `what-if`, 0.15.0)
+
+Prompt (Taylor, in the Die 3D session): "the viz is still too static ... we need to integrate
+the same signals other viz use". The answer was one recorded stream every source writes and
+every view reads. Design: `docs/superpowers/specs/2026-11-01-signal-bus-design.md`. Plan:
+`docs/superpowers/plans/2026-11-01-signal-bus.md`. User and consumer documentation:
+`docs/bus.md`. Built subagent-driven with a ledger outside the repo; each task had a separate
+review, and most tasks needed one to three fix rounds.
+
+### Layout
+
+* `crates/tt-toplike-bus/` (library, 0.1.0): record types (`record.rs`), entity keys,
+  the log and its writer thread (`log.rs`, `segment.rs`), the `World` reducer (`world.rs`),
+  `Replay` and `inspect`, the Unix socket server and client (`socket.rs`, `client.rs`), the
+  serialisable `WorldSummary` (`summary.rs`) and the `WorldRead` trait views use (`read.rs`).
+  It never touches hardware.
+* `src/bus/`: the adapters in the main crate. `source.rs` (`BackendSource`),
+  `workload_sources.rs` (inference, training, hivemind, processes, remote), `gozer.rs`
+  (lease source and `Governor`), `identity.rs` (index-to-key map), `redact.rs`, `host.rs`
+  (`BusHost`: owns the bus and every source, ticks them), `headless.rs`, `tui_bus.rs` (the
+  TUI's host-or-attach logic), `view.rs` (what views read), `compat.rs` (tt-station frames).
+* Signal names are part of the log format. Add names. Never rename one.
+
+### Rules for code that touches the bus
+
+* **Every sample carries provenance** (`Measured`, `Derived`, `Estimated`, `Decoration`).
+  A simulated backend (`--mock`) marks everything `Estimated`
+  (`BusHost::set_synthetic`). A source with nothing to say emits nothing. It never emits
+  zero.
+* **Views do not animate on `ModelLoading` or `ModelReady` events.** The host re-announces
+  every loading or ready model every 5 minutes (`RESEND_EVERY`), so retention cannot delete
+  the only copy. A repeated announcement with an unchanged phase must change nothing on
+  screen. React to a phase change and to progress. Die 3D compares against the phase it saw
+  last (`OverlayState`). A model already `Ready` at first sight gets no settle effect.
+* **Chip identity is the PCI address** (`EntityKey::chip(&device.bus_id)`). Never key
+  per-device data by loop position or by `/dev/tenstorrent/N` index. A source that only knows
+  an index (processes, training, hivemind, a model's chip list) goes through `IdentityMap`,
+  and the host calls `IdentityMap::refresh` BEFORE it feeds any index-only source on a tick.
+  A test that swaps two chips' indexes must use non-contiguous indexes, or it passes under the
+  bug.
+* **Redaction.** Any new free-text field a source writes (a name, label, command line, `who`,
+  service key) goes through `redact_cmdline` and is clipped (`MAX_TEXT` 512). The raw text
+  never reaches a record, a log line or the socket. `redact.rs` lists the known false
+  positives and residual leaks. The final fix wave was meant to close the nested-object leak
+  and salt the key hash. Check `docs/bus.md` section 9 for what is still open.
+* **Governor.** A source that opens a chip on its own account must call
+  `Governor::permit(chip)` first and emit nothing for the tick when it is denied. The existing
+  sources (hwmon, sysfs, `tt-smi -s`, `/proc`, metrics scrapes) open no chip and need no
+  lease. Nothing in the first release opens a chip. The `gozer` source runs only
+  `gozer status --json` and `gozer env <lease> --json`. `TT_VISIBLE_DEVICES` holds PCI
+  addresses (not indexes). The governor's 60 second tolerance is not the sidecar's "exit on
+  the first failed re-check" rule.
+* **The `/telemetry` frame comes from the raw tt-smi record on the bus**
+  (`compat::telemetry_frame`). A `--remote` relay uses `relay_frame` (the origin's bytes) and
+  never adds its own `tt_toplike` extension.
+* **Build the TUI's panic hook before the `BusHost`.** The host installs a quiet reducer-panic
+  hook behind a `Once`. A later `set_hook` replaces it. `tests/tui_panic_hook.rs` guards this,
+  and CI's `--lib` command does not run it. Run `cargo test --test tui_panic_hook`.
+* Hosts tick on the data tick, never per render frame.
+
+### Hardware-testing rules learned (sidecar tests, 2 rounds on a QuietBox 2)
+
+* A live reader on a chip makes `gozer reset` and `gozer release` refuse ("chips still open
+  by [pid]"). Detach the reader first. With `--force` the reset worked.
+* A server restart without a chip reset can fail on an Ethernet core timeout, with or without
+  a reader attached (2 of 2 trials). Reset between restarts.
+* Take a lease before anything that opens `/dev/tenstorrent/*`. Never `tt-smi -r` by hand.
+* The sidecar is not in the release. Its rules and measurements are in `docs/bus.md`
+  section 12.
+
+### Testing lessons from this work
+
+* **A test that cannot fail is a claim.** Several first drafts had tests that passed under the
+  bug: a swap test with contiguous indexes, a `Source::poll` that did nothing while its test
+  checked the arithmetic beneath it, a backend-switch test that survived the gate being
+  removed, a progress test that passed with progress ignored. Reintroduce the bug, watch the
+  test go red, restore.
+* **Apply each mutation alone, in a copy of the tree.** An implementer stacked several
+  mutations in one tree and three of its red results were unreliable (a later mutation made an
+  earlier test fail for the wrong reason). A verification pass in a `git archive` copy, one
+  mutation per run, confirmed them. A leftover mutation in the working tree is also a risk;
+  check the diff before committing.
+* **Assert at the layer that fails.** The per-frame cost of the bus is guarded by a tick
+  counter test. A render-cost timing test cannot catch a tick per frame.
+* **Round-trip floats bit for bit.** `serde_json` needs `float_roundtrip` or a replayed world
+  differs from the recorded one in the last bit. The workspace feature also changes how the
+  main crate parses tt-smi floats.
+* **A fixture of constructed extremes proves little.** The redaction property test runs about
+  25 secret shapes with random quoting, because hand-picked cases missed an unbalanced quote
+  that disabled all redaction after it.
+* A secret in a persisted log is the failure redaction exists to prevent. A leak class found
+  in a review round is fixed in that round, even when it is outside the review's scope.

@@ -22,7 +22,7 @@
 //!  "world":{
 //!    "now_mono_ns":T,               // server monotonic time the ages are taken at
 //!    "entities":["chip:0000:03:00.0", ...],        // every entity seen, key order
-//!    "readings":[{"entity":"chip:...","signal":"chip.temp_c",
+//!    "readings":[{"entity":"chip:...","signal":"tt_asic_temperature_celsius",
 //!                 "value":{"f":51.5},"prov":"measured",
 //!                 "seq":41,"t_mono_ns":123,"age_ms":250}, ...],
 //!    "models":[{"key":"model:llama","label":"llama","phase":"ready",

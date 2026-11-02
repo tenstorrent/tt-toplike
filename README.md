@@ -236,6 +236,35 @@ contract and the `tt-station-agentd` coordination notes.
 
 ---
 
+## Signal bus: record, replay and share what tt-toplike sees
+
+Every source (chip telemetry, inference servers, training, hivemind, processes, gozer
+leases) writes to one ordered stream, the signal bus. Die 3D reads it, other programs can
+read it over a Unix socket, and it is recorded to disk so a run can be inspected and
+replayed later. Every sample says whether it is `measured`, `derived`, `estimated` or
+`decoration`. Full details: [docs/bus.md](docs/bus.md).
+
+```
+tt-toplike-tui --headless                        # no screen: record to ~/.local/state/tt-toplike/bus and serve the socket
+tt-toplike-tui --record /var/tmp/run1            # normal TUI that also records the bus to a directory
+tt-toplike-tui --bus-inspect /var/tmp/run1       # summary of a recording; add --entity KEY / --signal NAME
+tt-toplike-tui --headless --replay /var/tmp/run1 --speed 4 --bus-socket /tmp/tt-toplike-$UID/replay.sock
+tt-toplike-tui --bus-attach /tmp/tt-toplike-$UID/replay.sock    # a TUI that reads that host's bus
+```
+
+* A TUI without `--record` keeps its bus in memory. A `--headless` host keeps 24 hours or
+  5 GB of log (`--bus-retain HOURS[,GB]`) in a directory only you can read (mode 0700).
+* A TUI looks for a `--headless` host at start-up and attaches to it when the host is on the
+  same machine, live, and has the same chips. `--no-bus-attach` turns the probe off.
+* `--headless` is meant for systemd (`Restart=on-failure`, no root). `docs/bus.md` has an
+  example unit file.
+* Command lines in the log have common secret shapes (tokens, keys, passwords) replaced with
+  `<redacted>`. The matcher has known gaps, listed in `docs/bus.md`.
+* Limits of this release: no hardware run yet, the Die 3D tile glow is still an estimate, the
+  per-tile counter sidecar is not included, and the `i` view does not read the bus yet.
+
+---
+
 ## Installation
 
 ### Debian / Ubuntu — apt (Tenstorrent PPA, recommended)

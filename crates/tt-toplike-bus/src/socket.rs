@@ -13,10 +13,12 @@
 //!
 //! ```text
 //! request                                   reply
-//! {"op":"snapshot"}                         {"seq":N,"world":{...}}   (one line)
+//! {"op":"snapshot"}                         {"seq":N,"instance":I,"kind":K,"host":H,"backend":B,
+//!                                            "mode":M,"world":{...}}   (one line)
 //! {"op":"raw","source":"tt-smi"}            {"seq":N,"source":"tt-smi","body":"..."}
 //!                                           (body is null when that source has no raw frame)
-//! {"op":"subscribe","from":N}               {"subscribed":{"from":N,"instance":I}}, then
+//! {"op":"subscribe","from":N}               {"subscribed":{"from":N,"instance":I,"host":H,
+//!                                            "backend":B,"mode":M}}, then
 //! {"op":"subscribe","from":"head"}          record lines N+1, N+2, ... until the client
 //!                                           closes or an error line ends the stream
 //! {"op":"replay","from_ts_ms":T,"speed":S,  {"header":{"schema":1,"kind":"Replay",...}},

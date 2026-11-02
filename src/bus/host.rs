@@ -1,7 +1,7 @@
 //! The bus host: owns the [`Bus`], the chip identity map and every source,
 //! and drives them on the host's tick.
 //!
-//! A host is what the TUI (a later task) and the headless mode
+//! A host is what the TUI and the headless mode
 //! ([`crate::bus::headless`]) hold. It does not run any monitor itself. The
 //! caller already runs the backend and the workload monitors; it hands their
 //! latest results to the host with the `feed_*` methods, then calls

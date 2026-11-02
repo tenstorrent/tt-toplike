@@ -105,7 +105,7 @@ pub struct BusConfig {
     /// Source of timestamps. Tests use a [`ManualClock`].
     pub clock: Arc<dyn Clock>,
     /// Written into each segment header and returned by [`crate::Bus::header`].
-    /// `Live` by default. [`crate::Replay::bus_config`] sets `Replay`.
+    /// `Live` by default. [`crate::Replay::configure`] sets `Replay`.
     pub header_kind: HeaderKind,
     /// Extra entries for the header's `tool_versions` map, written into each
     /// segment header and returned by [`crate::Bus::header`]. A host records

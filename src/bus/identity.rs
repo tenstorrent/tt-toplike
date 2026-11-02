@@ -18,6 +18,9 @@
 //!   [`IdentityMap::hold_unresolved`] for exactly one `refresh`. If the index
 //!   resolves then, [`IdentityMap::resolve_pending`] returns the payload. If
 //!   not, it is dropped and counted in [`IdentityMap::dropped`].
+//! * Both lists (held and resolved) keep at most [`MAX_PENDING`] (1024)
+//!   payloads. At the limit the oldest is dropped and counted in
+//!   [`IdentityMap::dropped`].
 
 use crate::models::device::{Architecture, Device};
 use std::collections::{HashMap, VecDeque};
@@ -187,8 +190,8 @@ impl IdentityMap {
         std::mem::take(&mut self.write().ready).into()
     }
 
-    /// Held payloads dropped because their index never resolved
-    /// (`identity.dropped`).
+    /// Held payloads dropped: an index that never resolved, or a list already
+    /// at [`MAX_PENDING`] (`identity.dropped`).
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
     }

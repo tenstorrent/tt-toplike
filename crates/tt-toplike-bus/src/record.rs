@@ -274,7 +274,10 @@ pub enum HeaderKind {
     Replay,
 }
 
-/// First line of a log: the schema version and the tool versions that wrote it.
+/// First line of a log: the schema version, whether it is live or a replay, and
+/// the `tool_versions` map. The map holds this crate's version and the tags the
+/// host adds: `backend` (`hybrid`, `sysfs`, `mock`, ...) and `mode` (`live`,
+/// `mock`, `replay`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Header {
     pub schema: u32,

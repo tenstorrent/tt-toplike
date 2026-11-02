@@ -352,7 +352,7 @@ pub struct Cli {
     #[arg(long, value_name = "KEY", requires = "bus_inspect")]
     pub entity: Option<String>,
 
-    /// With `--bus-inspect`: show only this signal, for example `chip.temp_c`.
+    /// With `--bus-inspect`: show only this signal, for example `tt_asic_temperature_celsius`.
     #[arg(long, value_name = "NAME", requires = "bus_inspect")]
     pub signal: Option<String>,
 }

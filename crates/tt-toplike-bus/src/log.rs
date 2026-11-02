@@ -127,7 +127,7 @@ pub fn install_quiet_reducer_hook() {
     });
 }
 
-/// Folds records into derived state (the world, in Task 3).
+/// Folds records into derived state (the [`crate::World`]).
 ///
 /// The bus calls [`Reducer::apply`] under the same lock that assigns the
 /// sequence number, so a reducer sees every published record exactly once
