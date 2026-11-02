@@ -331,39 +331,9 @@ impl Bus {
     }
 }
 
-/// A world read through `0` with the bus clock replaced by `1`. The
-/// attached tests read a real bus host, whose clock is the machine's: two
-/// reads more than a second apart (a loaded machine can stall that long)
-/// would count as being away and drop the events under test. A fixed clock
-/// a tick apart keeps those tests independent of timing.
-pub(crate) struct Clocked<'a>(pub(crate) &'a dyn WorldRead, pub(crate) u64);
-
-impl WorldRead for Clocked<'_> {
-    fn seq(&self) -> u64 {
-        self.0.seq()
-    }
-    fn models(&self) -> Vec<tt_toplike_bus::ModelView> {
-        self.0.models()
-    }
-    fn model_on_chip(&self, chip: &EntityKey) -> Option<tt_toplike_bus::ModelView> {
-        self.0.model_on_chip(chip)
-    }
-    fn reading(&self, entity: &EntityKey, signal: &str) -> Option<tt_toplike_bus::Reading> {
-        self.0.reading(entity, signal)
-    }
-    fn events_since(&self, seq: u64) -> Vec<(u64, Event)> {
-        self.0.events_since(seq)
-    }
-    fn reset_seq(&self, chip: &EntityKey) -> Option<u64> {
-        self.0.reset_seq(chip)
-    }
-    fn header_kind(&self) -> HeaderKind {
-        self.0.header_kind()
-    }
-    fn now_mono_ns(&self) -> u64 {
-        self.1
-    }
-}
+/// The fixed-clock wrapper the attached tests read through. It lives in
+/// `bus_test_support` so every mode's attached test can share it.
+pub(crate) use crate::animation::bus_test_support::Clocked;
 
 /// A field at [`W`] x [`H`] over two fixed chips.
 fn field() -> (HardwareStarfield, Fixed) {

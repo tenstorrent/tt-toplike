@@ -5,6 +5,8 @@
 //! whose readings never change, a frame hash that is the same on every run
 //! and machine, a bus world built record by record, and the colour lock.
 //!
+//! [`Clocked`] fixes the bus clock of a real read, for the attached tests.
+//!
 //! The arcade's bus tests have their own copies of the first two
 //! (`arcade_bus_tests.rs`); these are kept separate so neither file depends
 //! on the other's private items.
@@ -16,6 +18,7 @@ use ratatui::style::{Color, Style};
 use ratatui::text::Line;
 use tt_toplike_bus::{
     EntityKey, Event, HeaderKind, LocalView, Payload, Provenance, Record, Sample, Value, World,
+    WorldRead,
 };
 
 /// One second on the bus clock.
@@ -296,5 +299,42 @@ impl Bus {
             now_mono_ns: now,
             header_kind: HeaderKind::Live,
         }
+    }
+}
+
+/// A world read through `0` with the bus clock replaced by `1`. The
+/// attached tests read a real bus host, whose clock is the machine's: two
+/// reads more than a second apart (a loaded machine can stall that long)
+/// would count as being away and drop the events under test. A fixed clock
+/// a tick apart keeps those tests independent of timing.
+pub struct Clocked<'a>(pub &'a dyn WorldRead, pub u64);
+
+impl WorldRead for Clocked<'_> {
+    fn seq(&self) -> u64 {
+        self.0.seq()
+    }
+    fn models(&self) -> Vec<tt_toplike_bus::ModelView> {
+        self.0.models()
+    }
+    fn model_on_chip(&self, chip: &EntityKey) -> Option<tt_toplike_bus::ModelView> {
+        self.0.model_on_chip(chip)
+    }
+    fn entities(&self, kind: tt_toplike_bus::EntityKind) -> Vec<EntityKey> {
+        self.0.entities(kind)
+    }
+    fn reading(&self, entity: &EntityKey, signal: &str) -> Option<tt_toplike_bus::Reading> {
+        self.0.reading(entity, signal)
+    }
+    fn events_since(&self, seq: u64) -> Vec<(u64, Event)> {
+        self.0.events_since(seq)
+    }
+    fn reset_seq(&self, chip: &EntityKey) -> Option<u64> {
+        self.0.reset_seq(chip)
+    }
+    fn header_kind(&self) -> HeaderKind {
+        self.0.header_kind()
+    }
+    fn now_mono_ns(&self) -> u64 {
+        self.1
     }
 }
