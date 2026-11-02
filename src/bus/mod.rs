@@ -9,7 +9,8 @@
 //! * [`source`] defines the `Source` trait and `BackendSource`.
 //! * [`workload_sources`] turns the workload monitors' snapshots (inference,
 //!   training, hivemind, processes, `--remote`) into records.
-//! * [`compat`] rebuilds the tt-station `/telemetry` frame from the world.
+//! * [`compat`] rebuilds the tt-station `/telemetry` frame and the inference
+//!   monitor's `ServiceState` list from the world.
 //! * [`gozer`] watches `gozer status --json` for chip leases and holds the
 //!   `Governor` that lets a chip-opening source ask whether a chip is ours.
 //! * [`redact`] hides secrets in process command lines.
@@ -25,7 +26,6 @@
 //! * [`tui_bus`] is the TUI's side: host or attach at start-up, the data
 //!   tick, `ViewChanged`, and the `/serve` frame.
 
-#[cfg(feature = "remote")]
 pub mod compat;
 pub mod gozer;
 pub mod headless;

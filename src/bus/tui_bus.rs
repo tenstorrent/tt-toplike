@@ -618,6 +618,27 @@ impl TuiBus {
         }
     }
 
+    /// The world with no chip limit, once per frame. For a view that shows
+    /// the host's models whatever chips they run on (the `i` view when
+    /// attached). Die 3D and every other chip-keyed overlay use
+    /// [`TuiBus::read`]. For a local bus the two are the same.
+    pub fn read_unfiltered(&self) -> ReadView {
+        self.view.read(&self.cache)
+    }
+
+    /// True when the bus is local, or attached to a host whose origin
+    /// matches this machine ([`origin_mismatch`] finds nothing, as of the
+    /// last data tick). Only then do the world's chip keys name this
+    /// machine's chips, so only then may they be turned into local
+    /// `/dev/tenstorrent/N` indexes.
+    pub fn origin_is_local(&self) -> bool {
+        match &self.label_key {
+            #[cfg(unix)]
+            Some(LabelKey::Attached(_, mismatch)) => mismatch.is_none(),
+            _ => !self.is_attached(),
+        }
+    }
+
     /// The local chip keys an attached world is read for (empty for a local
     /// bus, whose world is built from the local backend).
     pub fn local_chips(&self) -> &BTreeSet<EntityKey> {

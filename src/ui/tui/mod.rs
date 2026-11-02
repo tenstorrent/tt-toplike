@@ -40,6 +40,7 @@ pub(crate) mod reset_status;
 pub mod throttle;
 pub use throttle::ThrottleState;
 mod hivemind_view;
+pub(crate) mod inference_bus;
 pub(crate) mod inference_panel;
 
 use crate::animation::{
@@ -1485,6 +1486,15 @@ fn run_app(
                         Vec<crate::workload::inference_server::ServiceState>,
                         bool,
                     ) = (local_rows, false);
+                    // Attached to a headless host: draw that host's models
+                    // from its world (see `inference_bus`). A local bus keeps
+                    // the rows above. The host's rows are not a local probe,
+                    // so they count as remote data for the fallback note.
+                    let (rows, has_remote_rows) =
+                        match inference_bus::attached_rows(tui_bus, backend.as_ref()) {
+                            Some(world_rows) => (world_rows, true),
+                            None => (rows, has_remote_rows),
+                        };
                     let catalog = catalog_refresher.snapshot();
                     let arch = backend
                         .devices()
