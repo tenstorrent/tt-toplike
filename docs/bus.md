@@ -866,6 +866,13 @@ while loading, tokens/s and waiting requests, `~` first for an estimate (the sam
 purple as far as the reported progress. The Die 3D inset on the Insights screen is Die 3D's
 own drawing and shows the events.
 
+In the Insights process table, a process on chips that serve a model has a serving row under
+it. Attached to a host, that row comes from the world's model on the process's chips
+(`[bus]`, the phase, `model=` with `~` for an estimate, progress while loading, tokens/s and
+waiting requests). On a local bus, and for a process whose chips have no model in the world,
+it is the local monitor's row (port, health, model and tokens/s from the server's metrics), as
+before.
+
 Grid uses Die 3D's rule for history: events already in the world when Grid first reads it, and
 events that arrived while Grid was off screen, draw nothing. Leaving Grid clears its memory.
 Both views draw at the data rate (about ten times a second), so a pulse takes about ten frames.

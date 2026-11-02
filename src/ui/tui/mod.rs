@@ -1458,7 +1458,8 @@ fn run_app(
                     // Ingestion now happens in the backend update block (runs at ~10 Hz,
                     // not 60 FPS). The Die 3D inset and the panels' model rules are fed here.
                     insights_flags =
-                        grid_bus::ChipFlags::from_world(&tui_bus.read(), backend.devices());
+                        grid_bus::ChipFlags::from_world(&tui_bus.read(), backend.devices())
+                            .with_attached(tui_bus.is_attached());
                     let rect = inset_rect_for(
                         size.width,
                         size.height,
@@ -7070,6 +7071,7 @@ fn render_insights(
         host_mem_total,
         tt_filtered,
         remote_note,
+        chip_flags,
         #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
         serving_metrics,
     );
@@ -7539,8 +7541,11 @@ fn bar_color(frac: f32) -> ratatui::style::Color {
 ///
 /// Always shows PID / CPU% / MEM / NAME and an inference tag. When a row carries
 /// TT attribution (`row.tt`, Linux-only) it also shows the device-index column
-/// and a hugepage hint. On Linux, a matching `serving_metrics` entry adds a
-/// per-process serving summary row (port / health / model / tok-s).
+/// and a hugepage hint. A process on chips that serve a model gets a serving
+/// summary row under it: from the world's model on those chips when the TUI
+/// is attached (`chip_flags`, see `grid_bus::ChipFlags::process_row`), so a
+/// headless host's model shows; otherwise, on Linux, from a matching
+/// `serving_metrics` entry (port / health / model / tok-s).
 fn render_process_panel(
     f: &mut Frame,
     area: Rect,
@@ -7554,6 +7559,8 @@ fn render_process_panel(
     // See `remote_local_fallback_note`: `Some` under `--remote` while this
     // panel is still showing LOCAL processes rather than the remote box's.
     remote_note: Option<&'static str>,
+    // The model on each chip, from the bus.
+    chip_flags: &grid_bus::ChipFlags,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
@@ -7735,9 +7742,20 @@ fn render_process_panel(
 
             lines.push(Line::from(row_spans));
 
-            // If this is a known TT inference server, append a metrics summary row.
+            // Attached: the world's model on this process's chips.
+            let bus_row = row
+                .tt
+                .as_ref()
+                .and_then(|tt| chip_flags.process_row(&tt.device_indices));
+            let from_bus = bus_row.is_some();
+            if let Some(line) = bus_row {
+                lines.push(line);
+            }
+
+            // Otherwise, if this is a known TT inference server, append the
+            // local monitor's metrics summary row.
             #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-            if let Some(sm) = serving_metrics.get(&row.pid) {
+            if let Some(sm) = serving_metrics.get(&row.pid).filter(|_| !from_bus) {
                 let mut spans: Vec<Span> = vec![
                     Span::raw("       "),
                     Span::styled(
@@ -7792,6 +7810,8 @@ fn render_process_panel(
 
                 lines.push(Line::from(spans));
             }
+            #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
+            let _ = from_bus;
         }
     }
 

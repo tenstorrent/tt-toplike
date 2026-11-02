@@ -162,6 +162,9 @@ fn rgb(c: [u8; 3]) -> Color {
 pub(crate) struct ChipFlags {
     /// By device index: the flag and its text forms ([`text_forms`]).
     chips: Vec<(usize, ModelFlag, Vec<String>)>,
+    /// The world came from an attached host ([`ChipFlags::with_attached`]).
+    /// The process panel's serving row then reads the world's model.
+    attached: bool,
 }
 
 impl ChipFlags {
@@ -180,7 +183,61 @@ impl ChipFlags {
                 Some((d.index, flag, forms))
             })
             .collect();
-        ChipFlags { chips }
+        ChipFlags {
+            chips,
+            attached: false,
+        }
+    }
+
+    /// Mark these flags as read from an attached host's world (see
+    /// [`ChipFlags::process_row`]).
+    pub(crate) fn with_attached(mut self, attached: bool) -> ChipFlags {
+        self.attached = attached;
+        self
+    }
+
+    /// The process panel's serving row for a process on `devices`, from the
+    /// world's model on the first of them that has one. `None` on a local
+    /// bus, where the caller keeps the local monitor's row, and when no
+    /// device has a model.
+    pub(crate) fn process_row(&self, devices: &[usize]) -> Option<Line<'static>> {
+        if !self.attached {
+            return None;
+        }
+        let (flag, _) = devices.iter().find_map(|&d| self.get(d))?;
+        // The local row's shape: `[flavour] phase  model=..  N tok/s`. The
+        // source is the bus, so `[bus]`; `~` marks an estimate.
+        let ready = flag.phase == ModelPhase::Ready;
+        let mut spans = vec![
+            Span::raw("       "),
+            Span::styled("[bus] ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                flag.phase_word(),
+                Style::default().fg(if ready { Color::Green } else { Color::Yellow }),
+            ),
+        ];
+        let tilde = if flag.estimated { "~" } else { "" };
+        let mut parts = vec![format!(
+            "model={tilde}{}",
+            crate::ui::tui::truncate(&flag.label, 24)
+        )];
+        if let (ModelPhase::Compiling | ModelPhase::Loading, Some(p)) = (flag.phase, flag.progress)
+        {
+            if p.is_finite() {
+                parts.push(format!("{:.0}%", p.clamp(0.0, 1.0) * 100.0));
+            }
+        }
+        if let Some(t) = flag.tokens_per_s.filter(|t| t.is_finite()) {
+            parts.push(format!("{t:.0}tok/s"));
+        }
+        if let Some(w) = flag.waiting.filter(|w| *w > 0) {
+            parts.push(format!("{w} waiting"));
+        }
+        spans.push(Span::styled(
+            format!("  {}", parts.join("  ")),
+            Style::default().fg(Color::Gray),
+        ));
+        Some(Line::from(spans))
     }
 
     /// The flag and text forms of device `index`.

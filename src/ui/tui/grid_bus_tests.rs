@@ -988,6 +988,74 @@ fn the_insights_rule_names_the_model_and_fills_to_its_progress() {
     })
 }
 
+/// The Insights process table of `rows` at 120 x 12 with the model flags
+/// `flags`, and no local serving metrics.
+fn process_panel_with(rows: &[crate::workload::ProcRow], flags: &ChipFlags) -> Vec<String> {
+    let mut term = Terminal::new(TestBackend::new(120, 12)).unwrap();
+    term.draw(|f| {
+        let area = f.area();
+        super::super::render_process_panel(
+            f,
+            area,
+            rows,
+            0,
+            None,
+            10.0,
+            1 << 30,
+            4 << 30,
+            false,
+            None,
+            flags,
+            #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+            &std::collections::HashMap::new(),
+        )
+    })
+    .unwrap();
+    let buf = term.backend().buffer().clone();
+    (0..12).map(|y| row(&buf, y)).collect()
+}
+
+/// Group C S1: attached to a headless host that serves a model on chip 0,
+/// the process on chip 0 gets a serving row from the world's model (its
+/// phase, label with `~` for an estimate, and tokens per second). On a
+/// local bus the row is the local monitor's, so nothing is drawn from the
+/// world, and a process on a chip with no model gets no row.
+#[test]
+fn an_attached_process_row_shows_the_worlds_model_on_its_chips() {
+    tc(|| {
+        let b = Fixed::new(2, "p300");
+        let mut f = Bus::new();
+        f.ready_as("llama", &[0], Some(42.0), Provenance::Estimated);
+        let proc_on = |dev: usize| crate::workload::ProcRow {
+            pid: 4242,
+            name: "vllm".into(),
+            cpu_pct: 90.0,
+            mem_bytes: 8 << 30,
+            inference: Some("vLLM"),
+            active: true,
+            tt: Some(crate::workload::host_processes::TtProcInfo {
+                device_indices: vec![dev],
+                hugepages_1g: 0,
+                hugepages_2m: 0,
+            }),
+        };
+        let flags = ChipFlags::from_world(&f.view(5 * SEC), b.devices());
+        let attached = flags.clone().with_attached(true);
+
+        let text = process_panel_with(&[proc_on(0)], &attached).join("\n");
+        assert!(text.contains("[bus] ready"), "{text}");
+        assert!(text.contains("model=~llama"), "{text}");
+        assert!(text.contains("42tok/s"), "{text}");
+
+        // A process on chip 1, which serves nothing: no row.
+        let text = process_panel_with(&[proc_on(1)], &attached).join("\n");
+        assert!(!text.contains("[bus]"), "{text}");
+        // A local bus: the local monitor's row, so nothing from the world.
+        let text = process_panel_with(&[proc_on(0)], &flags).join("\n");
+        assert!(!text.contains("[bus]"), "{text}");
+    })
+}
+
 #[test]
 fn text_forms_end_with_the_phase_alone() {
     let flag = ModelFlag {
