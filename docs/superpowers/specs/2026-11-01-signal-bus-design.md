@@ -161,20 +161,49 @@ throughput and latency did not change by more than the noise (about 1 percent fo
 3 percent for the serve). The counters show load starting within one 200 ms sample, and they
 separate prefill from decode: decode puts DRAM traffic almost entirely on NoC0.
 
-The rules the sidecar follows. Round 2 of the testing may tighten them, and this section is updated
-from its report.
+Round 2 of the testing (adversarial, same box, Llama-3.1-8B in docker, reader at 10 Hz on both
+chips of one board) could not break the reader:
+
+- Six SIGKILLs of the reader under load: the server kept serving and every fresh reader attached.
+- 12 of 12 greedy-decoding output comparisons were byte-identical with the reader off and on.
+- A reader stopped for 60 s mid-sweep changed nothing for the server. On resume its 2 s watchdog
+  exited it, a harmless false hang.
+- A 25-minute soak: 30,524 sweeps, no errors, flat memory, 15 to 19 percent of one core. Two of
+  five throughput blocks were about 6 percent lower, and a reader-off run straight after matched the
+  higher blocks, so the dip is not attributable to the reader.
+- Cold bring-up with the reader attached from the start: ready in 293 s against 272 s without it
+  (one trial).
+- A restart without a chip reset failed on an Ethernet core timeout 2 of 2 times with no reader
+  attached, so that failure is not the reader's.
+
+One case is unsafe for the workflow: a live reader makes the supported `gozer reset` and
+`gozer release` refuse ("chips still open by [pid]"). With `--force` the reset worked and took the
+same 42 s as without a reader, and the reader exited on its own within about a second. So the
+sidecar must be gone before a reset or release can proceed.
+
+The rules the sidecar follows:
 
 - Reads only. No writes, halts, resets, performance-counter control or ARC messages.
 - Single-word reads, never bursts.
 - Tensix, DRAM and Ethernet tiles only. Harvested tiles skipped. Never ARC, PCIe, L2CPU or security.
 - At most 10 Hz, 5 Hz by default. A 2 s timeout per read. Stop on any error with no retry. A slow
   sweep skips a tick and the next sweep starts on schedule.
-- Start only when gozer shows the chips held by the lease the sidecar runs in, or when the user
-  overrides with a warning.
-- Start after a server is ready until cold bring-up has been tested.
-- Detach before any chip reset or server restart.
+- Start only when `NOC_LEASE_ID` and `TT_VISIBLE_DEVICES` are set, the lease is active with its
+  owner alive, and `gozer status --json` shows the chips held under the same lease. Re-check every
+  30 s and exit if the check fails. The user can override with a warning.
+- Exit within seconds when the lease is released or a reset is requested (the bus publishes the
+  `Reset` and `LeaseReleased` events the sidecar watches for), because a live reader blocks the
+  supported reset and release.
+- Start after a server is ready. A cold bring-up with the reader attached completed in the one trial
+  run, which is not enough evidence to make that the default.
+- Detach before any chip reset or server restart. A restart without a reset can fail on an
+  Ethernet core timeout whether or not a reader is present.
 - Record the exalens, UMD and firmware versions in the log header. Record a gap marker after a
   reset.
+
+Not yet proven: a reset by another user or tool while a model is serving and the reader is attached,
+models other than Llama-3.1-8B, output identity on long or 32-way batches, and soaks longer than 25
+minutes.
 
 The sidecar can later be replaced by a Rust binding to tt-umd without changing the schema.
 
