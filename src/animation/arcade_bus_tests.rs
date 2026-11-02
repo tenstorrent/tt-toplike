@@ -1392,3 +1392,138 @@ fn the_default_layout_draws_the_frames_pinned_before_the_layout_engine() {
         assert_eq!(busy_hashes(w, h), BUSY_GOLDEN[i].to_vec(), "busy {w}x{h}");
     }
 }
+
+// ---- The default layout at every size of a grid ------------------------------
+
+/// The base frames over a grid of sizes: widths 1 to 60 and a spread up to
+/// 240, heights 1 to 60, an idle frame and a busy frame at each. Taken by
+/// running [`grid_idle`] and [`grid_busy`] on 89bf8d05 (f9ebf418, the
+/// arcade before the layout engine, plus the pin tests).
+const BASE_GRID: &str = include_str!("fixtures/arcade_base_grid.txt");
+
+/// The widths of the grid: every width to 60, then a spread up to 240.
+fn grid_widths() -> Vec<usize> {
+    let mut w: Vec<usize> = (1..=60).collect();
+    w.extend([64, 72, 80, 90, 100, 110, 120, 132, 144, 160, 180, 200, 220, 240]);
+    w
+}
+
+/// The visible cells above the footer row, as `ui_arcade` draws them.
+fn grid_cell_hash(lines: Vec<Line<'static>>, w: usize, h: usize) -> u64 {
+    use ratatui::widgets::{Paragraph, Widget};
+    let area = ratatui::layout::Rect::new(0, 0, w as u16, h as u16);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    Paragraph::new(lines).render(area, &mut buf);
+    let mut f = Fnv(0xcbf2_9ce4_8422_2325);
+    for y in 0..h.saturating_sub(1) {
+        for x in 0..w {
+            let c = &buf[(x as u16, y as u16)];
+            f.bytes(c.symbol().as_bytes());
+            f.bytes(&[0xfd]);
+            f.color(Some(c.fg));
+            f.color(Some(c.bg));
+            f.bytes(&c.modifier.bits().to_le_bytes());
+        }
+        f.bytes(&[0xff, 0xfe]);
+    }
+    f.0
+}
+
+/// An idle arcade at `w` x `h` after three updates, as [`grid_cell_hash`].
+fn grid_idle(w: usize, h: usize) -> u64 {
+    let backend = Fixed::new(2);
+    let mut a = ArcadeVisualization::new(w, h);
+    a.initialize_from_devices(backend.devices());
+    a.initialize_topology(&backend);
+    for _ in 0..3 {
+        a.update(&backend);
+    }
+    grid_cell_hash(a.render(&backend), w, h)
+}
+
+/// A busy arcade at `w` x `h` (the scene of [`busy_hashes`]) after three
+/// updates, as [`grid_cell_hash`].
+fn grid_busy(w: usize, h: usize) -> u64 {
+    let backend = Fixed::new(2);
+    let mut a = ArcadeVisualization::new(w, h);
+    a.initialize_from_devices(backend.devices());
+    a.initialize_topology(&backend);
+    let lane = |id: &str, kind| crate::animation::Activity {
+        id: id.into(),
+        kind,
+        label: id.into(),
+        stalled: false,
+        fields: vec!["step 1/10".into()],
+        pulse_seq: Some(1),
+        key_hint: 't',
+    };
+    a.set_activities(vec![
+        lane("train:7", crate::animation::ActivityKind::Train),
+        lane("svc:serve", crate::animation::ActivityKind::Serve),
+    ]);
+    let mut f = Bus::new();
+    f.loading("load", &[0], Some(0.4))
+        .ready("serve", &[1], Some(42.0));
+    let mut now = 5 * SEC;
+    for i in 0..3 {
+        if i == 1 {
+            f.requests("serve", 5)
+                .event(Event::Spark {
+                    chip: Some(chip(1)),
+                    kind: "vLLM.log".into(),
+                })
+                .event(Event::KernelCompiled {
+                    chip: Some(chip(0)),
+                    source: "ttnn".into(),
+                });
+        }
+        let v = f.view(now);
+        a.set_bus(Some(&v), &backend);
+        a.update(&backend);
+        now += TICK;
+    }
+    grid_cell_hash(a.render(&backend), w, h)
+}
+
+
+#[test]
+fn the_default_layout_draws_the_base_frame_at_every_size_of_the_grid() {
+    let want: Vec<(usize, usize, u64, u64)> = BASE_GRID
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .map(|l| {
+            let f: Vec<u64> = l.split(' ').map(|x| x.parse().unwrap()).collect();
+            (f[0] as usize, f[1] as usize, f[2], f[3])
+        })
+        .collect();
+    assert_eq!(want.len(), grid_widths().len() * 60, "the fixture covers the grid");
+    // Four workers. The theme is pinned app-wide by `tc` on this thread;
+    // truecolor is per thread, so each worker pins it again.
+    let bad: Vec<String> = tc(|| {
+        std::thread::scope(|s| {
+            let workers: Vec<_> = want
+                .chunks(want.len().div_ceil(4))
+                .map(|chunk| {
+                    s.spawn(move || {
+                        crate::ui::colors::with_truecolor(true, || {
+                            chunk
+                                .iter()
+                                .filter_map(|&(w, h, idle, busy)| {
+                                    let got = (grid_idle(w, h), grid_busy(w, h));
+                                    (got != (idle, busy)).then(|| format!("{w}x{h}"))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                })
+                .collect();
+            workers.into_iter().flat_map(|t| t.join().unwrap()).collect()
+        })
+    });
+    assert!(
+        bad.is_empty(),
+        "{} sizes differ from the base: {}",
+        bad.len(),
+        bad.join(" ")
+    );
+}

@@ -29,7 +29,9 @@
 //!
 //! Each view has a minimum size ([`View::min_size`]). A panel smaller than
 //! its minimum is taken out of its row, and the row's other panels share the
-//! columns. Its row's rule then names it with the size it needs, on one line
+//! columns. The four original views have a 1x1 minimum and are never taken
+//! out: given no column or no content row they draw nothing and keep their
+//! label, as the arcade did before the layout engine ([`View::fits`]). Its row's rule then names it with the size it needs, on one line
 //! (`◌ DIE 3D needs 16x6`). When a row has no panel left, its content rows
 //! go to the other rows; the rule stays, with the note. The panel taken out
 //! is the rightmost one that does not fit, one at a time, so a removal that
@@ -103,9 +105,9 @@ impl View {
 
     /// The smallest panel (columns, rows) the view is drawn in.
     ///
-    /// * The four original views draw at any size the old layout gave them,
-    ///   down to one cell, so the default layout hides nothing that the old
-    ///   layout drew.
+    /// * The four original views: 1x1. They also draw (nothing) in an empty
+    ///   panel ([`View::fits`]), so the default layout hides nothing at any
+    ///   size, as the old layout did.
     /// * Die 3D: the view's own smallest scene (`die3d::SCENE_MIN_CELLS`).
     ///   Below it the full view shows a text summary, which is not the scene.
     /// * Training: the Training view's own floor (`TrainView::new` never
@@ -118,6 +120,20 @@ impl View {
             View::Training => (20, 10),
             View::Inference => (24, 8),
         }
+    }
+}
+
+impl View {
+    /// Whether the view is drawn in a `w` x `h` panel. A panel at least
+    /// [`View::min_size`] fits. So does an empty panel (no column or no row)
+    /// of a view whose minimum is 1x1: the four original views draw nothing
+    /// there and keep their row and label, as the arcade did before the
+    /// layout engine. Die 3D, Training and the inference panel need their
+    /// minimum.
+    pub fn fits(self, w: usize, h: usize) -> bool {
+        let (mw, mh) = self.min_size();
+        let empty = w == 0 || h == 0;
+        (w >= mw && h >= mh) || (empty && (mw, mh) == (1, 1))
     }
 }
 
@@ -313,12 +329,13 @@ impl Layout {
             .or_else(|| self.panels().next())
     }
 
-    /// The rows with content, top to bottom, as the hero's bands:
-    /// `rule_y .. rule_y + height` (the old `*_start .. *_end` fields).
+    /// The rows that show a panel, top to bottom, as the hero's bands:
+    /// `rule_y .. rule_y + height` (the old `*_start .. *_end` fields). A
+    /// row given no content rows still counts, as the old fields did.
     pub fn bands(&self) -> Vec<std::ops::Range<usize>> {
         self.rows
             .iter()
-            .filter(|r| r.height > 0)
+            .filter(|r| !r.panels.is_empty())
             .map(|r| r.rule_y..r.rule_y + r.height)
             .collect()
     }
@@ -458,10 +475,10 @@ fn fit_row(row: &RowSpec, width: usize, height: usize) -> Fitted {
     loop {
         let weights: Vec<u32> = shown.iter().map(|p| p.width).collect();
         let spans = split_cols(width, &weights);
-        let bad = shown.iter().zip(&spans).rposition(|(p, (_, w))| {
-            let (mw, mh) = p.view.min_size();
-            *w < mw || height < mh
-        });
+        let bad = shown
+            .iter()
+            .zip(&spans)
+            .rposition(|(p, (_, w))| !p.view.fits(*w, height));
         match bad {
             Some(i) => hidden.push(shown.remove(i)),
             None => {

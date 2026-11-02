@@ -49,7 +49,7 @@ fn the_default_rows_give_the_old_heights_at_every_size() {
 
 #[test]
 fn the_default_columns_give_the_old_widths_at_every_size() {
-    for w in 3..2000 {
+    for w in 1..2000 {
         let l = layout(&default_rows(), w, 60);
         let mid = &l.rows[1].panels;
         let (c, d) = old_cols(w);
@@ -58,6 +58,34 @@ fn the_default_columns_give_the_old_widths_at_every_size() {
         assert_eq!(mid[1].rect.x, c + 1, "the divider sits right of the castle");
         assert_eq!(l.rows[0].panels[0].rect.w, w, "starfield is full width");
     }
+}
+
+#[test]
+fn the_default_layout_hides_nothing_at_any_size() {
+    // The old layout drew all three rules with their plain labels at every
+    // size, even when a row got no content rows or a panel no columns.
+    let want = [
+        "✧ STARFIELD",
+        "🏰 MEMORY CASTLE  │  ▓ DEFRAG",
+        "🌊 MEMORY FLOW",
+    ];
+    for w in 0..=240 {
+        for h in 0..=20 {
+            let l = layout(&default_rows(), w, h);
+            let labels: Vec<String> = l.rows.iter().map(|r| r.label()).collect();
+            assert_eq!(labels, want, "{w}x{h}");
+            assert!(l.rows.iter().all(|r| r.hidden.is_empty()), "{w}x{h}");
+            assert_eq!(l.bands().len(), 3, "the hero keeps three bands at {w}x{h}");
+        }
+    }
+}
+
+#[test]
+fn a_view_with_a_real_minimum_is_hidden_from_an_empty_row() {
+    // Only the four original views draw in an empty panel.
+    assert!(View::Castle.fits(0, 0) && View::Flow.fits(5, 0) && View::Defrag.fits(0, 5));
+    assert!(!View::Die3d.fits(40, 0) && !View::Training.fits(0, 20));
+    assert!(!View::Inference.fits(23, 8) && View::Inference.fits(24, 8));
 }
 
 #[test]
@@ -197,8 +225,14 @@ fn every_layout_uses_each_row_once_at_many_sizes() {
                     assert_eq!(p.rect.y, r.rule_y + 1);
                     assert_eq!(p.rect.h, r.height);
                     assert!(p.rect.x + p.rect.w <= w, "{w}x{h} {p:?}");
+                    // At least the minimum, or an empty panel of a view
+                    // whose minimum is 1x1 (it draws nothing there).
                     let (mw, mh) = p.view.min_size();
-                    assert!(p.rect.w >= mw && p.rect.h >= mh, "{w}x{h} {p:?}");
+                    let empty = p.rect.w == 0 || p.rect.h == 0;
+                    assert!(
+                        (p.rect.w >= mw && p.rect.h >= mh) || (empty && (mw, mh) == (1, 1)),
+                        "{w}x{h} {p:?}"
+                    );
                 }
                 y = r.rule_y + 1 + r.height;
             }
