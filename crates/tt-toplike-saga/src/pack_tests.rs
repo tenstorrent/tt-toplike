@@ -246,20 +246,88 @@ fn the_default_look_is_the_brand_palette_and_safe_glyphs() {
 
     let g = pack.glyphs;
     assert_eq!(g.hero, '@');
-    let all = g.all();
+    // The core has no width table (its dependency list is fenced), so a glyph
+    // must come from a block that terminals draw one column wide: ASCII,
+    // Latin-1, Greek, Miscellaneous Technical, box drawing, block elements,
+    // geometric shapes, or the bullet. The view's own test measures each
+    // glyph with `unicode-width` as well.
+    let narrow = |c: char| {
+        c.is_ascii_graphic()
+            || c == ' '
+            || ('\u{00A1}'..='\u{00FF}').contains(&c)
+            || ('\u{0391}'..='\u{03C9}').contains(&c)
+            || c == '\u{2022}'
+            || ('\u{2300}'..='\u{2307}').contains(&c)
+            || ('\u{2500}'..='\u{25FF}').contains(&c)
+    };
+    // The right-edge border shapes the TUI refuses in a row's last column
+    // (the arcade's RIGHT_EDGE_GLYPHS, kept short here).
+    let right_edge = "│┃║┐┘┤╗╝╣╕╖╛╜╡╢▐▕|]})";
     let mut seen = std::collections::BTreeSet::new();
-    for (role, c) in all {
-        // Printable single-width ASCII: no box-drawing or block characters,
-        // so no role can draw a right-side border.
-        assert!(c.is_ascii_graphic(), "{role} glyph {c:?}");
+    for (role, c) in g.all() {
+        assert!(narrow(c) && c != ' ', "{role} glyph {c:?}");
         assert!(
-            !"|]})".contains(c),
+            !right_edge.contains(c),
             "{role} glyph {c:?} looks like a right border"
         );
         assert!(seen.insert(c), "{role} glyph {c:?} is used twice");
     }
+    for c in g.tiles().chain([g.rock]) {
+        assert!(narrow(c), "tile {c:?}");
+    }
     assert_eq!(g.cell(crate::maze::Cell::Wall), g.wall);
     assert_eq!(g.cell(crate::maze::Cell::Door), g.door);
+}
+
+/// Each tile table draws the arms its mask names: a table entry has a line
+/// going north exactly when the mask has the north bit, and so on. Checked
+/// against the box-drawing shapes by name, so a swapped entry fails.
+#[test]
+fn wall_tiles_draw_the_arms_of_their_mask() {
+    use crate::pack::{WallKind, ARM_E, ARM_N, ARM_S, ARM_W};
+    // (glyph, arms) for every box-drawing shape the tables use.
+    let arms = |c: char| -> Option<u8> {
+        let (n, e, s, w) = (ARM_N, ARM_E, ARM_S, ARM_W);
+        Some(match c {
+            '│' | '║' => n | s,
+            '─' | '═' => e | w,
+            '└' | '╘' | '╙' | '╚' => n | e,
+            '┌' | '╒' | '╓' | '╔' => e | s,
+            '┘' | '╛' | '╜' | '╝' => n | w,
+            '┐' | '╕' | '╖' | '╗' => s | w,
+            '├' | '╞' | '╟' | '╠' => n | e | s,
+            '┤' | '╡' | '╢' | '╣' => n | s | w,
+            '┬' | '╤' | '╥' | '╦' => e | s | w,
+            '┴' | '╧' | '╨' | '╩' => n | e | w,
+            '┼' | '╪' | '╫' | '╬' => n | e | s | w,
+            '▪' => 0,
+            _ => return None,
+        })
+    };
+    let g = Pack::builtin().glyphs;
+    for kind in [
+        WallKind::Inner,
+        WallKind::ShellRow,
+        WallKind::ShellCol,
+        WallKind::ShellCorner,
+    ] {
+        for mask in 0u8..16 {
+            let c = g.wall_tile(kind, mask);
+            let drawn = arms(c).unwrap_or_else(|| panic!("{kind:?} {mask}: unknown {c:?}"));
+            // A one-arm mask draws the straight line through that arm.
+            let want = match mask {
+                m if m == ARM_N || m == ARM_S => ARM_N | ARM_S,
+                m if m == ARM_E || m == ARM_W => ARM_E | ARM_W,
+                m => m,
+            };
+            assert_eq!(drawn, want, "{kind:?} mask {mask:04b} draws {c:?}");
+        }
+    }
+    // Shell rows are double along the row, shell columns along the column.
+    assert_eq!(g.wall_tile(WallKind::ShellRow, ARM_E | ARM_W), '═');
+    assert_eq!(g.wall_tile(WallKind::ShellCol, ARM_N | ARM_S), '║');
+    assert_eq!(g.wall_tile(WallKind::Inner, ARM_E | ARM_S), '┌');
+    assert_eq!(g.wall_tile(WallKind::ShellCorner, ARM_E | ARM_S), '╔');
 }
 
 #[test]

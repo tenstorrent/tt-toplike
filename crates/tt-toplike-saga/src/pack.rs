@@ -30,8 +30,9 @@
 //!
 //! [`Palette`] holds the Tenstorrent brand colours as plain RGB triples; the
 //! core has no UI dependency, so the view converts them. [`Glyphs`] holds one
-//! single-width ASCII character per map role. None of them is a box-drawing
-//! character, so no role can draw a right-side border.
+//! single-width character per map role, none of them a right-edge border
+//! glyph, and the box-drawing tile tables the view draws walls with. The
+//! core never reads the glyphs, so changing them changes no digest.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -182,13 +183,27 @@ impl Palette {
     }
 }
 
-/// One character per map role. Every glyph is a single-width printable
-/// ASCII character.
+/// The characters the map is drawn with. This is the one place a map role
+/// is given its character; the view never spells a map glyph of its own.
+///
+/// Every glyph is a single terminal column wide. The role glyphs (`hero` to
+/// `trail`) are never a right-edge border glyph (`│`, `┐`, `┘`, `┤`, `║`,
+/// `▐`, `|` and the like), so one can sit in any column.
+///
+/// Walls are drawn as architecture. The view looks at each wall cell's four
+/// neighbours and picks a line from one of the four tile tables below,
+/// indexed by a mask of the arms that join a neighbour: north 1, east 2,
+/// south 4, west 8 ([`Glyphs::wall_tile`]). The tables do hold right-edge
+/// shapes (`┐`, `┤`, `╗` and more), so the view keeps the last column of the
+/// map pane blank. Solid rock, a wall cell with no walkable neighbour, is
+/// drawn as `rock`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Glyphs {
     pub hero: char,
     /// A sage or other NPC.
     pub npc: char,
+    /// A lone wall cell that joins no other wall (a pillar). The tile
+    /// tables' mask-0 entry is this too.
     pub wall: char,
     pub floor: char,
     pub ruin: char,
@@ -198,22 +213,87 @@ pub struct Glyphs {
     pub door: char,
     /// The floor's exit, where the sage stands.
     pub exit: char,
+    /// The quest's goal beacon, and the second frame of its pulse.
+    pub goal: char,
+    pub goal_pulse: char,
+    /// The hero's footprints on the cells it walked most recently.
+    pub trail: char,
+    /// Solid rock: a wall cell no walkable cell touches.
+    pub rock: char,
+    /// Inner walls: thin lines, by arm mask.
+    pub walls: [char; 16],
+    /// The outer shell's top and bottom rows: double along the row, thin
+    /// where an inner wall meets it.
+    pub shell_row: [char; 16],
+    /// The outer shell's west and east columns: double along the column,
+    /// thin where an inner wall meets it.
+    pub shell_col: [char; 16],
+    /// The outer shell's four corners: double both ways.
+    pub shell_corner: [char; 16],
+}
+
+/// An arm mask's bits, for [`Glyphs::wall_tile`].
+pub const ARM_N: u8 = 1;
+pub const ARM_E: u8 = 2;
+pub const ARM_S: u8 = 4;
+pub const ARM_W: u8 = 8;
+
+/// Which tile table a wall cell is drawn from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallKind {
+    /// Inside the floor.
+    Inner,
+    /// On the floor's top or bottom row, not a corner.
+    ShellRow,
+    /// On the floor's west or east column, not a corner.
+    ShellCol,
+    /// One of the floor's four corners.
+    ShellCorner,
 }
 
 impl Glyphs {
     /// The default glyph set.
     pub const DEFAULT: Glyphs = Glyphs {
         hero: '@',
-        npc: '&',
-        wall: '#',
-        floor: '.',
-        ruin: ':',
-        vault: '$',
-        gate: '=',
-        portal: '*',
-        door: '+',
-        exit: '>',
+        npc: 'Ψ',
+        wall: '▪',
+        floor: '·',
+        ruin: '░',
+        vault: '▣',
+        gate: '⌂',
+        portal: '◎',
+        door: '▯',
+        exit: '▼',
+        goal: '◈',
+        goal_pulse: '◆',
+        trail: '•',
+        rock: ' ',
+        //      0    N    E    NE   S    NS   ES   NES  W    NW   EW   NEW  SW   NSW  ESW  all
+        walls: [
+            '▪', '│', '─', '└', '│', '│', '┌', '├', '─', '┘', '─', '┴', '┐', '┤', '┬', '┼',
+        ],
+        shell_row: [
+            '▪', '│', '═', '╘', '│', '│', '╒', '╞', '═', '╛', '═', '╧', '╕', '╡', '╤', '╪',
+        ],
+        shell_col: [
+            '▪', '║', '─', '╙', '║', '║', '╓', '╟', '─', '╜', '─', '╨', '╖', '╢', '╥', '╫',
+        ],
+        shell_corner: [
+            '▪', '║', '═', '╚', '║', '║', '╔', '╠', '═', '╝', '═', '╩', '╗', '╣', '╦', '╬',
+        ],
     };
+
+    /// The wall glyph for a cell of `kind` whose arms are `mask` (the
+    /// `ARM_*` bits; higher bits are ignored).
+    pub fn wall_tile(&self, kind: WallKind, mask: u8) -> char {
+        let table = match kind {
+            WallKind::Inner => &self.walls,
+            WallKind::ShellRow => &self.shell_row,
+            WallKind::ShellCol => &self.shell_col,
+            WallKind::ShellCorner => &self.shell_corner,
+        };
+        table[(mask & 0x0f) as usize]
+    }
 
     /// The glyph for a maze cell.
     pub fn cell(&self, cell: Cell) -> char {
@@ -228,8 +308,9 @@ impl Glyphs {
         }
     }
 
-    /// Every role with its glyph, for checks and legends.
-    pub fn all(&self) -> [(&'static str, char); 10] {
+    /// Every role with its glyph, for checks and legends. The wall tile
+    /// tables and `rock` (a space) are not roles; [`Glyphs::tiles`] has them.
+    pub fn all(&self) -> [(&'static str, char); 13] {
         [
             ("hero", self.hero),
             ("npc", self.npc),
@@ -241,7 +322,20 @@ impl Glyphs {
             ("portal", self.portal),
             ("door", self.door),
             ("exit", self.exit),
+            ("goal", self.goal),
+            ("goal pulse", self.goal_pulse),
+            ("trail", self.trail),
         ]
+    }
+
+    /// Every character of the four wall tile tables, table by table.
+    pub fn tiles(&self) -> impl Iterator<Item = char> + '_ {
+        self.walls
+            .iter()
+            .chain(&self.shell_row)
+            .chain(&self.shell_col)
+            .chain(&self.shell_corner)
+            .copied()
     }
 }
 
