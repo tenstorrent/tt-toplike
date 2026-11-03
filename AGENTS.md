@@ -1485,6 +1485,36 @@ the point (and still fun!)", plus renaming Die 3D to a fun name the user liked, 
   speed and density drivers, docs/bus.md's "the other views read what they read before", README's
   "the arcade hero duel reads the local monitor".
 
+### The roaming hero removed (Nov 3 2026, branch `arcade-no-hero`, 0.16.5)
+
+Prompt (Taylor): "The hero in arcade mode that moves between tiles is just too distracting now.
+let's go ahead and say goodbye to it." Decisions:
+
+* Removed: the `@` that moved over the whole arcade, its trail, its expression glyphs and colours
+  (`!` throttled or faulted, `?` ARC stalled, `%` undervolt, `( )` harvested), `is_undervolt`
+  and the Blackhole 0.65 V rule, the lane clamp, the layout-switch carry-over and
+  `Layout::bands`, which only the hero used. Entries above that describe the hero are history.
+* Two bus effects were drawn on the hero and went with it: the `✦` ring per request completed
+  and the heartbeat from tokens per second (`ArcadeFx::hits`, `tokens_per_s`,
+  `heartbeat_frames`). They had no place to go without the hero; re-anchoring them would have
+  been a new design. The per-chip hits (Memory Castle, Defrag) and `new_requests` (the duel's
+  snake) stay.
+* Kept: the Row 1 hero vs snake duel. Its hero lunges against the power baseline, which the
+  hero's block used to feed. `update` feeds the baseline itself with the same readings; a
+  400-tick scripted power trace gives the same duel state and Row 1 before and after.
+* Signals the arcade no longer shows anywhere: the faults register, an ARC heartbeat of 0,
+  undervolt and `harvesting_state`. Throttling still desaturates the starfield; harvested
+  Tensix columns and GDDR temperatures still show in Insights.
+* No config key or flag toggled the hero, so `--check-config` has nothing new to report.
+* Re-pinning: every arcade hash pin moved (GOLDEN, LAYOUT_GOLDEN, BUSY_GOLDEN, the arcade
+  backdrop pins, the base grid). The new values came from 0.16.4 with only the hero overlay and
+  the hit ring switched off (an env-var toggle in a throwaway build), and the new code draws
+  exactly those frames, including styled dumps of 26 frames. The same audit first reproduced the
+  old pins, so the instrument was checked before it was trusted.
+* Guard: `the_roaming_hero_is_gone` compares a classic 140x40 frame over 40 busy mock ticks with
+  its parts (title, Row 1, rules, `panel_lines`); the only `@` allowed is the duel's. Seen red
+  against 0.16.4 (an `@` over the Castle panel) and against one stray trail cell.
+
 ### Saga as an arcade panel (Nov 3 2026, branch `saga-panel`, 0.16.4)
 
 Prompt (Taylor): "add the Saga to 'now serving' arcade view instead of defrag". Decisions:

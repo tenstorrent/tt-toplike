@@ -54,8 +54,8 @@ name is a problem (reported like any other, see below) and the arcade starts wit
 layout.
 
 The choice lasts until you quit. It holds across a resize, and when you leave the arcade and
-come back. A switch lays the arcade out again at the same size, as a resize does. The hero keeps
-its place and its trail, and the power baseline, the activity lanes,
+come back. A switch lays the arcade out again at the same size, as a resize does. The power
+baseline, the activity lanes,
 the duel and what the arcade has read from the bus are kept, so events seen before the switch
 make no new pulse after it. The panels start fresh: a new starfield, castle and so on, at their
 new sizes. The new arcade is updated once before it is drawn, so its first frame shows the
@@ -374,8 +374,8 @@ Every panel draws the same view as its own mode, at the panel's size:
 
 ## How the space is shared
 
-From the top, the arcade has the title row, Row 1 (the telemetry strip, or the hero duel while a
-model serves), then each row's rule (`╔══[ LABEL ]═══▓▒░`) followed by its content rows. The
+From the top, the arcade has the title row, Row 1 (the telemetry strip, or the hero ⚔ snake duel
+while a model serves), then each row's rule (`╔══[ LABEL ]═══▓▒░`) followed by its content rows. The
 bottom row is the footer that the status bar covers. The rule of a row with several panels
 lists their labels, separated by `│`.
 
@@ -396,12 +396,12 @@ no panel left keeps its rule and gives its content rows to the other rows.
 The layout is worked out when the arcade is made: at start-up, on entering the arcade, on a
 resize, and on a switch to another layout. Drawing a frame does no layout work.
 
-## The hero
+## No roaming hero
 
-The hero `@` moves over the rows the layout draws. Power sets its row: 80 W and above puts it in
-the top row, 30 to 80 W in the middle row, below 30 W in the bottom row. With two rows the middle
-row is the top one; with one row all three ranges share it. Current sets its column across the
-whole width. The hero never sits on the activity lanes.
+Until 0.16.5 a hero `@` moved over every row of the arcade, with power setting its row and current
+its column, and left a trail. It was removed because it distracted from the panels. Nothing is
+drawn over the panels now except the bus effects and the activity lanes. The `@` of the Row 1
+duel is a separate feature and stays.
 
 ## The bus effects
 
@@ -409,8 +409,8 @@ The rule is written down in `docs/bus.md` ("The arcade with a configured layout"
 gauges, model labels and reset flashes go on the rule of the gauge panel, which is the
 topmost, then leftmost, of `starfield`, `castle`, `defrag` and `die3d`, or the first panel when
 none of them is shown. Each chip gets an equal share of that panel's columns. Sparks and
-compiles rise in the starfield, so a layout with no starfield does not draw them. Request hits
-are drawn around the hero.
+compiles rise in the starfield, so a layout with no starfield does not draw them. A request
+completed makes the duel's snake lunge; the arcade draws no other mark for it.
 
 ## No backdrop in the arcade
 

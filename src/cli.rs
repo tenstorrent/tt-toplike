@@ -690,7 +690,7 @@ pub enum VisualizationMode {
     #[value(alias = "topology")]
     Flow,
 
-    /// Arcade mode (unified visualization with hero character)
+    /// Arcade mode (the views as panels of one screen)
     Arcade,
 
     /// HivemindSweeper — opt-in passive activity sniffer (source × device

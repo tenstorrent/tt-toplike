@@ -34,7 +34,7 @@ tt-toplike --mode arcade
 tt-toplike -m arcade
 ```
 - All three visualizations stacked: Starfield (top) / Memory Castle (middle) / Memory Flow (bottom)
-- Hero character (`@`) that moves with live telemetry (X = current, Y = power, color = temperature)
+- While a model serves, the top row is a duel: the chip's `@` lunges on power spikes, the inference snake on finished requests
 - Topology diagram in the header: chip-to-chip links shown for carrier boards (p300/n300), suppressed for independent PCIe cards (p150a/n150)
 - >8 chips: compact mini-bar (one character per chip) instead of the detailed diagram
 
