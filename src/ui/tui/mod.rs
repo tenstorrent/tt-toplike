@@ -1190,11 +1190,12 @@ fn run_app(
     // itself runs on the driver's thread (`saga`).
     let mut saga_why = false;
     let mut saga_frame: u64 = 0;
-    // What the Saga view remembers between frames: the cells its hero has
-    // lit, its trail and its chip's temperature (`saga_view::SagaMemory`).
-    // Fed on every update in every view, so the map is still remembered
-    // when Saga comes back on screen.
-    let mut saga_memory = saga_view::SagaMemory::new();
+    // What the Saga view remembers between frames, one memory per floor:
+    // the cells its heroes have lit, their trails and the floor's chip's
+    // temperature (`saga_view::PartyMemory`). Fed on every update in every
+    // view, so the maps are still remembered when Saga comes back on
+    // screen. The view and the arcade panel draw the lead's floor.
+    let mut saga_party = saga_view::PartyMemory::new();
     // The Die 3D inset beside the Insights process table (see
     // `insights_inset_rect`), with its own clock. It exists only on Insights,
     // once there is room and a Blackhole chip; it is hidden but kept while
@@ -1747,11 +1748,14 @@ fn run_app(
                         // and reset flashes (see `arcade_bus`).
                         arc.set_bus(Some(&tui_bus.read()), backend);
                         // The Saga panel: the driver's last state and the
-                        // view's memory (a layout without one ignores it).
-                        arc.set_saga(
-                            saga_panel_feed(saga, loaded_config.saga.enabled),
-                            &saga_memory,
-                        );
+                        // memory of the lead's floor (a layout without one
+                        // ignores it).
+                        let feed = saga_panel_feed(saga, loaded_config.saga.enabled);
+                        let memory = match &feed {
+                            saga_view::PanelFeed::Live { state, .. } => saga_party.lead(state),
+                            _ => saga_view::SagaMemory::none(),
+                        };
+                        arc.set_saga(feed, memory);
                         arc.update(backend);
                     }
                 }
@@ -2037,13 +2041,13 @@ fn run_app(
                 // own animation clock moves on.
                 DisplayMode::Saga => saga_frame = saga_frame.wrapping_add(1),
             }
-            // The Saga view's memory follows the story in every view (see
-            // `saga_memory` above), and takes the temperature of the hero's
-            // chip from the backend, matched by its bus key.
+            // The Saga view's memories follow the story in every view (see
+            // `saga_party` above), and each floor takes the temperature of
+            // its own chip from the backend, matched by its bus key.
             if let Some(d) = saga {
                 let state = d.published().state;
-                saga_memory.observe(&state);
-                let heat = saga_view::hero_chip(&state).and_then(|chip| {
+                saga_party.observe(&state);
+                saga_party.set_heats(&state, |chip| {
                     backend
                         .devices()
                         .iter()
@@ -2051,7 +2055,6 @@ fn run_app(
                         .and_then(|dev| backend.telemetry(dev.index))
                         .and_then(|t| t.asic_temperature)
                 });
-                saga_memory.set_heat(heat);
             }
 
             // The backdrops (see `backdrop_bus`): the views' own painters
@@ -2461,7 +2464,7 @@ fn run_app(
                             ui_saga(
                                 f,
                                 saga,
-                                &saga_memory,
+                                &saga_party,
                                 loaded_config.saga.enabled,
                                 saga_why,
                                 saga_frame,
@@ -4297,7 +4300,7 @@ fn ui_die3d(
 fn ui_saga(
     f: &mut Frame,
     saga: Option<&crate::saga::SagaDriver>,
-    memory: &saga_view::SagaMemory,
+    party: &saga_view::PartyMemory,
     enabled: bool,
     why: bool,
     frame: u64,
@@ -4316,7 +4319,7 @@ fn ui_saga(
                 stopped: p.stopped,
                 why,
             };
-            saga_view::render_saga(&p.state, memory, flags, size, frame)
+            saga_view::render_saga(&p.state, party.lead(&p.state), flags, size, frame)
         }
         None => saga_view::render_saga_off(size, enabled),
     };

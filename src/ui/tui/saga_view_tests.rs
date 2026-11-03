@@ -992,7 +992,7 @@ fn fog_hides_the_unseen_and_dims_the_remembered() {
 /// The memory belongs to one floor of one world. Right after a new world is
 /// born it holds exactly what the hero's light shows from where it stands,
 /// and nothing from the world before; moving the hero to another floor
-/// starts over too.
+/// starts over too, with the light of every hero on that floor.
 #[test]
 fn the_explored_set_resets_on_a_new_world_and_floor() {
     let mut saga = Saga::new(config(NameMode::Real, Label::Mock));
@@ -1018,7 +1018,8 @@ fn the_explored_set_resets_on_a_new_world_and_floor() {
                 "world {world}: ({x}, {y}) seen only if lit now"
             );
         }
-        assert_eq!(memory.trail.len(), 1, "a new trail");
+        assert_eq!(memory.trails.len(), 1, "one hero on the floor");
+        assert_eq!(memory.trails[0].steps.len(), 1, "a new trail");
     }
     assert!(births >= 2, "the busy log makes more than one world");
     // Another floor of the same world.
@@ -1028,8 +1029,13 @@ fn the_explored_set_resets_on_a_new_world_and_floor() {
     s.party[0].hero.floor = if s.party[0].hero.floor == 0 { 1 } else { 0 };
     memory.observe(&s);
     let after: usize = memory.seen.iter().filter(|&&b| b).count();
-    let lit = light(hero_floor(&s).unwrap(), s.party[0].hero.pos);
-    assert_eq!(after, lit.iter().filter(|&&l| l > 0).count());
+    // Every hero on that floor lights it: the lead and the floor's own hero.
+    let on: Vec<(u8, u8)> = s
+        .on_floor(s.party[0].hero.floor)
+        .map(|(_, m)| m.hero.pos)
+        .collect();
+    assert_eq!(on.len(), 2, "the lead joined the floor's own hero");
+    assert_fresh(&memory, hero_floor(&s).unwrap(), &on, "another floor");
     assert!(
         before > after,
         "the old floor's map is gone: {before} -> {after}"
@@ -1754,4 +1760,279 @@ fn panel_cost() {
         let panel = t.elapsed() / n as u32;
         println!("{size:?}: view {view:?} a frame, panel {panel:?} a frame");
     }
+}
+
+// ---- One memory and one heat per floor (Task A.6 of the party plan) ---------
+
+/// Every record of the saga crate's four-chip fixture: four floors, four
+/// heroes, 600 ticks, made-up names. Read once per test process.
+fn party4() -> &'static [Record] {
+    static RECORDS: OnceLock<Vec<Record>> = OnceLock::new();
+    RECORDS.get_or_init(|| {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/tt-toplike-saga/tests/fixtures/party4.jsonl");
+        let read = read_segment(&path).expect("party4.jsonl is committed");
+        assert_eq!(read.bad_lines, 0, "party4.jsonl decodes");
+        read.records
+    })
+}
+
+/// The four-chip records up to the birth of the log's last world, which
+/// comes eight records before the end: at this cut every hero has walked a
+/// while in the same world.
+fn party4_explored() -> &'static [Record] {
+    let mut saga = Saga::new(config(NameMode::Real, Label::Mock));
+    let mut cut = 0;
+    let mut world = 0;
+    for (n, r) in party4().iter().enumerate() {
+        saga.feed(r);
+        if saga.state().world.id != world {
+            world = saga.state().world.id;
+            cut = n;
+        }
+    }
+    &party4()[..cut]
+}
+
+/// How many cells `pos` lights on `floor`.
+fn lit_count(floor: &Floor, pos: (u8, u8)) -> usize {
+    light(floor, pos).iter().filter(|&&l| l > 0).count()
+}
+
+/// A saga fed every record of `records` and a party memory that observed
+/// the state after each record, as the TUI's loop does on each update.
+fn saga_and_party(records: &[Record]) -> (Saga, PartyMemory) {
+    let mut saga = Saga::new(config(NameMode::Real, Label::Mock));
+    let mut party = PartyMemory::new();
+    for r in records {
+        saga.feed(r);
+        party.observe(saga.state());
+    }
+    (saga, party)
+}
+
+/// How many cells of a memory have been lit.
+fn seen_count(memory: &SagaMemory) -> usize {
+    memory.seen.iter().filter(|&&b| b).count()
+}
+
+/// Asserts that `memory` holds exactly the cells that `pos` lights on
+/// `floor` and a one-step trail per hero: what a memory holds right after
+/// it starts over.
+fn assert_fresh(memory: &SagaMemory, floor: &Floor, pos: &[(u8, u8)], what: &str) {
+    let mut want = vec![false; floor.w as usize * floor.h as usize];
+    for &p in pos {
+        for (i, l) in light(floor, p).into_iter().enumerate() {
+            want[i] |= l > 0;
+        }
+    }
+    assert_eq!(memory.seen, want, "{what}: only what the light shows now");
+    assert_eq!(memory.trails.len(), pos.len(), "{what}: one trail per hero");
+    for t in &memory.trails {
+        assert_eq!(t.steps.len(), 1, "{what}: each trail starts over");
+    }
+}
+
+/// Each floor of a party has its own memory: it is kept under its own floor
+/// index, it is the size of its own floor, it holds the light of its own
+/// hero, and it equals a lone memory that followed that floor alone. Two
+/// heroes on one floor both light it and each keeps its own trail.
+#[test]
+fn each_floor_remembers_its_own_cells() {
+    let (saga, party) = saga_and_party(party4_explored());
+    let state = saga.state();
+    assert_eq!(state.world.floors.len(), 4, "party4 has four floors");
+    let mut lone: Vec<SagaMemory> = (0..4).map(|_| SagaMemory::new()).collect();
+    let mut s = Saga::new(config(NameMode::Real, Label::Mock));
+    for r in party4_explored() {
+        s.feed(r);
+        for (i, m) in lone.iter_mut().enumerate() {
+            m.observe_floor(s.state(), i);
+        }
+    }
+    for i in 0..4 {
+        let memory = party.floor(i).expect("one memory per floor");
+        let floor = &state.world.floors[i];
+        assert_eq!(
+            memory.key,
+            Some((state.world.id, state.world.seed, i)),
+            "floor {i}: kept under its own index"
+        );
+        assert_eq!((memory.w, memory.h), (floor.w as usize, floor.h as usize));
+        let pos = state.party[i].hero.pos;
+        for (c, l) in light(floor, pos).into_iter().enumerate() {
+            if l > 0 {
+                assert!(memory.seen[c], "floor {i}: its own hero's light is seen");
+            }
+        }
+        assert_eq!(memory.trails.len(), 1, "floor {i}: one hero, one trail");
+        assert_eq!(
+            memory.trails[0].member, i,
+            "floor {i}: its own hero's trail"
+        );
+        assert_eq!(memory.trails[0].steps.front(), Some(&pos));
+        assert_eq!(memory.seen, lone[i].seen, "floor {i}: as a lone memory");
+        assert_eq!(memory.trails, lone[i].trails, "floor {i}: as a lone memory");
+        assert!(
+            seen_count(memory) > lit_count(floor, pos),
+            "floor {i} remembers more than its hero's light now"
+        );
+    }
+    assert!(party.floor(4).is_none(), "no memory past the last floor");
+
+    // Two heroes on floor 0: hero 1 is put on a walkable cell of floor 0
+    // away from hero 0.
+    let mut two = state.clone();
+    let floor = two.world.floors[0].clone();
+    let lead = two.party[0].hero.pos;
+    let far = (0..floor.h)
+        .flat_map(|y| (0..floor.w).map(move |x| (x, y)))
+        .filter(|&(x, y)| floor.cells[y as usize * floor.w as usize + x as usize].walkable())
+        .max_by_key(|&(x, y)| x.abs_diff(lead.0) as u32 + y.abs_diff(lead.1) as u32)
+        .expect("a walkable cell");
+    two.party[1].hero.floor = 0;
+    two.party[1].hero.pos = far;
+    two.world.seed ^= 1;
+    let mut memory = SagaMemory::new();
+    memory.observe_floor(&two, 0);
+    assert_fresh(&memory, &floor, &[lead, far], "two heroes on floor 0");
+    assert_eq!(
+        memory.trails.iter().map(|t| t.member).collect::<Vec<_>>(),
+        vec![0, 1],
+        "the trails are in member order"
+    );
+    // Hero 1 leaves floor 0: its trail goes and hero 0's stays.
+    two.party[1].hero.floor = 1;
+    memory.observe_floor(&two, 0);
+    assert_eq!(memory.trails.len(), 1);
+    assert_eq!(memory.trails[0].member, 0);
+}
+
+/// A new world (a new id or a new seed) clears the memory of every floor:
+/// right after it, each floor holds only what its hero's light shows.
+#[test]
+fn a_new_world_clears_every_floor_memory() {
+    let (saga, mut party) = saga_and_party(party4_explored());
+    let state = saga.state().clone();
+    for i in 0..4 {
+        assert!(
+            seen_count(party.floor(i).unwrap())
+                > lit_count(&state.world.floors[i], state.party[i].hero.pos),
+            "floor {i} remembers more than its light before the new world"
+        );
+    }
+    let mut next = state.clone();
+    next.world.seed = next.world.seed.wrapping_add(1);
+    party.observe(&next);
+    for i in 0..4 {
+        let pos = next.party[i].hero.pos;
+        assert_fresh(
+            party.floor(i).unwrap(),
+            &next.world.floors[i],
+            &[pos],
+            &format!("new seed, floor {i}"),
+        );
+    }
+    // Walk the old world again, then a new id with the same seed.
+    let (_, mut party) = saga_and_party(party4_explored());
+    let mut next = state.clone();
+    next.world.id += 1;
+    party.observe(&next);
+    for i in 0..4 {
+        assert_fresh(
+            party.floor(i).unwrap(),
+            &next.world.floors[i],
+            &[next.party[i].hero.pos],
+            &format!("new id, floor {i}"),
+        );
+    }
+    // A world with fewer floors keeps only its own floors' memories.
+    let mut small = next.clone();
+    small.world.id += 1;
+    small.world.floors = small.world.floors[..2].to_vec().into();
+    small.world.chips.truncate(2);
+    small.party.truncate(2);
+    party.observe(&small);
+    assert!(party.floor(1).is_some() && party.floor(2).is_none());
+}
+
+/// Each floor keeps the temperature of its own chip. `set_heats` takes the
+/// reading of each floor's chip (`floor_chip`), a floor past the last one
+/// is ignored, a reading that is not a number is dropped, and the readings
+/// survive the next update of the same world.
+#[test]
+fn heat_is_per_floor() {
+    let (saga, mut party) = saga_and_party(party4_explored());
+    let state = saga.state();
+    for i in 0..4 {
+        assert_eq!(floor_chip(state, i), state.world.chips.get(i));
+    }
+    assert_eq!(floor_chip(state, 4), None, "no chip past the last floor");
+    assert_eq!(hero_chip(state), floor_chip(state, 0), "the lead's chip");
+    assert_eq!(floor_chip(&empty_state(Label::Mock), 0), None);
+
+    // One reading per chip, told apart by the chip's index.
+    let temps = [41.0f32, 57.5, f32::NAN, 88.0];
+    party.set_heats(state, |chip| {
+        let i = state.world.chips.iter().position(|c| c == chip)?;
+        Some(temps[i])
+    });
+    let heats: Vec<Option<f32>> = (0..4).map(|i| party.floor(i).unwrap().heat).collect();
+    assert_eq!(heats, vec![Some(41.0), Some(57.5), None, Some(88.0)]);
+
+    party.set_heat(1, None);
+    party.set_heat(3, Some(20.0));
+    party.set_heat(9, Some(99.0));
+    party.observe(state);
+    let heats: Vec<Option<f32>> = (0..4).map(|i| party.floor(i).unwrap().heat).collect();
+    assert_eq!(heats, vec![Some(41.0), None, None, Some(20.0)]);
+
+    // The view draws the lead's floor in the heat of the lead's chip.
+    party.set_heat(0, Some(80.0));
+    let warm = Look::for_state(state, party.lead(state));
+    let plain = Look::new(state.world.biome, None);
+    assert_ne!(format!("{:?}", warm.floor), format!("{:?}", plain.floor));
+}
+
+/// With one chip, the party memory's only floor is the memory the view drew
+/// before the party: the solo log draws the same frames from either, and
+/// the memory the view picks for the lead (`PartyMemory::lead`) is that
+/// floor's.
+#[test]
+fn a_party_memory_of_one_equals_a_saga_memory() {
+    tc(|| {
+        let mut saga = Saga::new(config(NameMode::Real, Label::Mock));
+        let mut party = PartyMemory::new();
+        let mut memory = SagaMemory::new();
+        for (n, r) in solo().iter().enumerate() {
+            saga.feed(r);
+            party.observe(saga.state());
+            memory.observe(saga.state());
+            if n % 97 == 0 {
+                let a = render_saga(saga.state(), party.floor(0).unwrap(), PLAIN, (80, 23), 5);
+                let b = render_saga(saga.state(), &memory, PLAIN, (80, 23), 5);
+                assert_eq!(frame_hash(&a), frame_hash(&b), "record {n}");
+            }
+        }
+        let state = saga.state();
+        assert_eq!(state.world.floors.len(), 1);
+        assert!(party.floor(1).is_none());
+        let lead = party.lead(state);
+        assert!(std::ptr::eq(lead, party.floor(0).unwrap()));
+        for why in [false, true] {
+            let flags = SagaFlags {
+                stopped: false,
+                why,
+            };
+            for size in GOLDEN_SIZES {
+                let a = render_saga(state, lead, flags, size, 5);
+                let b = render_saga(state, &memory, flags, size, 5);
+                assert_eq!(frame_hash(&a), frame_hash(&b), "{size:?} why {why}");
+            }
+        }
+        // Before the first world the lead memory is an empty one.
+        let empty = empty_state(Label::Mock);
+        let fresh = PartyMemory::new();
+        assert!(fresh.lead(&empty).key.is_none());
+    });
 }

@@ -9,10 +9,10 @@
 //! the saga driver (`crate::saga::SagaDriver`) runs on its own thread from
 //! start-up. This module draws the driver's last published [`SagaState`]:
 //! [`render_saga`] turns it into lines for one frame. The only thing the
-//! view keeps between frames is [`SagaMemory`]: which cells of the hero's
-//! floor have been seen, the hero's last few steps, and its chip's
-//! temperature. The core never sees the memory, so nothing here can change
-//! a digest.
+//! view keeps between frames is [`PartyMemory`], one [`SagaMemory`] per
+//! floor: which cells of the floor have been seen, the last few steps of
+//! each hero on it, and the floor's chip's temperature. The core never sees
+//! the memory, so nothing here can change a digest.
 //!
 //! # What is drawn
 //!
@@ -335,14 +335,15 @@ impl Row {
 // What the view remembers
 // ---------------------------------------------------------------------------
 
-/// What the view keeps between frames: the cells of the hero's floor that
-/// have been lit, the hero's last [`TRAIL_LEN`] steps, and the temperature
-/// of the hero's chip. The TUI holds one, calls [`SagaMemory::observe`] on
-/// every update whether or not Saga is on screen, and passes it to
-/// [`render_saga`].
+/// What the view keeps between frames for one floor: the cells of the floor
+/// that have been lit, the last [`TRAIL_LEN`] steps of each hero on it, and
+/// the temperature of the floor's chip. The TUI holds a [`PartyMemory`] with
+/// one of these per floor, feeds it on every update whether or not Saga is
+/// on screen, and passes the lead's floor's memory to [`render_saga`]
+/// ([`PartyMemory::lead`]).
 ///
 /// The memory belongs to one floor of one world. It starts empty when a new
-/// world is born (a new id or seed) and when the hero moves to another
+/// world is born (a new id or seed) and when it is asked to follow another
 /// floor. A memory kept for a different floor draws as empty, so a stale
 /// memory can never paint the wrong map.
 #[derive(Debug, Clone, Default)]
@@ -353,72 +354,136 @@ pub struct SagaMemory {
     h: usize,
     /// Row-major, `w * h`: whether the cell has been lit.
     seen: Vec<bool>,
-    /// The hero's newest positions, newest first. The first is where the
-    /// hero stands now.
-    trail: VecDeque<(u8, u8)>,
-    /// The hero's position at the last observation.
-    last: Option<(u8, u8)>,
-    /// The hero's chip's temperature in °C, when known.
+    /// One trail per hero standing on the floor, in member order. A hero
+    /// that leaves the floor takes its trail with it.
+    trails: Vec<Trail>,
+    /// The floor's chip's temperature in °C, when known.
     heat: Option<f32>,
 }
+
+/// One hero's newest steps on a floor.
+#[derive(Debug, Clone, PartialEq)]
+struct Trail {
+    /// The member's index in the party ([`SagaState::party`]).
+    member: usize,
+    /// The hero's newest positions, newest first. The first is where the
+    /// hero stood at the last observation; there is always at least one.
+    steps: VecDeque<(u8, u8)>,
+}
+
+/// An empty memory, for a view with no floor to draw. It fits no floor, so
+/// it draws as unexplored.
+static NO_MEMORY: SagaMemory = SagaMemory {
+    key: None,
+    w: 0,
+    h: 0,
+    seen: Vec::new(),
+    trails: Vec::new(),
+    heat: None,
+};
 
 impl SagaMemory {
     pub fn new() -> SagaMemory {
         SagaMemory::default()
     }
 
-    /// Takes in one published state: starts over on a new world or floor,
-    /// then lights the cells around every cell the hero has walked since
-    /// the last observation. When the hero moved more than one cell (the
-    /// view was not observing, or the driver published less often than the
-    /// hero stepped) the walk between is filled in with the core's own
-    /// shortest path, the route the hero most likely took.
+    /// An empty memory that lives for the whole run, for a caller with no
+    /// floor to draw. It fits no floor, so it draws as unexplored.
+    pub fn none() -> &'static SagaMemory {
+        &NO_MEMORY
+    }
+
+    /// Takes in one published state for the floor the lead hero stands on
+    /// ([`hero_floor_index`]): [`SagaMemory::observe_floor`] of that floor.
+    /// With one chip this is the whole party.
     pub fn observe(&mut self, state: &SagaState) {
-        let heat = self.heat;
-        let Some((key, floor)) = floor_key(state) else {
-            *self = SagaMemory {
-                heat,
-                ..SagaMemory::default()
-            };
+        match hero_floor_index(state) {
+            Some(i) => self.observe_floor(state, i),
+            None => self.forget(),
+        }
+    }
+
+    /// Takes in one published state for floor `floor`: starts over on a new
+    /// world or another floor, then, for every hero standing on the floor,
+    /// lights the cells around every cell the hero has walked since the last
+    /// observation. When a hero moved more than one cell (the view was not
+    /// observing, or the driver published less often than the hero stepped)
+    /// the walk between is filled in with the core's own shortest path, the
+    /// route the hero most likely took. Each hero keeps its own trail.
+    pub fn observe_floor(&mut self, state: &SagaState, floor: usize) {
+        let Some((key, map)) = floor_key_at(state, floor) else {
+            self.forget();
             return;
         };
-        let (w, h) = (floor.w as usize, floor.h as usize);
+        let (w, h) = (map.w as usize, map.h as usize);
         if self.key != Some(key) || self.w != w || self.h != h {
             *self = SagaMemory {
                 key: Some(key),
                 w,
                 h,
                 seen: vec![false; w * h],
-                heat,
+                heat: self.heat,
                 ..SagaMemory::default()
             };
         }
-        let pos = state.lead().hero.pos;
-        if self.last == Some(pos) {
-            return;
-        }
-        let steps: Vec<(u8, u8)> = match self.last {
-            Some(from) if from.0.abs_diff(pos.0) + from.1.abs_diff(pos.1) > 1 => {
-                astar(floor, from, pos)
-                    .map(|p| p.into_iter().skip(1).collect())
-                    .unwrap_or_else(|| vec![pos])
+        // A hero that has left the floor takes its trail with it.
+        self.trails
+            .retain(|t| member_floor(state, t.member) == Some(floor));
+        for (member, m) in state.party.iter().enumerate() {
+            if member_floor(state, member) != Some(floor) {
+                continue;
             }
-            _ => vec![pos],
-        };
-        for step in steps {
-            for (i, lit) in light(floor, step).into_iter().enumerate() {
-                if lit > 0 {
-                    self.seen[i] = true;
+            let pos = m.hero.pos;
+            // The trails stay in member order: members are visited in
+            // index order and a new trail goes after every lower index.
+            let at = match self.trails.binary_search_by_key(&member, |t| t.member) {
+                Ok(at) => at,
+                Err(at) => {
+                    self.trails.insert(
+                        at,
+                        Trail {
+                            member,
+                            steps: VecDeque::new(),
+                        },
+                    );
+                    at
                 }
+            };
+            let trail = &mut self.trails[at];
+            let last = trail.steps.front().copied();
+            if last == Some(pos) {
+                continue;
             }
-            self.trail.push_front(step);
+            let steps: Vec<(u8, u8)> = match last {
+                Some(from) if from.0.abs_diff(pos.0) + from.1.abs_diff(pos.1) > 1 => {
+                    astar(map, from, pos)
+                        .map(|p| p.into_iter().skip(1).collect())
+                        .unwrap_or_else(|| vec![pos])
+                }
+                _ => vec![pos],
+            };
+            for step in steps {
+                for (i, lit) in light(map, step).into_iter().enumerate() {
+                    if lit > 0 {
+                        self.seen[i] = true;
+                    }
+                }
+                trail.steps.push_front(step);
+            }
+            trail.steps.truncate(TRAIL_LEN + 1);
         }
-        self.trail.truncate(TRAIL_LEN + 1);
-        self.last = Some(pos);
     }
 
-    /// Sets the temperature of the hero's chip (`None` when not known). See
-    /// [`hero_chip`] for which chip that is.
+    /// Empties the memory and keeps its heat: there is no floor to follow.
+    fn forget(&mut self) {
+        *self = SagaMemory {
+            heat: self.heat,
+            ..SagaMemory::default()
+        };
+    }
+
+    /// Sets the temperature of the floor's chip (`None` when not known).
+    /// See [`floor_chip`] for which chip that is.
     pub fn set_heat(&mut self, celsius: Option<f32>) {
         self.heat = celsius.filter(|c| c.is_finite());
     }
@@ -433,8 +498,7 @@ impl SagaMemory {
         self.w = other.w;
         self.h = other.h;
         self.seen.clone_from(&other.seen);
-        self.trail.clone_from(&other.trail);
-        self.last = other.last;
+        self.trails.clone_from(&other.trails);
         self.heat = other.heat;
     }
 
@@ -455,13 +519,14 @@ impl SagaMemory {
         x < self.w && y < self.h && self.seen[y * self.w + x]
     }
 
-    /// The age of the trail at `(x, y)`: 1 for the step before the hero's
-    /// cell, up to [`TRAIL_LEN`]; `None` when the trail is not there.
+    /// The age of a trail at `(x, y)`: 1 for the step before a hero's cell,
+    /// up to [`TRAIL_LEN`]; `None` when no trail is there. Where two trails
+    /// cross, the younger step counts.
     fn trail_age(&self, at: (u8, u8)) -> Option<usize> {
-        self.trail
+        self.trails
             .iter()
-            .skip(1)
-            .position(|&p| p == at)
+            .filter_map(|t| t.steps.iter().skip(1).position(|&p| p == at))
+            .min()
             .map(|i| i + 1)
     }
 
@@ -482,24 +547,124 @@ impl SagaMemory {
     }
 }
 
-/// The key a memory is kept under for the floor `state` draws, and that
-/// floor. `None` before the first world or when the world has no floor.
+/// What the view keeps between frames for a whole party: one [`SagaMemory`]
+/// per floor of the world, index aligned with the world's floors, each with
+/// its own lit cells, its own heroes' trails and its own chip's
+/// temperature. The TUI's loop holds one, calls [`PartyMemory::observe`] on
+/// every update, and sets each floor's heat from its chip
+/// ([`PartyMemory::set_heats`]).
+///
+/// Each floor's memory is kept under the world's id, the world's seed and
+/// the floor's index, so a new world starts every floor over. A world with
+/// fewer floors drops the memories past its last floor.
+#[derive(Debug, Clone, Default)]
+pub struct PartyMemory {
+    floors: Vec<SagaMemory>,
+}
+
+impl PartyMemory {
+    pub fn new() -> PartyMemory {
+        PartyMemory::default()
+    }
+
+    /// Takes in one published state: one memory per floor of its world,
+    /// each following its own floor ([`SagaMemory::observe_floor`]).
+    pub fn observe(&mut self, state: &SagaState) {
+        let n = state.world.floors.len();
+        self.floors.truncate(n);
+        self.floors.resize_with(n, SagaMemory::new);
+        for (i, memory) in self.floors.iter_mut().enumerate() {
+            memory.observe_floor(state, i);
+        }
+    }
+
+    /// The memory of floor `i`, when the last observed world has that floor.
+    pub fn floor(&self, i: usize) -> Option<&SagaMemory> {
+        self.floors.get(i)
+    }
+
+    /// The memory of the floor the lead hero stands on in `state`
+    /// ([`hero_floor_index`]), which is the floor the single-floor view and
+    /// the arcade panel draw. An empty memory when there is none, which
+    /// draws as unexplored.
+    pub fn lead(&self, state: &SagaState) -> &SagaMemory {
+        hero_floor_index(state)
+            .and_then(|i| self.floor(i))
+            .unwrap_or(&NO_MEMORY)
+    }
+
+    /// Sets the temperature of floor `floor`'s chip (`None` when not
+    /// known). A floor past the last one is ignored.
+    pub fn set_heat(&mut self, floor: usize, celsius: Option<f32>) {
+        if let Some(memory) = self.floors.get_mut(floor) {
+            memory.set_heat(celsius);
+        }
+    }
+
+    /// Sets every floor's heat from its chip: `heat_of` gets each floor's
+    /// chip key ([`floor_chip`]) and returns its temperature. A floor with
+    /// no chip gets no heat.
+    pub fn set_heats(
+        &mut self,
+        state: &SagaState,
+        heat_of: impl Fn(&tt_toplike_bus::EntityKey) -> Option<f32>,
+    ) {
+        for i in 0..self.floors.len() {
+            let heat = floor_chip(state, i).and_then(&heat_of);
+            self.set_heat(i, heat);
+        }
+    }
+}
+
+/// The key a memory is kept under for the floor `state` draws (the lead's,
+/// [`hero_floor_index`]), and that floor. `None` before the first world or
+/// when the world has no floor.
 fn floor_key(state: &SagaState) -> Option<((u64, u64, usize), &Floor)> {
+    floor_key_at(state, hero_floor_index(state)?)
+}
+
+/// The key a memory is kept under for floor `i` of `state`'s world (world
+/// id, world seed, floor index), and that floor. `None` before the first
+/// world or when the world has no floor `i`.
+fn floor_key_at(state: &SagaState, i: usize) -> Option<((u64, u64, usize), &Floor)> {
     if !state.has_world() {
         return None;
     }
-    let i = hero_floor_index(state)?;
     let floor = state.world.floors.get(i)?;
     Some(((state.world.id, state.world.seed, i), floor))
 }
 
-/// The chip of the floor the hero is on. Its temperature tints the floor
-/// ([`SagaMemory::set_heat`]).
-pub fn hero_chip(state: &SagaState) -> Option<&tt_toplike_bus::EntityKey> {
-    if !state.has_world() {
+/// The floor member `member`'s hero stands on: its own floor index, or 0
+/// when that index is past the end (the core plans on the first floor then,
+/// see [`hero_floor_index`]). `None` when there is no such member or the
+/// world has no floors.
+fn member_floor(state: &SagaState, member: usize) -> Option<usize> {
+    let n = state.world.floors.len();
+    let i = state.party.get(member)?.hero.floor as usize;
+    match n {
+        0 => None,
+        _ if i < n => Some(i),
+        _ => Some(0),
+    }
+}
+
+/// The chip of floor `floor`. Its temperature tints that floor
+/// ([`PartyMemory::set_heat`]). `None` before the first world or past the
+/// last floor.
+pub fn floor_chip(state: &SagaState, floor: usize) -> Option<&tt_toplike_bus::EntityKey> {
+    if !state.has_world() || floor >= state.world.floors.len() {
         return None;
     }
-    hero_floor_index(state).and_then(|i| state.world.chips.get(i))
+    state.world.chips.get(floor)
+}
+
+/// The chip of the floor the lead hero is on ([`floor_chip`] of
+/// [`hero_floor_index`]). The TUI's loop reads every floor's chip now
+/// ([`PartyMemory::set_heats`]), so only the tests call this today; it is
+/// kept for callers that want the lead's chip alone.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn hero_chip(state: &SagaState) -> Option<&tt_toplike_bus::EntityKey> {
+    floor_chip(state, hero_floor_index(state)?)
 }
 
 /// The light the hero at `from` casts on `floor`: for each cell, row-major,
@@ -1030,13 +1195,7 @@ pub fn render_saga_off(area: (u16, u16), enabled: bool) -> Vec<Line<'static>> {
 /// floors. The title and the map both use it, so they always name the same
 /// floor.
 fn hero_floor_index(state: &SagaState) -> Option<usize> {
-    let n = state.world.floors.len();
-    let i = state.lead().hero.floor as usize;
-    match n {
-        0 => None,
-        _ if i < n => Some(i),
-        _ => Some(0),
-    }
+    member_floor(state, 0)
 }
 
 /// The hero's floor (see [`hero_floor_index`]).

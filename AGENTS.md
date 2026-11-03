@@ -1501,7 +1501,8 @@ Prompt (Taylor): "add the Saga to 'now serving' arcade view instead of defrag". 
   not added: the full view puts the status row at the bottom and the chronicle between, so the
   shared unit is the renderers themselves.
 * Data: the TUI feeds `ArcadeVisualization::set_saga` once per update with the driver's
-  `Published` state (an `Arc`) and its `SagaMemory`. The arcade copies the memory into its own
+  `Published` state (an `Arc`) and the `SagaMemory` of the lead's floor (`PartyMemory::lead`). The
+  arcade copies the memory into its own
   buffers with `SagaMemory::copy_from` (`clone_from` keeps capacity) and observes the fed state,
   so the fog matches the state whatever order the loop runs in. `relayout` keeps both, so the
   frame after `{` `}` shows the map.
@@ -1532,6 +1533,9 @@ be more creative with our symbology and character choice for ASCII art." Decisio
 * Fog lives view-side in `saga_view::SagaMemory`, keyed by world id, seed and floor, fed by the TUI
   loop on every update in every view (one `published()` clone per update). Gaps between
   observations are filled with the core's `astar`. A memory for another floor draws as empty.
+  Since party Task A.6 the loop keeps a `PartyMemory`, one `SagaMemory` per floor, each lit by
+  every hero standing on it with one trail per hero, and each floor's heat comes from its own chip
+  (`floor_chip`, `PartyMemory::set_heats`). The single-floor view draws the lead's floor.
 * The right-border rule is kept by never drawing in the map pane's last column (the tiles include
   `┐ ┤ ╗`). `the_map_keeps_its_last_column_blank` and the extended `no_row_ends_in_a_right_side_border`
   (every cell seen, hero at each corner) fail if the inset goes.
