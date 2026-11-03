@@ -495,6 +495,14 @@ pub struct SagaState {
     pub chronicle: Chronicle,
     /// Ticks seen so far (pacemaker sweeps, see [`crate::observe`]).
     pub tick: u64,
+    /// The chips the stream has shown the saga so far, at most
+    /// [`crate::world::MAX_CHIPS`]. A world keeps at most
+    /// [`crate::world::MAX_FLOORS`] of them as floors, so a view can say how
+    /// many chips have no floor. It counts the chips of the stream the story
+    /// reads, which under a replay or an attached bus is another box's.
+    /// Views read it; no rule of the story does, and it is not part of
+    /// [`Saga::digest`].
+    pub chips_seen: usize,
 }
 
 impl SagaState {
@@ -682,6 +690,7 @@ impl Saga {
                 }],
                 chronicle: Chronicle::new(),
                 tick: 0,
+                chips_seen: 0,
             },
             #[cfg(test)]
             walled_sage: None,
@@ -850,6 +859,8 @@ impl Saga {
             }
             self.topo_dirty = true;
             self.chips.insert(chip.clone(), ChipSeen::default());
+            // For views only: the digest never reads it.
+            self.state.chips_seen = self.chips.len();
         }
         let Some(seen) = self.chips.get_mut(&chip) else {
             return;

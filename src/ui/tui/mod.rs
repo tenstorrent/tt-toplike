@@ -2500,7 +2500,6 @@ fn run_app(
                                 why: saga_why,
                                 focus: saga_focus,
                                 zoom: saga_zoom,
-                                chips: backend.devices().len(),
                             };
                             ui_saga(
                                 f,

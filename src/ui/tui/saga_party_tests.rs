@@ -114,14 +114,13 @@ fn end_of(which: &str) -> &'static (SagaState, PartyMemory) {
     })
 }
 
-/// The flags with `focus`, `zoom`, `why`, `stopped` and `chips` set.
-fn flags(focus: usize, zoom: bool, why: bool, stopped: bool, chips: usize) -> SagaFlags {
+/// The flags with `focus`, `zoom`, `why` and `stopped` set.
+fn flags(focus: usize, zoom: bool, why: bool, stopped: bool) -> SagaFlags {
     SagaFlags {
         stopped,
         why,
         focus,
         zoom,
-        chips,
     }
 }
 
@@ -211,9 +210,13 @@ const TABLE_SIZES: [(u16, u16); 3] = [(80, 23), (140, 39), (200, 59)];
 // ---- The grid ----------------------------------------------------------------
 
 /// `party_grid` gives the shapes of the addendum's table (section 5.2) for
-/// 1, 2, 4 and 32 chips. The 4-chip tiles at 80x23 are a row taller than
-/// the addendum's working (39 x 8), since the tiles share every row the
-/// chronicle leaves. The others are the table's numbers.
+/// 1, 2, 4 and 32 chips, as its rule computes them: the tiles share every
+/// row the chronicle leaves (ruling R34: the code's rule stands and the
+/// addendum's table is corrected in Task A.8). At 80x23 that is one row of
+/// two 39x16 tiles for 2 chips and 2 x 2 tiles of 39x8 for 4 chips (the
+/// addendum's working had 39x11 and 39x7). At 200x59 the table's blank
+/// cells are 2 tiles of 54x39 for 2 chips and 2 x 2 tiles of 54x28 for 4.
+/// The 32-chip cells and the 140x39 cells are the addendum's numbers.
 #[test]
 fn party_grid_gives_the_addendum_table() {
     let g = |cols, rows, tile_w, tile_h, per_page| Grid {
@@ -272,7 +275,7 @@ fn below_the_minimum_tile_the_focused_floor_draws_alone() {
     tc(|| {
         for (w, h) in [(30u16, 10u16), (60, 11), (80, 11), (23, 40), (12, 4)] {
             assert_eq!(party_grid(4, w as usize, h as usize), None, "{w}x{h}");
-            let f = flags(2, false, false, false, 0);
+            let f = flags(2, false, false, false);
             let got = render_saga(state, party, f, (w, h), 5);
             let want = render_floor(
                 state,
@@ -310,10 +313,10 @@ fn the_party_view_fits_every_size_for_1_2_4_and_32_chips() {
             let (state, party) = end_of(which);
             let n = state.world.floors.len();
             let variants = [
-                flags(0, false, false, false, 0),
-                flags(n - 1, false, true, true, n + 8),
-                flags(n / 2, true, true, false, 0),
-                flags(n + 5, false, false, false, 0),
+                flags(0, false, false, false),
+                flags(n - 1, false, true, true),
+                flags(n / 2, true, true, false),
+                flags(n + 5, false, false, false),
             ];
             for &w in &widths {
                 for &h in &heights {
@@ -363,8 +366,8 @@ fn no_party_row_ends_in_a_right_side_border() {
         for s in [state, &right] {
             for (w, h) in TABLE_SIZES {
                 for f in [
-                    flags(0, false, false, false, 0),
-                    flags(n - 1, false, true, true, 0),
+                    flags(0, false, false, false),
+                    flags(n - 1, false, true, true),
                 ] {
                     let lines = tc(|| render_saga(s, &party, f, (w, h), 3));
                     for (i, line) in lines.iter().enumerate() {
@@ -420,34 +423,22 @@ fn the_roster_shows_every_member_and_the_chips_without_a_floor() {
     tc(|| {
         let (state, party) = end_of("32");
         assert_eq!(state.party.len(), 32);
-        let lines = render_saga(state, party, flags(0, false, false, false, 32), (80, 23), 0);
+        let lines = render_saga(state, party, flags(0, false, false, false), (80, 23), 0);
         let (_, roster) = roster_of(&lines).expect("a roster at 80x23");
         assert_eq!(roster.matches(hero).count(), 32, "{roster}");
         assert!(roster.ends_with(" 1/6"), "{roster}");
-        let lines = render_saga(
-            state,
-            party,
-            flags(0, false, false, false, 32),
-            (140, 39),
-            0,
-        );
+        let lines = render_saga(state, party, flags(0, false, false, false), (140, 39), 0);
         let (_, roster) = roster_of(&lines).expect("a roster at 140x39");
         assert!(roster.ends_with(" page 1 of 3"), "{roster}");
         assert!(!roster.contains("without"), "{roster}");
         // One page holds them all at 200x59: no roster with no extra chips.
-        let lines = render_saga(
-            state,
-            party,
-            flags(0, false, false, false, 32),
-            (200, 59),
-            0,
-        );
+        let lines = render_saga(state, party, flags(0, false, false, false), (200, 59), 0);
         assert!(roster_of(&lines).is_none());
 
         let (state, party) = end_of("40");
         assert_eq!(state.world.floors.len(), 32, "a world keeps 32 floors");
         for (w, h) in [(140u16, 39u16), (200, 59)] {
-            let lines = render_saga(state, party, flags(0, false, false, false, 40), (w, h), 0);
+            let lines = render_saga(state, party, flags(0, false, false, false), (w, h), 0);
             let (_, roster) = roster_of(&lines).expect("a roster for the chips without a floor");
             assert_eq!(roster.matches(hero).count(), 32, "{roster}");
             assert!(
@@ -455,13 +446,13 @@ fn the_roster_shows_every_member_and_the_chips_without_a_floor() {
                 "{w}x{h}: {roster}"
             );
         }
-        let lines = render_saga(state, party, flags(0, false, false, false, 40), (80, 23), 0);
+        let lines = render_saga(state, party, flags(0, false, false, false), (80, 23), 0);
         let (_, roster) = roster_of(&lines).expect("a roster at 80x23");
         assert!(roster.contains("+8 chips"), "{roster}");
         // The member's glyphs: the focused one on its hue, the page's
         // bright, the others dim.
         let (state, party) = end_of("32");
-        let lines = render_saga(state, party, flags(7, false, false, false, 0), (80, 23), 0);
+        let lines = render_saga(state, party, flags(7, false, false, false), (80, 23), 0);
         let (row, _) = roster_of(&lines).unwrap();
         let glyphs: Vec<Style> = cells(&lines[row])
             .into_iter()
@@ -506,13 +497,7 @@ fn focus_moves_the_page() {
     let (state, party) = end_of("32");
     tc(|| {
         let tags = |focus| {
-            let lines = render_saga(
-                state,
-                party,
-                flags(focus, false, false, false, 0),
-                (80, 23),
-                0,
-            );
+            let lines = render_saga(state, party, flags(focus, false, false, false), (80, 23), 0);
             hud_tags(&lines)
         };
         let names = |a: usize, b: usize| (a..=b).map(|i| format!("F{i}")).collect::<Vec<_>>();
@@ -521,7 +506,7 @@ fn focus_moves_the_page() {
         assert_eq!(tags(6), names(7, 12));
         assert_eq!(tags(31), names(31, 32));
         assert_eq!(tags(99), names(31, 32), "past the end is the last floor");
-        let lines = render_saga(state, party, flags(8, false, false, false, 0), (80, 23), 0);
+        let lines = render_saga(state, party, flags(8, false, false, false), (80, 23), 0);
         let (_, roster) = roster_of(&lines).unwrap();
         assert!(roster.ends_with(" 2/6"), "{roster}");
         // The status row names the focused hero, and from 140 columns it
@@ -529,7 +514,7 @@ fn focus_moves_the_page() {
         let status = text(&lines).pop().unwrap();
         let name = &state.party[8].hero.name;
         assert!(status.contains(name.as_str()), "{status} names {name}");
-        let wide = render_saga(state, party, flags(8, false, false, false, 0), (140, 39), 0);
+        let wide = render_saga(state, party, flags(8, false, false, false), (140, 39), 0);
         let status = text(&wide).pop().unwrap();
         assert!(status.contains(name.as_str()), "{status} names {name}");
         assert!(status.contains("[ ] focus  z zoom"), "{status}");
@@ -554,7 +539,7 @@ fn zoom_draws_the_focused_floor_like_today() {
     tc(|| {
         for focus in 0..4 {
             for (w, h) in [(80u16, 23u16), (140, 39)] {
-                let f = flags(focus, true, false, false, 0);
+                let f = flags(focus, true, false, false);
                 let got = render_saga(state, party, f, (w, h), 5);
                 let seat = floor_seat(state, focus);
                 assert_eq!(
@@ -578,7 +563,7 @@ fn zoom_draws_the_focused_floor_like_today() {
             }
         }
         // The lead's floor zoomed is the lead's single-floor frame.
-        let f = flags(0, true, true, false, 0);
+        let f = flags(0, true, true, false);
         let got = render_saga(state, party, f, (140, 39), 5);
         let want = render_floor(state, party.lead(state), lead_seat(state), f, (140, 39), 5);
         assert_eq!(frame_hash(&got), frame_hash(&want));
@@ -595,14 +580,12 @@ fn one_floor_ignores_focus_and_zoom() {
     tc(|| {
         for (w, h) in [(80u16, 23u16), (140, 39), (30, 10)] {
             for why in [false, true] {
-                let plain = render_saga(state, party, flags(0, false, why, false, 0), (w, h), 5);
+                let plain = render_saga(state, party, flags(0, false, why, false), (w, h), 5);
                 for focus in [0, 1, 7] {
                     for zoom in [false, true] {
-                        for chips in [0, 1, 40] {
-                            let f = flags(focus, zoom, why, false, chips);
-                            let got = render_saga(state, party, f, (w, h), 5);
-                            assert_eq!(frame_hash(&got), frame_hash(&plain), "{f:?} {w}x{h}");
-                        }
+                        let f = flags(focus, zoom, why, false);
+                        let got = render_saga(state, party, f, (w, h), 5);
+                        assert_eq!(frame_hash(&got), frame_hash(&plain), "{f:?} {w}x{h}");
                     }
                 }
                 let all = text(&plain).join("\n");
@@ -622,7 +605,7 @@ fn one_floor_ignores_focus_and_zoom() {
 fn member_lines_carry_their_floor_tag_and_world_lines_none() {
     let (state, _) = end_of("party4");
     let look = Look::new(state.world.biome, None);
-    let why = flags(0, false, true, false, 0);
+    let why = flags(0, false, true, false);
     let p = &Pack::builtin().palette;
     let beats: Vec<&Beat> = state.chronicle.lines(500).collect();
     let mut tagged = 0;
@@ -675,7 +658,7 @@ fn member_lines_carry_their_floor_tag_and_world_lines_none() {
             let all = text(&render_saga(
                 state,
                 party,
-                flags(1, zoom, false, false, 0),
+                flags(1, zoom, false, false),
                 (140, 39),
                 0,
             ))
@@ -689,7 +672,7 @@ fn member_lines_carry_their_floor_tag_and_world_lines_none() {
         let all = text(&render_saga(
             solo,
             party,
-            flags(0, false, true, false, 0),
+            flags(0, false, true, false),
             (140, 39),
             0,
         ))
@@ -719,7 +702,7 @@ fn no_tile_hud_or_roster_shows_a_fixture_name() {
                 for (w, h) in TABLE_SIZES {
                     for focus in (0..n).step_by(5) {
                         for why in [false, true] {
-                            let f = flags(focus, false, why, false, n + 3);
+                            let f = flags(focus, false, why, false);
                             let all = text(&render_saga(state, &party, f, (w, h), 0)).join("\n");
                             let leak = REAL_NAMES.iter().find(|r| all.contains(*r));
                             match names {
@@ -761,15 +744,7 @@ fn each_tile_shows_its_own_members_quest_label() {
         m.quest.verb = tt_toplike_saga::quest::Verb::VisitSage;
         m.quest.target_label = Some(format!("Label-{i}"));
     }
-    let lines = tc(|| {
-        render_saga(
-            &state,
-            party,
-            flags(0, false, false, false, 0),
-            (200, 59),
-            0,
-        )
-    });
+    let lines = tc(|| render_saga(&state, party, flags(0, false, false, false), (200, 59), 0));
     let all = text(&lines).join("\n");
     for i in 0..4 {
         assert!(all.contains(&format!("visit Label-{i}")), "{all}");
@@ -796,7 +771,7 @@ fn the_core_never_reads_view_state() {
             party.observe(drawn.state());
             if i % 50 == 0 {
                 let k = i / 50;
-                let f = flags(k % 5, k % 3 == 0, k % 2 == 0, false, k % 7);
+                let f = flags(k % 5, k % 3 == 0, k % 2 == 0, false);
                 let lines = render_saga(drawn.state(), &party, f, sizes[k % sizes.len()], k as u64);
                 std::hint::black_box(lines);
                 draws += 1;
@@ -837,7 +812,7 @@ fn party_frames() -> Vec<u64> {
             assert!(saga.state().world.floors.len() >= 4);
             for why in [false, true] {
                 for size in [(80u16, 23u16), (140, 39)] {
-                    let f = flags(1, false, why, false, 0);
+                    let f = flags(1, false, why, false);
                     out.push(frame_hash(&render_saga(saga.state(), &party, f, size, 5)));
                 }
             }
@@ -872,4 +847,39 @@ fn print_party_frames() {
 #[test]
 fn party_frames_are_pinned() {
     assert_eq!(party_frames(), PARTY_GOLDEN.to_vec());
+}
+
+/// The roster's `+N chips without a floor` counts the chips of the stream
+/// the story reads (`SagaState::chips_seen`). Under a replay or an attached
+/// bus the local backend is another box, and nothing of it reaches the view
+/// (the flags carry no chip count, and `run_app` builds them from the focus,
+/// the zoom and "why" alone: `view_state_never_reaches_the_saga_driver` in
+/// `saga_view_tests.rs`). So the four-chip story shows no chips without a
+/// floor, the forty-chip story shows its eight, and a story whose stream
+/// held two chips more than its world kept shows those two.
+///
+/// Seen red on the code before this fix, which took the count from the
+/// local backend's devices: the four-chip story drawn with a local count of
+/// 8 printed `+4 chips without a floor` and a roster row.
+#[test]
+fn the_roster_counts_the_storys_chips_not_the_local_boxs() {
+    tc(|| {
+        let (state, party) = end_of("party4");
+        assert_eq!(state.chips_seen, 4, "the stream held four chips");
+        let lines = render_saga(state, party, flags(0, false, false, false), (140, 39), 0);
+        assert!(roster_of(&lines).is_none(), "no roster on one page");
+        assert!(!text(&lines).join("\n").contains("without a floor"));
+
+        let mut more = state.clone();
+        more.chips_seen = 6;
+        let lines = render_saga(&more, party, flags(0, false, false, false), (140, 39), 0);
+        let (_, roster) = roster_of(&lines).expect("a roster for the chips without a floor");
+        assert!(roster.contains("+2 chips without a floor"), "{roster}");
+
+        let (state, party) = end_of("40");
+        assert_eq!((state.chips_seen, state.world.chips.len()), (40, 32));
+        let lines = render_saga(state, party, flags(0, false, false, false), (140, 39), 0);
+        let (_, roster) = roster_of(&lines).expect("a roster");
+        assert!(roster.contains("+8 chips without a floor"), "{roster}");
+    });
 }

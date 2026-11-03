@@ -210,7 +210,7 @@ pub(super) fn render_party(
     let n = state.world.floors.len();
     let focus = flags.focus.min(n.checked_sub(1)?);
     let banner = usize::from(flags.stopped);
-    let extra = flags.chips.saturating_sub(state.world.chips.len());
+    let extra = state.chips_seen.saturating_sub(state.world.chips.len());
     let h = h.checked_sub(banner)?;
     // Chips without a floor need the roster row whatever the page count.
     let grid = if extra > 0 {
@@ -448,7 +448,7 @@ fn roster_row(state: &SagaState, flags: SagaFlags, grid: &Grid, page: usize, w: 
         row.put(glyph, style).push(" ", Style::default());
     }
     let pages = grid.pages(n);
-    let extra = flags.chips.saturating_sub(state.world.chips.len());
+    let extra = state.chips_seen.saturating_sub(state.world.chips.len());
     // Each segment goes whole or not at all, the chips first.
     if extra > 0 {
         let long = format!(" +{extra} chips without a floor");

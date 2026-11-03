@@ -198,8 +198,10 @@ pub const EXPLAIN_TEXT: &[&str] = &[
 ];
 
 /// What the view draws besides the state. None of it reaches the core: the
-/// focus, the zoom and the chip count are the view's own (the party
-/// addendum, section 4), so no key here can change a story or a digest.
+/// focus and the zoom are the view's own (the party addendum, section 4),
+/// so no key here can change a story or a digest. The chips without a
+/// floor come from the state ([`SagaState::chips_seen`]), the chips of the
+/// stream the story reads, never from the local backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SagaFlags {
     /// The driver has stopped (`Published::stopped`): show the banner.
@@ -214,10 +216,6 @@ pub struct SagaFlags {
     /// Draw the focused floor alone, as the view draws a world of one floor
     /// (the `z` key). A world with one floor ignores it.
     pub zoom: bool,
-    /// The chips the app's backend lists, or 0 when it does not know. A
-    /// world keeps at most `MAX_FLOORS` (32) floors, so with more chips the
-    /// roster ends with `+N chips without a floor`.
-    pub chips: usize,
 }
 
 /// The key that moves the party view's focus to the previous floor, in

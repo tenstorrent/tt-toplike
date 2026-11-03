@@ -526,3 +526,27 @@ fn generated_mode_leaves_no_fixture_name_anywhere_in_a_party() {
         assert!(real.contains("model:demo-sage"), "{what}: no real cause");
     }
 }
+
+/// `SagaState::chips_seen` counts the chips the stream has shown, capped at
+/// `MAX_CHIPS` (64): four for the four-chip log, forty for a forty-chip
+/// stream whose world keeps 32 floors, 64 for seventy chips. Views read it
+/// to say how many chips have no floor (party Task A.7, fix round 1). The
+/// digest does not read it: the digest goldens in `determinism.rs` and the
+/// solo story pins did not move when it was added.
+#[test]
+fn chips_seen_counts_the_streams_chips() {
+    let mut s = saga(NameMode::Real);
+    assert_eq!(s.state().chips_seen, 0, "no chip before any record");
+    for r in party::records(4, 60) {
+        s.feed(&r);
+    }
+    assert_eq!(s.state().chips_seen, 4);
+    for (chips, want, floors) in [(40u8, 40usize, 32usize), (70, 64, 32)] {
+        let mut s = saga(NameMode::Real);
+        for r in party::records_with_extra_chips(chips, 60) {
+            s.feed(&r);
+        }
+        assert_eq!(s.state().chips_seen, want, "{chips} chips");
+        assert_eq!(s.state().world.chips.len(), floors, "{chips} chips");
+    }
+}

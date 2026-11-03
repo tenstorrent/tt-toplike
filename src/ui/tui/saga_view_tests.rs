@@ -115,7 +115,6 @@ const PLAIN: SagaFlags = SagaFlags {
     why: false,
     focus: 0,
     zoom: false,
-    chips: 0,
 };
 
 /// The text of each line, spans joined.
