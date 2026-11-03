@@ -1583,7 +1583,7 @@ both reviews.
   vertical stroke and no stroke to the right (verticals, right corners, right-edge joints),
   `▐`, `▕` and ASCII `|`. Nothing else changes. The first pass had no corners and no `|`, and the
   sweep read the same list, so it could not see them (re-review SF1); the guard, the sweeps and
-  a test that the list holds every glyph AGENTS.md names now share the one constant. 418
+  a test that the list holds every glyph AGENTS.md names now share a single constant. 418
   base-grid sizes differ from 0.15.3, only in their last column; one backdrop pin was retaken.
 
 ### Arcade layout presets and `{` `}` (Nov 2 2026, branch `arcade-presets`)

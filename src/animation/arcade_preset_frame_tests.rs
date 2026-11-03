@@ -63,7 +63,7 @@ fn columns(line: &Line<'static>) -> Vec<char> {
 }
 
 /// `ch` is one of the right-edge border glyphs the arcade's guard clears
-/// ([`RIGHT_EDGE_GLYPHS`], the one list both use).
+/// ([`RIGHT_EDGE_GLYPHS`], which the guard reads too).
 fn is_right_border(ch: char) -> bool {
     RIGHT_EDGE_GLYPHS.contains(&ch)
 }
