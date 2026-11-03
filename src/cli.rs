@@ -187,7 +187,7 @@ pub struct Cli {
             ", the ",
             crate::die3d_display_name!(),
             "), saga (a hero's quest through a dungeon built from the machine's ",
-            "signals, with a chronicle that names each line's cause; also `S` in-app)"
+            "signals, with a chronicle that says what set each line off; also `S` in-app)"
         )
     )]
     pub mode: Option<VisualizationMode>,

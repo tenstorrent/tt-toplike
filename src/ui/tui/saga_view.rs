@@ -136,7 +136,7 @@ pub const MODE_NAME: &str = "saga";
 
 /// Saga's own rows in the Help overlay, as `(key, what it does)` cells.
 pub const HELP_KEYS: &[&[(&str, &str)]] = &[
-    &[("y", "why: each line's cause"), ("S Esc", "leave")],
+    &[("y", "why: what set each line off"), ("S Esc", "leave")],
     &[("/saga", "open from the command bar")],
 ];
 
@@ -1403,13 +1403,7 @@ fn beat_rows(
         out.push(row);
     }
     if flags.why {
-        let c = &beat.cause;
-        let signal = if c.signal.is_empty() {
-            "no signal"
-        } else {
-            c.signal.as_str()
-        };
-        let why = format!("why: {} · {} · #{}", c.entity.as_str(), signal, c.ordinal);
+        let why = super::saga_why::why_line(&beat.cause);
         // Under the beat's text, its continuation lines two columns in.
         let lines = wrap(&why, text_w - indent, text_w.saturating_sub(indent + 2));
         for (i, text) in lines.iter().enumerate() {
@@ -1809,7 +1803,7 @@ pub fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'static>> {
             dim,
         )]),
         line(vec![(
-            "y    each line's cause: entity · signal · #record".to_string(),
+            "y    what set each line off, in words".to_string(),
             dim,
         )]),
         line(vec![

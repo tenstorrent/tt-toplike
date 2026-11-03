@@ -49,6 +49,7 @@ mod hivemind_view;
 pub(crate) mod inference_bus;
 pub(crate) mod inference_panel;
 mod saga_view;
+mod saga_why;
 
 use crate::animation::{
     ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis, TrainView,
@@ -12542,7 +12543,7 @@ mod host_default_screen_tests {
         };
         // Saga's help lists its keys, and every other help lists `S`.
         let saga = text(DisplayMode::Saga);
-        assert!(saga.contains("why: each line's cause"), "{saga}");
+        assert!(saga.contains("why: what set each line off"), "{saga}");
         assert!(text(DisplayMode::Insights).contains("Saga"));
         let in_view = text(DisplayMode::Die3d);
         for c in crate::animation::die3d::commands::COMMANDS {

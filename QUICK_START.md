@@ -1,6 +1,6 @@
 # tt-toplike Quick Start
 
-**Version**: 0.16.2
+**Version**: 0.16.3
 **Last Updated**: November 3, 2026
 
 ---
@@ -110,7 +110,7 @@ tt-toplike --mode training    # or press t in any mode (aliases: train, tt-train
 tt-toplike --mode saga    # or press S in any mode
 ```
 - A hero quests through a dungeon built from the box's own signals. Each chip is a floor, and a new world begins when a model becomes ready, a chip resets, a model goes away, a training run starts or the box has been quiet for a season
-- The chronicle tells what happens. `y` shows each line's cause: entity, signal and place in the stream
+- The chronicle tells what happens. `y` says in a sentence what set each line off
 - `S` or `Esc` leaves. Not in the `v` cycle or the rotation. `[saga]` in `config.toml` sets `enabled`, `names` and `season_minutes`. See [docs/saga.md](docs/saga.md)
 
 ### Rotate every view (`--rotate` / `R`)

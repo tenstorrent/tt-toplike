@@ -661,8 +661,8 @@ fn the_chronicle_shows_whole_beats() {
 
 // ---- Why ---------------------------------------------------------------------
 
-/// "why" puts each beat's cause under it: the entity, the signal and the
-/// stream ordinal. Without it no cause is shown.
+/// "why" puts each beat's cause under it, in plain words (`saga_why`).
+/// Without it no cause is shown.
 #[test]
 fn the_why_toggle_shows_each_beats_cause() {
     let state = busy_state();
@@ -672,13 +672,13 @@ fn the_why_toggle_shows_each_beats_cause() {
         why: true,
     };
     let on = text(&tc(|| draw(&state, why, (140, 39), 0))).join("\n");
-    let cause = format!(
-        "{} · {} · #{}",
-        newest.cause.entity.as_str(),
-        newest.cause.signal,
-        newest.cause.ordinal
-    );
+    // The line wraps at the pane's width: its start is what must be on screen.
+    let cause: String = super::super::saga_why::why_line(&newest.cause)
+        .chars()
+        .take(32)
+        .collect();
     assert!(on.contains(&cause), "missing {cause:?} in\n{on}");
+    assert!(!on.contains(" · tt_"), "the raw form is still shown:\n{on}");
     let off = text(&tc(|| draw(&state, PLAIN, (140, 39), 0))).join("\n");
     assert!(!off.contains(&cause), "why is off:\n{off}");
     assert!(!off.contains("why: "), "why is off:\n{off}");
@@ -1266,12 +1266,12 @@ fn golden_frames() -> Vec<u64> {
 const GOLDEN: [u64; 8] = [
     11633304791087981713,
     16818141526951645005,
-    4319815886086175870,
-    12227399373875787040,
+    15653798518506681009,
+    7610291088664914206,
     7550816615464738859,
     2677119523348627770,
-    17663457655029705767,
-    4858674964406228380,
+    13973570666212575837,
+    12008515370544615678,
 ];
 
 /// Prints the hashes for [`GOLDEN`]. Run with

@@ -1,3 +1,12 @@
+tt-toplike (0.16.3) noble; urgency=medium
+
+  * Saga's why line (the y key) is a sentence instead of the raw cause: "the
+    model mock-llama came online, which woke the hero (record 379)". When
+    nothing asked for the hero's move, it says so. Only the view changed; the
+    story and its digests are the same.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 14:00:00 -0800
+
 tt-toplike (0.16.2) noble; urgency=medium
 
   * tmux no longer forces 256 colours. COLORTERM=truecolor (or 24bit) turns

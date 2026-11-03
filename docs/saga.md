@@ -113,9 +113,12 @@ to another floor.
 The chronicle keeps the last 500 lines. Each line starts with the sweep it was written at (`t42`)
 and a mark for its tone: `·` calm in teal, `▲` tense in orange, `★` triumphant in yellow. The
 names of heroes, places, sages and monsters are bold. Older lines are drawn a little dimmer.
-Press `y` to show each line's cause under it: the entity, the signal, and the record's position in
-the stream (`why: chip:0000:01:00.0 · tt_asic_temperature_celsius · #1234`). A hero resting with
-nothing to do has no signal behind its rest, and its line says `no signal`.
+Press `y` to show what set each line off, in a sentence under it: `why: the model mock-llama came
+online, which woke the hero (record 379)`. The hero acts on the signal that was in front of it when
+it chose its next goal, so a wander can trace back to a model coming online. When nothing asked for
+the hero's next move, the line says so: `why: nothing asked for this, so the hero follows its own
+curiosity near chip 0000:01:00.0`. The record number is the signal's place in the stream the core
+was fed. Signals the view has no words for are shown by name (`reported a new fan rpm`).
 
 ## The same records give the same saga
 
@@ -169,7 +172,7 @@ backend's readings are estimates. A saga fed by a replayed log writes "(replay)"
 | Key | What it does |
 |---|---|
 | `S` | Opens Saga from any view. In Saga, goes back to the view you came from. |
-| `y` | Shows or hides each chronicle line's cause. |
+| `y` | Shows or hides what set each chronicle line off. |
 | `Esc` | Leaves Saga for the view you came from. |
 | `/saga`, `/mode saga` | Opens Saga from the command bar. |
 | `l`, `?`, `!` | The legend (every map glyph, the light and the chronicle's marks), the help and the explain text, as in every view. |
