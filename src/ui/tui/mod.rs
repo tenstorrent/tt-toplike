@@ -7966,8 +7966,9 @@ fn bar_color(frac: f32) -> ratatui::style::Color {
 /// headless host's model shows; otherwise, on Linux, from a matching
 /// `serving_metrics` entry (port / health / model / tok-s).
 /// The process panel's note before the first process scan has landed. It
-/// travels in the `remote_note` slot, shows as the empty-state line instead
-/// of "No processes ...", and is not added to the header.
+/// travels in the `remote_note` slot and is not added to the header. With no
+/// rows, the panel shows it as the empty-state line, so the panel does not
+/// say "No processes ..." before any scan has run.
 const SCANNING_NOTE: &str = "scanning processes";
 
 fn render_process_panel(

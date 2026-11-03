@@ -34,7 +34,7 @@
 //! * When the scan saw only the `fd` links (no `pids` files), it could not see
 //!   other users' processes. tt-smi then fills those in: a pid tt-smi lists
 //!   and `/proc` did not see is added with tt-smi's device and command line.
-//! * A process seen by both is one holder. Its devices are the ones `/proc`
+//! * A process seen by both is a single holder. Its devices are those `/proc`
 //!   saw; tt-smi only fills a name `/proc` did not have.
 //! * Nothing `/proc` reported is removed because tt-smi arrived or does not
 //!   list it. A holder leaves when a later `/proc` scan no longer sees it.

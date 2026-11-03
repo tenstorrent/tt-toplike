@@ -846,8 +846,8 @@ mod tests {
         ] {
             assert!(!body.contains(banned), "run_app mentions `{banned}`");
         }
-        // No scan on this thread at all, not even at start-up: the first
-        // frame does not wait for one. The one scanner is built on the
+        // No scan on this thread at all, start-up included: the first
+        // frame does not wait for one. The single scanner is built on the
         // worker (`spawn_with`), because building it lists every process.
         assert_eq!(
             body.matches(".scan(").count(),

@@ -1786,7 +1786,7 @@ mod slow_tt_smi_tests {
     use std::time::Instant;
 
     /// Upper bound for waiting on an event; each wait ends as soon as the
-    /// event happens. A deadlock guard only, not a timing assertion.
+    /// event happens. It guards against a deadlock and asserts no timing.
     const DEADLINE: Duration = Duration::from_secs(20);
 
     fn backend_with_one_chip() -> HybridBackend {
@@ -1845,7 +1845,7 @@ mod slow_tt_smi_tests {
         let (script, gate) = fake_tt_smi(td.path(), json);
 
         // Start the reader on a helper thread, so a reader that waited for
-        // tt-smi fails this test on the deadline instead of hanging it.
+        // tt-smi fails this test at the deadline and does not hang it.
         let mut b = backend_with_one_chip();
         let (tx, rx) = mpsc::channel();
         let path = script.to_string_lossy().into_owned();
