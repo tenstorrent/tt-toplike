@@ -31,9 +31,11 @@ pub mod observe;
 pub mod pack;
 pub mod quest;
 pub mod rng;
+pub mod saga;
 pub mod seed;
 pub mod stats;
 pub mod topology;
 pub mod world;
 
 pub use event::{Biome, EndWhy, SagaEvent};
+pub use saga::{Label, Saga, SagaConfig, SagaState};

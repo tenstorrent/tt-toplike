@@ -311,6 +311,19 @@ impl Chronicle {
             .expect("a beat was just pushed")
     }
 
+    /// Appends a space and `mark` to the newest beat's text. The front door
+    /// uses it once, to write "(mock)" or "(replay)" on a saga's first line
+    /// (spec 3.9). `mark` is inserted as given, so it must hold no real
+    /// name. Does nothing when the chronicle is empty.
+    pub fn append_to_last(&mut self, mark: &str) {
+        if let Some(last) = self.ring.back_mut() {
+            let mut beat = Beat::clone(last);
+            beat.text.push(' ');
+            beat.text.push_str(mark);
+            *last = Arc::new(beat);
+        }
+    }
+
     /// The last `n` beats (all of them when there are fewer), oldest first.
     pub fn lines(&self, n: usize) -> impl Iterator<Item = &Beat> {
         let skip = self.ring.len().saturating_sub(n);
