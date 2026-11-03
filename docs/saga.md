@@ -23,12 +23,13 @@ Each chip is one floor of the dungeon.
 * **Other chips get a default floor.** The bus carries no tile layout for Wormhole or Grayskull, so
   every chip that is not Blackhole gets a grid of 16 by 10 tiles with two vaults on each side and
   two portals.
-* **The seed places the rooms.** At a world's birth the saga hashes the lowest byte of the last 64
-  sample values it has seen (each value's 64-bit float bits) into a 64-bit seed. The design
-  intends a quiet machine's wobble in those bits to give every run a different world. See the
-  first item under "Limits": today that does not happen. The seed decides where rooms and
-  corridors go, and each chip's key is mixed in, so two chips of the same shape get different
-  floors.
+* **The seed places the rooms.** At a world's birth the saga hashes the last 64 sample values it
+  has seen, each as its whole 64-bit float pattern, into a 64-bit seed. Readings vary in
+  different bits: a temperature or power reading (a 32-bit float widened to 64 bits) in the middle
+  of the pattern, a counter or clock in its high bits, a native 64-bit rate in its low bits.
+  Keeping every bit lets any of them change the world, so two runs on one box start with
+  different worlds. The seed decides where rooms and corridors go, and each chip's key is mixed
+  in, so two chips of the same shape get different floors.
 * **Every room is reachable.** A spanning tree of corridors joins the rooms, and a few extra
   corridors add loops. The exit is the room farthest from the gate.
 
@@ -157,13 +158,6 @@ section.
 
 ## Limits
 
-* **Fresh starts repeat their first world.** The backend writes each reading as a 32-bit float
-  widened to 64 bits, and the low byte of such a value is always zero. In a 12-second `--headless
-  --mock` recording all 7,320 float values had a zero low byte. So the seed pool sees zeros for
-  every float reading and changes only with whole-number readings. Two separate mock recordings
-  with different readings gave the same digest, `0x1ec90317adb4fa0a`. Real hardware is likely to
-  behave the same way. The fix belongs in the saga core (take the low bits of the 32-bit value)
-  and changes the pinned digests.
 * No person has run Saga on real Tenstorrent hardware yet. It has run on the mock backend and on
   recorded fixtures.
 * Generated-name aliasing was checked on the busy fixture only.

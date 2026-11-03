@@ -151,7 +151,7 @@
 //! | undrained events | [`MAX_PENDING_EVENTS`] (4096); the oldest is dropped and counted in [`Saga::dropped_events`] | here |
 //! | chronicle lines | [`CAPACITY`] (500) | [`crate::chronicle`] |
 //! | generated names | [`crate::chronicle::ALIAS_LIMIT`] (256) | [`crate::chronicle`] |
-//! | seed pool | 64 bytes | [`crate::seed`] |
+//! | seed pool | [`crate::seed::RING_LEN`] (64) values, 512 bytes | [`crate::seed`] |
 //! | one floor | [`crate::topology::MAX_COLS`] x [`crate::topology::MAX_ROWS`] (120 x 60) cells | [`crate::topology`] |
 //! | the hero's path | one floor's cells | [`crate::hero`] |
 //!

@@ -1,10 +1,22 @@
-//! The world seed, taken from the machine's own jitter.
+//! The world seed, taken from the machine's own readings.
 //!
-//! The low bits of a measured float (a temperature, a power reading) are
-//! noise: they change from one reading to the next and carry no meaning. A
-//! [`SeedPool`] collects the lowest byte of each sample into a small ring and
-//! hashes the ring into 64-bit seeds. Two machines, or two runs, give
-//! different worlds. A replay of the same observations gives the same world.
+//! A [`SeedPool`] keeps the full 64-bit pattern (`f64::to_bits`) of each of
+//! the last 64 sample values in a ring, and hashes the ring into 64-bit
+//! seeds. Two machines, or two runs, give different worlds. A replay of the
+//! same observations gives the same world.
+//!
+//! # Why the whole value
+//!
+//! The readings that vary from one run to the next do so in different bits.
+//! A temperature or power reading is an `f32` widened to `f64`, so the low
+//! 29 bits of its `f64` pattern are always zero and its noise sits in bits
+//! 29 to 51. An integer reading (a counter, a heartbeat, a clock) varies in
+//! the high mantissa bits, and its low eight bits are zero below 2^45. Only
+//! a native `f64` (the PCIe byte rates on real hardware) varies in the low
+//! bits. Keeping the whole word keeps every bit that can change. An earlier
+//! version kept only the lowest byte, which was zero for every widened `f32`
+//! and every small integer, so a fresh start repeated its first world
+//! (ledger ruling R26, final review finding I1).
 //!
 //! The pool sees only [`Observation`]s. An observation carries no sequence
 //! number and no timestamp, so neither can reach the seed. Events and ticks
@@ -15,8 +27,8 @@
 
 use crate::observe::Observation;
 
-/// Number of bytes the ring holds.
-const RING_LEN: usize = 64;
+/// Number of values (64-bit words) the ring holds.
+pub const RING_LEN: usize = 64;
 
 /// FNV-1a 64-bit offset basis.
 const FNV_OFFSET: u64 = 14_695_981_039_346_656_037;
@@ -45,17 +57,17 @@ pub(crate) fn fnv1a64_extend(hash: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
-/// A ring of the last 64 low bytes seen in samples.
+/// A ring of the bit patterns of the last 64 sample values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeedPool {
-    /// The ring. Once 64 samples have arrived it holds the 64 newest bytes.
-    /// Before that, the unused slots are zero.
-    ring: [u8; RING_LEN],
-    /// Where the next byte goes. It is also where the oldest byte sits, so
+    /// The ring of `f64::to_bits` words. Once 64 samples have arrived it
+    /// holds the 64 newest. Before that, the unused slots are zero.
+    ring: [u64; RING_LEN],
+    /// Where the next word goes. It is also where the oldest word sits, so
     /// reading the ring from `next` onward goes oldest to newest.
     next: usize,
     /// Sample observations pushed so far. It keeps counting after the ring
-    /// is full, so `pushed() >= 64` means every slot holds a real byte.
+    /// is full, so `pushed() >= 64` means every slot holds a real value.
     pushed: u64,
 }
 
@@ -66,7 +78,7 @@ impl Default for SeedPool {
 }
 
 impl SeedPool {
-    /// An empty pool: all zero bytes.
+    /// An empty pool: all zero words.
     pub fn new() -> SeedPool {
         SeedPool {
             ring: [0; RING_LEN],
@@ -75,14 +87,13 @@ impl SeedPool {
         }
     }
 
-    /// Takes in one observation. A sample contributes the low 8 bits of its
-    /// value's `f64::to_bits`. The fold replaces the oldest byte in the ring
-    /// with the new one, so changing any bit of a byte that is still in the
-    /// ring changes the ring. Events and ticks are ignored.
+    /// Takes in one observation. A sample's value goes into the ring whole,
+    /// as its `f64::to_bits`, in place of the oldest word, so changing any
+    /// bit of a value that is still in the ring changes the ring. Events and
+    /// ticks are ignored.
     pub fn push(&mut self, o: &Observation) {
         if let Observation::Sample { value, .. } = o {
-            // Truncation to the low byte is the point.
-            self.ring[self.next] = (value.to_bits() & 0xff) as u8;
+            self.ring[self.next] = value.to_bits();
             self.next = (self.next + 1) % RING_LEN;
             self.pushed += 1;
         }
@@ -96,17 +107,18 @@ impl SeedPool {
         self.pushed
     }
 
-    /// The seed for `ordinal`: FNV-1a 64 over the 64 ring bytes, oldest to
-    /// newest, then the 8 bytes of `ordinal` in little-endian order. Distinct
-    /// ordinals give distinct seeds from the same pool.
+    /// The seed for `ordinal`: FNV-1a 64 over the 64 ring words, oldest to
+    /// newest, each as 8 bytes little-endian (512 bytes), then the 8 bytes of
+    /// `ordinal` little-endian. Distinct ordinals almost always give
+    /// distinct seeds from the same pool.
     pub fn draw(&self, ordinal: u64) -> u64 {
-        let mut bytes = [0u8; RING_LEN + 8];
         // Oldest first: from `next` to the end, then from the start to `next`.
-        let tail = RING_LEN - self.next;
-        bytes[..tail].copy_from_slice(&self.ring[self.next..]);
-        bytes[tail..RING_LEN].copy_from_slice(&self.ring[..self.next]);
-        bytes[RING_LEN..].copy_from_slice(&ordinal.to_le_bytes());
-        fnv1a64(&bytes)
+        let oldest_first = self.ring[self.next..].iter().chain(&self.ring[..self.next]);
+        let mut hash = fnv1a64(&[]);
+        for word in oldest_first {
+            hash = fnv1a64_extend(hash, &word.to_le_bytes());
+        }
+        fnv1a64_extend(hash, &ordinal.to_le_bytes())
     }
 }
 

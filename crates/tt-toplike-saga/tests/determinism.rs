@@ -164,6 +164,60 @@ fn records_a_tui_adds_about_itself_do_not_change_the_digest() {
     }
 }
 
+/// The first world's seed, and the index of the record at which it was
+/// born, for `records`.
+fn first_world(records: &[Record]) -> (u64, usize) {
+    let mut saga = Saga::new(config(NameMode::Real));
+    for (i, r) in records.iter().enumerate() {
+        saga.feed(r);
+        if saga.state().world.id == 1 {
+            return (saga.state().world.seed, i);
+        }
+    }
+    panic!("no world was born");
+}
+
+/// The smallest change a real temperature reading can make, the lowest
+/// mantissa bit of its `f32`, changes the first world. Every float the
+/// backend sends is an `f32` widened to `f64`, so the low byte of its `f64`
+/// bits is always 0; before the final fix wave the seed ring kept only that
+/// byte, and this failed (finding I1).
+#[test]
+fn one_temperature_bit_changes_the_first_world() {
+    use tt_toplike_bus::{Payload, Value};
+    let records = support::read_fixture("quiet.jsonl");
+    let (seed, born_at) = first_world(&records);
+    // The newest temperature reading at or before the birth. The birth
+    // comes from a pacemaker sweep's tick, which follows that sweep's own
+    // samples, so its temperature is still in the seed ring when the seed
+    // is drawn. (An older one may not be: the mock sends about 90 DRAM
+    // samples between two sweeps.)
+    let (idx, pos) = (0..=born_at)
+        .rev()
+        .find_map(|i| match &records[i].payload {
+            Payload::Sweep(s) => s
+                .signals
+                .iter()
+                .position(|n| n == "tt_asic_temperature_celsius")
+                .map(|p| (i, p)),
+            _ => None,
+        })
+        .expect("a temperature before the first world");
+    let mut changed = records.clone();
+    let Payload::Sweep(s) = &mut changed[idx].payload else {
+        unreachable!()
+    };
+    let Value::F64(x) = s.values[pos] else {
+        panic!("a temperature is a float")
+    };
+    let narrow = x as f32;
+    assert_eq!(f64::from(narrow), x, "the recorded temperature is an f32");
+    s.values[pos] = Value::F64(f64::from(f32::from_bits(narrow.to_bits() ^ 1)));
+    let (changed_seed, changed_born_at) = first_world(&changed);
+    assert_eq!(born_at, changed_born_at);
+    assert_ne!(seed, changed_seed, "a changed reading gave the same world");
+}
+
 /// Golden digests for the three fixtures, one per name mode.
 ///
 /// These pin the current behaviour: the seed rule, the maze, the hero's walk,
@@ -175,9 +229,9 @@ fn records_a_tui_adds_about_itself_do_not_change_the_digest() {
 #[test]
 fn a_snapshot_of_the_digests_matches() {
     let golden: [(&str, u64, u64); 3] = [
-        ("quiet.jsonl", 0x631b150c250d83cf, 0x631b150c250d83cf),
+        ("quiet.jsonl", 0x42ae3da4810092ce, 0x42ae3da4810092ce),
         ("bringup.jsonl", 0xffa0c7d46fb3aae2, 0xffa0c7d46fb3aae2),
-        ("busy.jsonl", 0x04fb624bd019382f, 0x3bb88b64147f8031),
+        ("busy.jsonl", 0xc704fe05f6f97267, 0xc49371dd78c6084b),
     ];
     let mut actual = Vec::new();
     for (name, _, _) in golden {

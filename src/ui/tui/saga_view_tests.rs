@@ -767,15 +767,18 @@ fn golden_frames() -> Vec<u64> {
 /// Re-pinned in the final fix wave when the feed stopped giving `ViewChanged`
 /// events an ordinal (finding C1). `busy.jsonl` holds one, at record 1,506,
 /// before both cut points, so every later beat cause and world seed moved.
+/// Re-pinned again when the seed ring began to keep each value's whole
+/// 64-bit pattern (finding I1): every world seed in the log changed, so
+/// every map did.
 const GOLDEN: [u64; 8] = [
-    991252112290121886,
-    7444727144124849148,
-    11796575328698881339,
-    2946838148291251047,
-    16411108666189216491,
-    8860606528844513835,
-    4329748885091748084,
-    12498724061817311013,
+    8029446072024347574,
+    17472748317613514588,
+    8065956098203294413,
+    293174861959012860,
+    4169743028765735373,
+    4169355536074387099,
+    12205625050331638223,
+    3169125044469354670,
 ];
 
 /// Prints the hashes for [`GOLDEN`]. Run with

@@ -271,7 +271,7 @@ tt-toplike-tui --bus-attach /tmp/tt-toplike-$UID/replay.sock    # a TUI that rea
 
 Press `S` in any view, or start with `tt-toplike --mode saga`. A hero quests through a dungeon
 built from this box's own signals: each chip is a floor, a Blackhole floor follows the chip's
-tile grid, and the seed comes from the low bits of the readings. A model becoming ready, a reset,
+tile grid, and the seed comes from the readings themselves. A model becoming ready, a reset,
 a model going away, a training run or a quiet season ends a world, and the next one has a new
 maze. A chronicle tells what happens, and `y` shows the signal behind each line.
 
