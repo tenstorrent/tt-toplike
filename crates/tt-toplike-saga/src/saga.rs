@@ -242,9 +242,10 @@
 //! backend's chips first is left for a later phase (final review finding
 //! M4).
 //!
-//! The entities the saga holds at once are at most 64 kept chips, 64 ready
-//! models and 32 world chips that need not be kept chips: 160, under the
-//! spec's 500 (spec 9). The chips a ready model named are kept with it, so
+//! The entities the saga holds at once are at most 64 kept chips and 64
+//! ready models: 128, under the spec's 500 (spec 9). A world's chips are
+//! kept chips (or the `chip:none` placeholder when no chip is kept), so
+//! they add none. The chips a ready model named are kept with it, so
 //! that a later world can place its sage. A named key that is a kept chip
 //! adds no entity. Every other named key goes into one set shared by all
 //! ready models, which holds at most [`MAX_CHIPS`] keys (ledger ruling
@@ -252,7 +253,7 @@
 //! room. A later key is read but not kept, so a model that names it has no
 //! sage on that chip's floor, even if the chip is kept later. A key leaves
 //! the set when no ready model names it any more. So the saga holds at
-//! most 160 + 64 = 224 entity keys, and 256 entities with the 32 heroes.
+//! most 128 + 64 = 192 entity keys, and 224 entities with the 32 heroes.
 //!
 //! **Cost of one record.** At most one world is born per record: an event
 //! births at most once, and a sweep's samples can start one training run,

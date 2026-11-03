@@ -2143,7 +2143,7 @@ rulings (R1 to R28) that amended the plan, then a final whole-branch review and 
 * 0.16.4: Saga is also an arcade panel (`view = "saga"`; `now-serving` shows it). See "Saga as an
   arcade panel" in the version history above and `docs/saga.md`, "The arcade panel".
 
-* `crates/tt-toplike-saga/` (library, 0.1.0): the pure core. `Saga::feed(&Record)` in order,
+* `crates/tt-toplike-saga/` (library, 0.2.0 since the party; 0.1.0 in phase 1): the pure core. `Saga::feed(&Record)` in order,
   `Saga::state()`, `Saga::drain_events()`, `Saga::digest()`. Modules: `observe` (records to
   observations, the pacemaker tick), `seed`, `stats`, `topology`, `maze`, `world` (lifecycle),
   `hero`, `quest`, `chronicle`, `pack` (lexicon, glyphs, palette), `event`, `saga` (front door).
@@ -2152,6 +2152,69 @@ rulings (R1 to R28) that amended the plan, then a final whole-branch review and 
 * Phase 2 (monsters, treasure, combat, death, `saga.*` bus events, the headless host running the
   core), phase 3 (steering, rotation stop, arcade panel) and phase 4 (packs, narrator) are not
   built.
+
+### The party (Nov 3 2026, branch `saga-party`, 0.17.0)
+
+Prompt (Taylor), asked how the hero travels between floors: "i'd prefer a view that mixed the chips
+together for saga. or showed you the sagas happening on each chip at the same time". Offered the
+choice, Taylor picked "both: party plus portal crossing", in two stages (ruling R29). Phase A, the
+party, is 0.17.0. Phase B, crossing through Ethernet portals, is not built: a hero never leaves its
+floor yet; crossing between linked chips comes next. Addendum:
+`docs/superpowers/specs/2026-11-03-saga-party-design.md`. Plan:
+`docs/superpowers/plans/2026-11-03-saga-party.md`. Ledger:
+`.superpowers/sdd/2026-11-03-saga-party/progress.md` (rulings R29 to R35, a task report and a
+review per task).
+
+What it does:
+
+* **One member per floor.** `SagaState::party: Vec<Member>` replaced `hero` and `quest`;
+  `lead()` is member 0. Member `i` is born on floor `i` with its own hooks and its own plan
+  generator (`plan_stream(i)`: stream 1 for member 0, `16 + i` for the rest), so one member's
+  draws never change another's walk. The chronicle's generator is shared. Names are unique: up to
+  8 draws, then a Roman numeral.
+* **A model's dungeon spans every kept chip** (at most 32), with its sage only on the floors of the
+  chips it names. `world.sage_chips` lists those floors. Named chip keys that are not kept chips
+  share one set capped at 64 (R31).
+* **The merged chronicle.** Every beat and every `QuestStarted`/`QuestDone` carries its floor.
+  A party's birth writes one `PartyBorn` line. Routine lines share one 10-tick window per floor
+  (`ROUTINE_WINDOW_TICKS`); a member silent for `OVERDUE_TICKS` (300) gets the next open window
+  first (R32); a world's birth opens the window again (Task A.8). A line not written still raises
+  its event, and `Member::unwritten` counts it. On the 32-chip test log every floor is heard within
+  a minute (worst silence 533 ticks, measured again in Task A.8) and the longest stretch with no line is 26 ticks
+  (`the_chronicle_is_never_silent_for_long_with_32_chips`, bound 32). `Quest::target_label` is the
+  name the beat writes, aliased in generated mode; a real name over 32 characters is cut to 32.
+* **Digest version 2.** A version item first, a floor on quest events, beats and lines, and one
+  (floor, x, y) per member in the end item. `SagaState::chips_seen` (the roster's count) is not in
+  the digest.
+* **Bounds at 32 chips.** At most 32 members, `World::floors` is an `Arc<[Floor]>` (a snapshot
+  shares it), and a record costs under a million work units: the worst on the 32-chip log is a
+  birth at 64,520, the mean per tick 391. A walk step is not a work unit, so the 32 steps a tick
+  are not in those figures. The saga holds at most 192 entity keys (64 kept chips, 64 ready
+  models, 64 named keys that are not kept chips; a world's chips are kept chips), 224 entities
+  with the 32 heroes, under the spec's 500.
+* **The view** (`src/ui/tui/saga_party.rs`). A world of two or more floors draws a grid of
+  hero-centred tiles (`party_grid`; smallest tile 24 x 7), a roster row when the floors need more
+  than one page or chips have no floor (R34), floor tags in eight brand hues, and the focused
+  hero's status row. `[` `]` move the focus and the page follows; `z` zooms to the focused floor.
+  One floor draws exactly as before (the solo frames pinned in Task A.1 never moved). `PartyMemory`
+  keeps one `SagaMemory` per floor. Focus and zoom are view state;
+  `view_state_never_reaches_the_saga_driver` pins by source that they never reach the driver.
+
+What to know before changing it:
+
+* `solo_story_print_is_unchanged` and `solo_frames_are_the_pre_party_frames` pin one chip as it was
+  in 0.16. They must not move.
+* Grid sizes are pinned in `party_grid_gives_the_addendum_table` (the addendum's 5.2 table was
+  corrected to these values in Task A.8): 80 x 23 gives 2 chips 39 x 16 and 4 chips 2 x 2 of
+  39 x 8; 200 x 59 gives 2 chips 54 x 39 and 4 chips 2 x 2 of 54 x 28.
+* Terminal traffic: at 140 x 40, `tools/startup.py`'s pty method (bytes the TUI writes, counted
+  from 20 s to 40 s of a 40 s run) measured 0.17.0 with `--mock 32 --mode saga` at about 156 KB/s,
+  over the design's 20 KB/s quiet-world budget. Every tile's window re-centres on its hero at each
+  step, so the whole tile redraws; a build with the windows held still measured about 46 KB/s.
+  One chip measured about 15 KB/s (0.16.5 gave about 17 KB/s the same way). Not fixed in 0.17.0.
+* Known look: tiles 26 to 29 columns wide show first names only, so two tiles can share a name.
+  Tiles are one blank column apart, so neighbouring maps can look joined.
+* `.target-*` build directories are not git-ignored: stage explicit paths only.
 
 ### Determinism rules the core keeps
 
@@ -2201,6 +2264,13 @@ rulings (R1 to R28) that amended the plan, then a final whole-branch review and 
 * R26: the seed pool's low byte is always zero for widened `f32` readings (replaced by I1's full-word ring).
 * R27: `--saga-digest` uses the Replay label, so a live mock saga's own digest differs on the same records.
 * R28: one fix wave takes C1, I1 to I4 and the cheap minors; every golden re-pin is deliberate and listed below.
+* R29 (party): both stages, party then crossing; link peers from mock and recorded logs first; a reset ends the whole world; heroes cross freely; one floor of routine lines per second.
+* R30: a golden the task did not name may be re-pinned in the same commit when the cause is the same as a named one (the 70x16 panel frames show the busy log's chronicle).
+* R31: named chip keys that are not kept chips share one set capped at `MAX_CHIPS`, first seen wins.
+* R32: `OVERDUE_TICKS` (300) keeps every floor heard within a minute on the 32-chip log; a heuristic with a thin margin.
+* R33: the 32-chip cost test bounds the steady cost (worst non-birth record under 33,000, mean per tick under 1,200) and checks a birth's cells equal its floors' areas.
+* R34: the grid rule in the code is right and the addendum's table follows it; the roster also shows on a single page when chips have no floor.
+* R35: A.7's fix round was verified item by item with mutations, without a separate re-review.
 
 ### Re-pinning the digest goldens
 
@@ -2227,6 +2297,7 @@ moved it, and each diff is explained by that change:
 | `feat(saga): a merged chronicle with a shared pace, a party line, and target labels in the core` (party Task A.4, Nov 3 2026) | a party's birth writes one `PartyBorn` line; routine lines share one 10-tick window per floor, with overdue members first; an unwritten quest's reason goes through `clean_cause` in generated mode | `quiet` (3 chips), `busy` (2 chips) and `party4` (4 chips), both modes: new party lines, unwritten member lines, and the chronicle generator's later draws. The 8 busy view frames and the two 70x16 panel frames: the chronicle they show changed. `bringup` and `solo` did not move; the solo story print, trace and frames and the two 20x6 panel frames did not move. |
 | `feat(saga): the party view, a tile per floor with a roster and focus keys` (party Task A.7, Nov 3 2026) | the view draws a world of two or more floors as a grid of tiles, each from its own floor's memory, with floor tags on the chronicle's member lines and the party's keys on the status row | no digest. The 8 busy view frames: the busy worlds have two floors, so each frame is now two tiles side by side (the frames are drawn from a `PartyMemory`, as the TUI draws them). New: the 8 party frames (`party_frames_are_pinned`, `party4.jsonl` and the 32-chip log at 80x23 and 140x39, why off and on). The solo frames, the story print and the four panel frames did not move. |
 | `fix(saga): the party keys show at 80 columns and only the focused tile marks a reached goal` (party Task A.7, fix round 1) | the status row puts the party's keys right after the quest (`[ ] z` when short), then the tick and the mapped share; only the focused tile's HUD shows `✓` | no digest. The 8 busy view frames and the 8 party frames: every status row moved, and the unfocused tiles lost their `✓`. The solo frames, the story print and the four panel frames did not move. |
+| `fix(saga): a world's birth opens the routine window again` (party Task A.8) | a birth clears the pace window's owner | nothing: no digest, story pin, busy, party, solo or panel frame moved. `routine_lines_come_from_one_floor_per_window` now keys windows by world. |
 
 Pinned now (digest version 2, with the party and its merged chronicle): `quiet.jsonl`
 0x6508927b58eeed16 (both modes), `bringup.jsonl` 0x88bb8d2b104511c3 (both), `busy.jsonl`
@@ -2238,9 +2309,16 @@ and 0x5a73462b53067a2a, `party4.jsonl` 0x245050e12931e637 and 0x03610514c0841cc7
 Record a `--headless --mock` run (without `--mock-workloads`), print `--bus-inspect DIR
 --saga-digest`, replay the recording into a second directory with `--replay`, and print the
 digest of that one. The two digests must match. Then record a second session the same way: its
-digest must differ, or the seed is not taking the readings. After the final fix wave, a 12-second
-mock recording (6,813 records, 360 sweeps, header `saga.season_ticks` 12000) printed
-`saga digest: 0x0b5598cead3a912f` (1 world, 7 beats) twice; its replay at `--speed 50` into a second
-directory (span 0.235 s against 11.928 s) printed the same line; a second 12-second recording printed
-`0xd08fc863b012c28e`. Before the fix wave two separate recordings both printed
-`0x1ec90317adb4fa0a` (ruling R26).
+digest must differ, or the seed is not taking the readings.
+
+0.17.0 (digest version 2, Task A.8), each a 12-second `--headless --mock N` recording:
+
+| Run | Records | Digest (printed twice, equal) | Replay at `--speed 50` |
+|---|---|---|---|
+| `--mock 4` | 9,044 (480 sweeps), 1 world, 13 beats | `0x7342df1937efd939` | span 0.232 s against 11.948 s, same digest |
+| `--mock 32` | 70,358 (3,776 sweeps), 1 world, 14 beats | `0x571993fc48fe7014` | span 0.194 s against 11.913 s, same digest |
+| second `--mock 4` | 9,044, 1 world, 12 beats | `0xdebf57ae6a5e9aa4` (differs) | |
+
+Before the party (0.16.x, digest version 1), the final fix wave's 12-second `--mock` recording
+printed `0x0b5598cead3a912f`; under version 2 that number no longer applies. Before the fix wave
+two separate recordings both printed `0x1ec90317adb4fa0a` (ruling R26).

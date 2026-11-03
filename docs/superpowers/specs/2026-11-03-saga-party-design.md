@@ -1,6 +1,9 @@
 # Saga party and portal crossing: an addendum to the Saga design
 
-Date: 2026-11-03. Status: draft for the user's review. Author: Claude, with Taylor Singletary.
+Date: 2026-11-03. Status: phase A (the party) built in 0.17.0, on branch `saga-party`; phase B
+(crossing, section 8) not built. Author: Claude, with Taylor Singletary. Numbers that moved while
+building are corrected in place and marked "(as built)": the grid table in 5.2, the roster rule in
+5.4 and the entity count in 3.7. The ledger is `.superpowers/sdd/2026-11-03-saga-party/progress.md`.
 Base: `docs/superpowers/specs/2026-11-02-saga-design.md` (called "the spec" below) and the phase 1
 code on `what-if` at 0.16.2 (HEAD 6932937d). Section numbers such as "spec 3.5" point into the spec.
 
@@ -189,8 +192,9 @@ the world is simulated, and every floor has a hero. No floors are lazy.**
   members. A box with more than 32 kept chips (the mock "Quad Galaxy" has 128) shows the first 32
   in key order, and the view says how many chips have no floor. Hooks per member: at most
   `MAX_READY_MODELS` (64) sage hooks plus explore and rest, so at most 32 x 66 hooks in all.
-  Entities held at once stay within spec 9's 500: 64 kept chips, 64 ready models, 32 world chips
-  and 32 heroes.
+  Entities held at once stay within spec 9's 500 (as built): 64 kept chips, 64 ready models, 64
+  chip keys that ready models name but the saga does not keep (one shared set, ruling R31), and 32
+  heroes, 224 in all. A world's chips are kept chips, so they add none.
 - **Cost per tick.** Each member steps once per tick. A* runs only when a member replans and
   expands each cell at most once: at most 32 x 2,014 expansions (a 53 x 38 Blackhole floor) in a
   tick where every member replans, which happens only at a birth. The test-only work counter
@@ -268,16 +272,18 @@ grid sits where the map sits today: above the chronicle under 100 columns, and t
   view draws its one floor at that size (map only, or title only). The chronicle keeps its chip
   tags.
 
-What that gives (the 24th row is the app's status bar):
+What that gives (as built; the last row of the terminal is the app's status bar, and the tiles
+share every row the chronicle leaves):
 
 | Terminal | 1 chip | 2 chips | 4 chips | 32 chips |
 |---|---|---|---|---|
-| 80 x 24 | today's view | 2 tiles side by side, 39 x 11 | 2 x 2 tiles, 39 x 7 | 6 tiles a page (3 x 2, 26 x 7), 6 pages, roster |
+| 80 x 24 | today's view | 2 tiles side by side, 39 x 16 | 2 x 2 tiles, 39 x 8 | 6 tiles a page (3 x 2, 26 x 7), 6 pages, roster |
 | 140 x 40 | today's view | 2 tiles, 41 x 37, chronicle right | 2 x 2 tiles, 41 x 18 | 15 tiles a page (3 x 5, 27 x 7), 3 pages, roster |
-| 200 x 60 | today's view | 2 tiles | 2 x 2 tiles | 4 x 8 = 32 tiles at 29 x 7, one page |
+| 200 x 60 | today's view | 2 tiles, 54 x 39 | 2 x 2 tiles, 54 x 28 | 4 x 8 = 32 tiles at 29 x 7, one page |
 
-The plan's tests compute these from `party_grid` and pin them. The numbers above are my working
-and may move by a column when the builder fixes the gaps.
+`party_grid_gives_the_addendum_table` (`src/ui/tui/saga_party_tests.rs`) computes these from
+`party_grid` and pins them. The draft of this table said 39 x 11 and 39 x 7 at 80 x 24; the built
+rule gives the tiles every row the chronicle leaves (ruling R34).
 
 ### 5.3 What a tile shows
 
@@ -294,10 +300,11 @@ and may move by a column when the builder fixes the gaps.
 
 - **Title row:** `▌ SAGA`, the label mark, the world's id and biome, and `party of N` in place of
   today's floor and chip.
-- **Roster row** (only when the grid has more than one page): `party` and one glyph per member in
+- **Roster row** (as built: when the grid has more than one page, or when chips have no floor,
+  even on a single page, so no chip is hidden; ruling R34): `party` and one glyph per member in
   index order, two columns each (32 members take 64 columns). A member on the shown page is bright,
-  others are dim, the focused member is bold, and a member below half vitality is orange. When
-  chips have no floor, the row ends with `+N chips without a floor`.
+  others are dim, the focused member is drawn on its hue, and a member below half vitality is
+  orange. When chips have no floor, the row ends with `+N chips without a floor`, then the page.
 - **Chronicle:** as today, with a floor tag after the tone mark on each member's line: `t42 · F3
   Wren the Unthrottled sets out to explore`. The tag has the floor's hue. World lines have no tag.
   With "why" on, the cause line also names the chip's PCI address. Chip keys are hardware

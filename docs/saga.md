@@ -1,15 +1,18 @@
 # Saga
 
-Saga is a view where the machine's activity becomes a story. A hero quests through a dungeon built
-from this box's own signals. Worlds are born and end when the signals say so, and each new world
-has a new maze. A chronicle beside the map tells what happens, and every line of it has a cause in
-the signal stream.
+Saga is a view where the machine's activity becomes a story. Each chip is a floor of a dungeon
+built from this box's own signals, and each floor has its own hero. The heroes quest at the same
+time, and the view shows every floor at once. Worlds are born and end when the signals say so, and
+each new world has a new maze. One chronicle beside the maps tells what happens on every floor, and
+every line of it has a cause in the signal stream.
 
-Press `S` in any view to open Saga, or start in it with `tt-toplike --mode saga`. This is phase 1:
-a hero, its quests, worlds that begin and end, and the chronicle. Monsters, treasure and fights come
-in phase 2.
+Press `S` in any view to open Saga, or start in it with `tt-toplike --mode saga`. This is phase 1
+with the party (0.17.0): a hero on every chip's floor, their quests, worlds that begin and end, and
+the merged chronicle. A hero never leaves its floor yet; crossing between linked chips comes next.
+Monsters, treasure and fights come in phase 2.
 
-The design is in `docs/superpowers/specs/2026-11-02-saga-design.md`.
+The design is in `docs/superpowers/specs/2026-11-02-saga-design.md`, and the party in its addendum,
+`docs/superpowers/specs/2026-11-03-saga-party-design.md`.
 
 ## How a world is built
 
@@ -44,7 +47,7 @@ never taken from an almost empty pool. After that, signals decide:
 
 | Signal | What happens |
 |---|---|
-| A model becomes ready (`ModelReady`) | The world ends and a dungeon is born on the model's chips, with a sage for the model. |
+| A model becomes ready (`ModelReady`) | The world ends and a dungeon is born on every chip, with a sage for the model on the floors of the chips the model names (on every floor when it names none). |
 | That model goes away (`ModelGone`) | Its dungeon collapses and a dungeon on every chip follows. A model that did not make the current world can go away without ending it. |
 | A chip resets (`Reset`) | If the reset names one of the world's chips, or names no chip, the world collapses and a dungeon on every chip follows. |
 | A training run starts (the first `toplike.train.step`) | A forge is born on every chip. When no training sample has arrived for 600 sweeps, the run is over and a dungeon follows. |
@@ -56,12 +59,14 @@ Ordinary samples do not count, because a quiet machine's readings still wobble. 
 
 ## The cast in phase 1
 
-* **The hero (`@`).** One per world, named from the lexicon. It walks with A* pathfinding and picks
-  its quests on its own: visit the sage of a ready model, explore a room, or rest. Its vitality
-  comes from its chip's heartbeat, clock and temperature. Below half, it is drawn orange and its
-  next quest is a rest. After reaching a goal it waits 30 sweeps before it plans the next quest.
-* **Sages (`Ψ`).** One for each model that is ready when the world is born. The sage is drawn at the
-  goal while the hero is on its way to visit it.
+* **The heroes (`@`).** One per floor, born with the world at their floor's gate and named from the
+  lexicon. Each walks with A* pathfinding and picks its quests on its own: visit the sage of a
+  ready model, explore a room, or rest. Its vitality comes from its own chip's heartbeat, clock and
+  temperature. Below half, it is drawn orange and its next quest is a rest. After reaching a goal it
+  waits 30 sweeps before it plans the next quest. A hero never leaves its floor yet; crossing
+  between linked chips comes next.
+* **Sages (`Ψ`).** One for each model that is ready when the world is born, on the floors of the
+  chips the model names. The sage is drawn at the goal while a hero is on its way to visit it.
 * **Beats.** Each chronicle line is a beat, written from the pack's sentence shapes in one of three
   tones: calm, tense or triumphant. The tone follows the machine's state: tense when the hero is
   weak or a world collapsed, triumphant for a quest done and for the birth of a world from a ready
@@ -69,6 +74,76 @@ Ordinary samples do not count, because a quiet machine's readings still wobble. 
 
 Monsters (from ECC errors, link changes, resets, thermal trips and stalls), other characters and
 treasure come in phase 2.
+
+## The party
+
+A world has one floor per chip, up to 32 in chip key order, and one hero per floor. Hero `i` is born
+on floor `i`. On a box with one chip, the view and the story are the same as before the party
+(0.16): the same frames and the same chronicle.
+
+* **Names.** Each hero draws its name from its own generator. A name that a hero on a lower floor
+  already has is drawn again, up to 8 times; after that the hero keeps it with a Roman numeral
+  ("Wren the Unthrottled II"). No two heroes in a party share a name.
+* **Quests.** Each hero has its own list of quests and its own generator, so one hero's choices
+  never change another hero's walk. A hero visits only the sages on its own floor, and a model
+  going away sends every hero walking to its sage to plan again.
+* **The pace of the chronicle.** With many heroes, every quest started and finished would put one
+  or two lines in the chronicle each sweep, too fast to read. So a hero's routine lines (a quest
+  started or finished, a rest, an ambient line) share one budget. Sweeps fall into windows of 10 (one second at the
+  default interval), and the first floor to write a routine line in a window owns it: only that
+  floor's routine lines are written in that window. A hero that has written nothing for 300 sweeps
+  gets the next open window first, so on the 32-chip test log every floor writes a line at least
+  once a minute, and the chronicle is never silent for more than 26 sweeps. A world's birth opens
+  the window again. Lines about the world (born, ended, the party's birth) are always written. A
+  line that is not written still raises its event, so the digest and every reader of the events
+  see every quest, and the tile of that hero still shows its quest.
+* **The party's birth.** With two or more floors, a birth writes the world's line and one line for
+  the whole party ("The floors tremble, and four heroes scramble to their feet."), in place of one
+  line per hero.
+* **Chips past 32 have no floor.** A box with more than 32 chips (the mock "Quad Galaxy" has 128)
+  gets floors for the first 32 in key order. The roster row says how many chips have no floor.
+
+### The party view
+
+A world of two or more floors draws as a grid of tiles, one per floor. Each tile is a HUD row over
+a window of its floor's map, centred on its hero, with the same walls, fog, light, trail, glow and
+heat colour as the single-floor view. Under 100 columns the grid sits above the chronicle, which
+keeps its header and four lines; from 100 columns it takes up to three fifths of the width, left of
+the chronicle.
+
+* **Tile HUD:** `▌F3`, the hero's name, a four-cell vitality bar (`▰▰▰▱`) and the quest (`explore`,
+  `rest`, `visit` and the model's name). The band is tinted with the floor's hue, and the focused
+  tile's band is brighter with its tag reversed. A narrow tile drops the hero's title first, then
+  the quest's target. Only the focused tile marks a reached goal with `✓`.
+* **Floor hues:** a cycle of eight from the brand palette (teal `#74C5DF`, blue `#1B8EB1`, green
+  `#6FABA0`, yellow `#F6BC42`, red `#FF9E8A`, orange `#FA512E`, and the lighter teal `#9BDBF0` and
+  green `#92C9BF`). Floor `i` takes hue `i mod 8`. The tile band, the chronicle tag and the roster
+  glyph share it.
+* **Title row:** `party of N` where the single-floor view names the floor and chip.
+* **Roster row:** shown when the floors need more than one page, or when some chips have no floor.
+  `party`, then one glyph per hero, two columns each: bright on the page shown, dim on other pages,
+  orange below half vitality, and drawn on its hue when focused. Then `+N chips without a floor`
+  and the page (`page 2 of 6`, or `2/6` when the row is short).
+* **Chronicle:** each hero's line has its floor's tag after the tone mark (`t42 · F3 Wren sets out
+  to explore`). World lines have no tag. With `y` on, the cause line of a hero's line ends with the
+  chip of its floor (`· F3 is chip 0000:03:00.0`).
+* **Status row:** the focused hero's name, vitality and quest, then `[ ] focus  z zoom` (`[ ] z`
+  when the row is short), the tick and the mapped share.
+* **Pages and zoom.** `[` and `]` move the focus from floor to floor, and the page follows the
+  focus. `z` draws the focused floor alone, as the single-floor view draws it, with the merged
+  chronicle; `z` again returns to the grid. When not even one tile fits (the smallest tile is 24
+  columns by 7 rows), the view draws the focused floor alone.
+
+What the grid gives (the view's area, without the app's status bar; pinned by
+`party_grid_gives_the_addendum_table` in `src/ui/tui/saga_party_tests.rs`):
+
+| View area | 2 chips | 4 chips | 32 chips |
+|---|---|---|---|
+| 80 x 23 | 2 tiles of 39 x 16 | 2 x 2 tiles of 39 x 8 | 3 x 2 tiles of 26 x 7 a page, 6 pages |
+| 140 x 39 | 2 tiles of 41 x 37 | 2 x 2 tiles of 41 x 18 | 3 x 5 tiles of 27 x 7 a page, 3 pages |
+| 200 x 59 | 2 tiles of 54 x 39 | 2 x 2 tiles of 54 x 28 | 4 x 8 tiles of 29 x 7, one page |
+
+One chip draws the single-floor view at every size.
 
 ## What the map shows
 
@@ -98,15 +173,14 @@ straight line between them. The whole room the hero stands in is lit too, walls 
 are brightest next to the hero.
 
 The view remembers every cell that has been lit and draws it in the same colour at a low
-brightness. A cell that has never been lit is blank, so the map fills in as the hero explores, and
-the status row says how much of the floor's walkable cells are mapped. The quest's goal is always
-drawn, so the hero's destination shows through the dark.
+brightness. Each floor has its own memory. A cell that has never been lit is blank, so the map
+fills in as the hero explores, and the status row says how much of the floor's walkable cells are
+mapped. The quest's goal is always drawn, so the hero's destination shows through the dark.
 
 The memory belongs to the view, and the saga core never sees it, so it cannot change a digest. The
 TUI updates it on every backend update in every view, so the map is still there when you come back
 to Saga. If updates were missed and the hero moved more than one cell, the view fills in the walk
-with the core's own shortest path. The memory starts over when a new world is born or the hero moves
-to another floor.
+with the core's own shortest path. Every floor's memory starts over when a new world is born.
 
 ## The chronicle and the why key
 
@@ -144,20 +218,23 @@ ordered stream of records gives the same saga.**
   never doubles it.
 
 Check it with the real binary. `--saga-digest` feeds every record of a recorded log to a fresh saga
-and prints its digest, a hash of every world seed, every event and the chronicle's text:
+and prints its digest, a hash of every world seed, every event, each line's floor, the chronicle's
+text and where each hero ends:
 
 ```
 $ tt-toplike-tui --bus-inspect /var/tmp/run1 --saga-digest
-saga digest: 0x0b5598cead3a912f
-worlds born: 1, beats written: 7, records: 6813 (skipped 0 bad lines), holes: 0
+saga digest: 0x7342df1937efd939
+worlds born: 1, beats written: 13, records: 9044 (skipped 0 bad lines), holes: 0
 ```
 
-That output is from a 12-second `--headless --mock` recording. The digest uses the replay label,
-real names and the season the log's header records (see "Config"), so the reader's own config does
-not change it.
+That output is from a 12-second `--headless --mock 4` recording (0.17.0). The digest uses the
+replay label, real names and the season the log's header records (see "Config"), so the reader's
+own config does not change it.
 Record a run, replay it into a second recording with `--replay`, and the two recordings print the
-same digest. A second recording of the same length printed `0xd08fc863b012c28e`: each run starts
-with its own world. A live saga labels its first line "(mock)" or not at all, and the digest's saga
+same digest. A second 4-chip recording of the same length printed `0xdebf57ae6a5e9aa4`: each run
+starts with its own world. The digest's encoding has a version; 0.17.0 writes version 2, which adds
+the floor of each line and event and one end position per hero, so a digest printed by 0.16 differs
+from one printed by 0.17 on the same log. A live saga labels its first line "(mock)" or not at all, and the digest's saga
 labels it "(replay)", so a live saga's own digest differs from this one on the same records. Exit
 status: 0 when the digest was printed (or the output was a closed pipe), 1 when the log cannot be
 read or the output fails.
@@ -173,11 +250,14 @@ backend's readings are estimates. A saga fed by a replayed log writes "(replay)"
 |---|---|
 | `S` | Opens Saga from any view. In Saga, goes back to the view you came from. |
 | `y` | Shows or hides what set each chronicle line off. |
+| `[` `]` | With two or more floors: moves the focus to the previous or next floor. The page follows the focus, and the status row shows the focused hero. |
+| `z` | With two or more floors: draws the focused floor alone, as the single-floor view draws it. `z` again returns to the grid. |
 | `Esc` | Leaves Saga for the view you came from. |
 | `/saga`, `/mode saga` | Opens Saga from the command bar. |
 | `l`, `?`, `!` | The legend (every map glyph, the light and the chronicle's marks), the help and the explain text, as in every view. |
 
-Saga is not in the `v` cycle and not in `--rotate`.
+`[`, `]` and `z` are taken only while Saga is on screen; in other views they keep their own meaning.
+With one floor they do nothing. Saga is not in the `v` cycle and not in `--rotate`.
 
 ## The arcade panel
 
@@ -187,8 +267,9 @@ right of its bottom row, beside the Wafer Waffler and under the inference server
 rule over it says `Ψ SAGA`.
 
 The panel draws the same story with the same map renderer, so the fog, the hero's glow and trail,
-the biome colours and the heat are the view's own. It shares the view's memory of what the hero
-has seen, so the map it shows is the map the full view shows.
+the biome colours and the heat are the view's own. With a party it draws the lead hero's floor
+(floor 1, the hero born on the first chip) and that floor's memory, so its map is the full view's
+map of that floor.
 
 | Panel size | What it shows |
 |---|---|
@@ -276,6 +357,17 @@ saga's settings and every problem in the section.
   cost is bounded, and the dungeon then shows made-up chips.
 * No person has run Saga on real Tenstorrent hardware yet. It has run on the mock backend and on
   recorded fixtures.
+* Chips past 32 have no floor and no hero. The roster row counts them (`+N chips without a floor`).
+* A hero never leaves its floor yet; crossing between linked chips comes next. The Ethernet portals
+  on each floor's north edge are scenery until then.
+* A real name longer than 32 characters is cut to its first 32, in the chronicle and in a tile's
+  quest label alike. Two models whose ids share their first 32 characters show the same name.
+* On tiles 26 to 29 columns wide the HUD shows only the hero's first name, so two tiles can both
+  say "Lark"; the floor tags tell them apart. Tiles are separated by one blank column, so the maps
+  of neighbouring tiles can look joined.
+* The party view sends more to the terminal than one floor does, because every tile scrolls with
+  its hero. At 140 x 40 with `--mock 32` it measured about 156 KB/s (0.17.0, see AGENTS.md), over
+  the 20 KB/s budget the design sets for a quiet world. One chip measured about 15 KB/s.
 * Generated-name aliasing was checked on the busy fixture only.
 * A log directory reused by sessions with different seasons keeps the first segment's tag, so
   `--saga-digest` and `--replay` of the whole directory use the oldest session's season.
@@ -305,7 +397,7 @@ teal `#74C5DF`, green `#6FABA0`, yellow `#F6BC42` and orange `#FA512E`.
 
 * **Biomes.** A dungeon has teal floors and blue walls, a forge yellow floors and orange walls, and a
   dream green floors and teal walls. The outer shell is bold.
-* **Heat.** The TUI reads the temperature of the hero's chip from its backend, matched by bus
+* **Heat.** The TUI reads the temperature of each floor's chip from its backend, matched by bus
   address. Above 45 °C the floor's colour moves towards yellow at 65 °C and orange at 85 °C. A
   replay or an attached TUI whose backend has no matching chip draws the biome's own colour.
 * **Colour depth.** Every colour goes through the app's colour function, so a terminal without
@@ -329,7 +421,14 @@ teal `#74C5DF`, green `#6FABA0`, yellow `#F6BC42` and orange `#FA512E`.
 * `src/ui/tui/saga_view.rs`: the view draws the snapshot and never feeds the core. Its
   `PartyMemory` lives in the TUI's loop: one `SagaMemory` per floor (the lit cells, a trail for
   each hero on the floor, and the heat of the floor's chip). A world of one floor draws as
-  before; with more floors the view draws a tile per floor, each from its own memory.
+  before; with more floors `src/ui/tui/saga_party.rs` draws a tile per floor, each from its own
+  memory. The focus and zoom are view state in the TUI's loop and never reach the core.
   `render_saga_panel` draws the arcade panel from the same pieces (`map_rows`, the status row,
   `chronicle_rows`); the arcade keeps the last `PanelFeed` and a copy of the memory
   (`ArcadeVisualization::set_saga`).
+* Cost with 32 chips: every floor is simulated and has a hero, whatever the view shows. A test-only
+  counter (`src/cost.rs` in the saga crate) counts work units: maze cells built, A* cells expanded,
+  trail pushes and events. On the 32-chip test log the worst record is a 32-floor birth at 64,520
+  units, 6.5% of the million-unit budget, and a tick costs 391 units on average. A hero's step
+  along its path is not a work unit, so the 32 steps of each tick are not in these figures; a step
+  moves one cell and costs the same on any floor.
