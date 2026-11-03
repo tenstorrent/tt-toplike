@@ -1116,3 +1116,109 @@ fn model_gone_replans_every_member_walking_to_it() {
         );
     }
 }
+
+#[test]
+fn each_member_has_its_own_plan_stream() {
+    // The party addendum, section 4.2, written out by hand: member 0 keeps
+    // stream 1, member i draws from stream 16 + i, and no member shares the
+    // chronicle's stream 2.
+    assert_eq!(
+        (PLAN_STREAM, PARTY_STREAM_BASE, CHRONICLE_STREAM),
+        (1, 16, 2)
+    );
+    let streams: Vec<u64> = (0..32).map(plan_stream).collect();
+    let mut want = vec![1u64];
+    want.extend(17..=47);
+    assert_eq!(streams, want);
+    // Each member's generator is seeded on its stream at a birth.
+    let saga = saga_on(&[chip_b(), chip_c()]);
+    assert_eq!(saga.members.len(), 3);
+    for (i, &stream) in want.iter().enumerate().take(3) {
+        let mut fresh = Pcg32::new(saga.state.world.seed, stream);
+        let name = Pack::builtin().hero_name_unique(
+            &mut fresh,
+            &saga.state.party[..i]
+                .iter()
+                .map(|m| m.hero.name.clone())
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(saga.state.party[i].hero.name, name, "member {i}");
+    }
+}
+
+#[test]
+fn the_sage_floors_are_the_floors_with_a_sage_hook() {
+    // Ruling R31: named keys that are not kept chips share one set of at
+    // most MAX_CHIPS, first seen wins. A key the set has no room for is not
+    // kept, so a world's sage_chips leaves its floor out, the same as that
+    // floor's member, who gets no sage hook.
+    let ghost = EntityKey::model("demo-ghost");
+    let sage = EntityKey::model("demo-sage");
+    let mut saga = Saga::new(config(NameMode::Real, Label::Live));
+    saga.feed(&sample(&chip_a(), ASIC_TEMPERATURE, Value::F64(45.0)));
+    // Before the gate: one model names MAX_CHIPS chips no backend reports,
+    // filling the shared set.
+    saga.feed(&event(Event::ModelReady {
+        model: ghost,
+        chips: (0..MAX_CHIPS)
+            .map(|k| EntityKey::chip(&format!("ghost-{k:02}")))
+            .collect(),
+    }));
+    assert_eq!(saga.named_unseen.len(), MAX_CHIPS);
+    // Then the sage names chip A (kept, so always held) and chip C (not yet
+    // seen, and the set is full).
+    saga.feed(&event(Event::ModelReady {
+        model: sage.clone(),
+        chips: vec![chip_a(), chip_c()],
+    }));
+    assert_eq!(saga.ready[&sage].chips, [chip_a()]);
+    // Chip C is seen before the gate opens, so the sage's queued dungeon has
+    // a floor on it. The lifecycle lists chip C as a sage chip; the saga
+    // does not, and neither do the hooks.
+    saga.feed(&sample(&chip_c(), ASIC_TEMPERATURE, Value::F64(46.0)));
+    run_ticks(&mut saga, 5);
+    assert_eq!(saga.state.world.chips, [chip_a(), chip_c()]);
+    assert_eq!(
+        saga.life.world().map(|w| w.sage_chips.clone()),
+        Some(vec![chip_a(), chip_c()])
+    );
+    assert_eq!(saga.state.world.sage_chips, [chip_a()]);
+    let has_sage = |i: usize| {
+        saga.members[i]
+            .hooks
+            .iter()
+            .any(|h| h.target.as_ref() == Some(&sage))
+    };
+    assert!(has_sage(0) && !has_sage(1));
+
+    // On ordinary logs the two lists always agree: at every birth of the
+    // busy script, a floor is a sage floor exactly when its member has the
+    // world's model's hook.
+    let mut saga = Saga::new(config(NameMode::Real, Label::Live));
+    let mut checked = 0;
+    let mut seen = 0;
+    for r in busy_script() {
+        saga.feed(&r);
+        let w = &saga.state.world;
+        if w.id == seen {
+            continue;
+        }
+        seen = w.id;
+        let model = saga.life.model().cloned();
+        for (i, chip) in w.chips.iter().enumerate() {
+            let hook = model.as_ref().is_some_and(|m| {
+                saga.members[i]
+                    .hooks
+                    .iter()
+                    .any(|h| h.target.as_ref() == Some(m))
+            });
+            assert_eq!(w.sage_chips.contains(chip), hook, "world {seen}, {chip}");
+            checked += hook as usize;
+        }
+        assert_eq!(
+            saga.life.world().map(|l| &l.sage_chips),
+            Some(&w.sage_chips)
+        );
+    }
+    assert!(checked >= 2, "only {checked} sage floors checked");
+}

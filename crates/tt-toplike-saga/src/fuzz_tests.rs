@@ -122,13 +122,27 @@ fn memory_stays_bounded() {
             assert!(sages <= RULED_READY, "{at}: {sages} sage hooks");
             assert!(core.hooks.len() <= RULED_READY + 2, "{at}: hooks");
         }
-        // A ready model keeps at most 32 of the chips it named.
+        // Named chip keys that are not kept chips: one shared set of at
+        // most 64 (ruling R31), and every model's list holds only kept
+        // chips and keys of that set. The flood names 2,048 such keys.
+        assert!(
+            saga.named_unseen.len() <= RULED_CHIPS,
+            "{at}: {} named keys held",
+            saga.named_unseen.len()
+        );
+        // The flood reached the cap, so the bound above was tested.
+        assert_eq!(
+            saga.named_unseen.len(),
+            RULED_CHIPS,
+            "{at}: the flood's unseen keys did not fill the shared set"
+        );
         for r in saga.ready.values() {
-            assert!(
-                r.chips.len() <= RULED_FLOORS,
-                "{at}: {} chips",
-                r.chips.len()
-            );
+            for c in &r.chips {
+                assert!(
+                    saga.chips.contains_key(c) || saga.named_unseen.contains(c),
+                    "{at}: {c} is held outside the shared set"
+                );
+            }
         }
 
         // Events: far more than 4096 were raised and none was drained.
@@ -226,6 +240,8 @@ fn memory_stays_bounded() {
         let mut held: BTreeSet<&EntityKey> = BTreeSet::new();
         held.extend(saga.chips.keys());
         held.extend(saga.ready.keys());
+        held.extend(saga.ready.values().flat_map(|r| &r.chips));
+        held.extend(saga.named_unseen.iter());
         held.extend(w.chips.iter());
         held.extend(
             saga.members

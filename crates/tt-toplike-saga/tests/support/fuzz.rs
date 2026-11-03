@@ -366,6 +366,20 @@ pub const FLOOD_SIGNALS_PER_CHIP: usize = 300;
 /// ready list's cap of 64.
 pub const FLOOD_MODELS: usize = 200;
 
+/// Models among the first of phase 3 that also name chips no backend
+/// reports, [`FLOOD_GHOST_CHIPS`] each. These are as many models as the ready
+/// list keeps, so every one of them is listed.
+pub const FLOOD_GHOST_MODELS: usize = 64;
+
+/// Chips no backend reports, named by each of the [`FLOOD_GHOST_MODELS`]:
+/// 2,048 keys in all, far more than the 500-entity budget.
+pub const FLOOD_GHOST_CHIPS: usize = 32;
+
+/// A chip key that no record of the flood ever samples.
+pub fn flood_ghost_chip(model: usize, k: usize) -> EntityKey {
+    EntityKey::chip(&format!("ghost-{model:02}-{k:02}"))
+}
+
 /// Resets naming no chips in the flood's first phase. Each ends the world and
 /// births the next, so each raises eight events or more.
 pub const FLOOD_RESETS: usize = 700;
@@ -457,7 +471,8 @@ impl Flood {
 ///    [`FLOOD_SIGNALS_PER_CHIP`] distinct signal names; a DRAM channel sample
 ///    for the chip too. A tick after every chip.
 /// 3. **Ready models that never go.** [`FLOOD_MODELS`] models become ready on
-///    the pacemaker, one tick after each.
+///    the pacemaker, one tick after each. The first [`FLOOD_GHOST_MODELS`]
+///    also name [`FLOOD_GHOST_CHIPS`] chips each that no record samples.
 /// 4. **The widest births.** A model ready on [`FLOOD_READY_CHIPS`] chips,
 ///    then a reset naming no chips (a world on the first 32 of the 64 chips
 ///    the saga keeps), then 200 ticks with every chip's heartbeat advancing.
@@ -510,9 +525,13 @@ pub fn flood_stream() -> Vec<Record> {
 
     // Phase 3.
     for i in 0..FLOOD_MODELS {
+        let mut chips = vec![pacemaker.clone()];
+        if i < FLOOD_GHOST_MODELS {
+            chips.extend((0..FLOOD_GHOST_CHIPS).map(|k| flood_ghost_chip(i, k)));
+        }
         f.event(Event::ModelReady {
             model: EntityKey::model(&format!("flood-model-{i:03}")),
-            chips: vec![pacemaker.clone()],
+            chips,
         });
         f.tick();
     }

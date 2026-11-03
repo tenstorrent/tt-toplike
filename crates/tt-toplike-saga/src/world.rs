@@ -123,6 +123,23 @@ pub const MAX_CHIPS: usize = 64;
 /// bounds it: see "Bounds" in [`crate::saga`].
 pub const MAX_FLOORS: usize = 32;
 
+/// Entries of a `ModelReady`'s chip list that the saga reads (see
+/// [`named_chips`]). A real model names at most 32 chips (a Galaxy), so this
+/// is a cost cap for a hostile writer's list, which can be any length.
+pub const MAX_NAMED_CHIPS: usize = MAX_CHIPS;
+
+/// The chips a `ModelReady` names, as the saga reads them: the first
+/// [`MAX_NAMED_CHIPS`] entries of the event's list, in the event's order,
+/// then sorted and without repeats. Later entries are not read. The
+/// lifecycle and the front door both read the list through this function,
+/// so they agree on which chips a model named.
+pub fn named_chips(chips: &[EntityKey]) -> Vec<EntityKey> {
+    let mut named: Vec<EntityKey> = chips.iter().take(MAX_NAMED_CHIPS).cloned().collect();
+    named.sort();
+    named.dedup();
+    named
+}
+
 /// The signal whose first appearance starts a training run. A copy of the
 /// root crate's bus signal name, checked there (see `crate::saga`'s note on
 /// copied names).
@@ -152,7 +169,11 @@ pub struct World {
     /// model named none. Empty for a world no model made. Only chips with
     /// a floor here are listed: a chip the model names that the topology
     /// does not list, or one past [`MAX_FLOORS`], is left out, so this holds
-    /// at most [`MAX_FLOORS`] keys.
+    /// at most [`MAX_FLOORS`] keys. The model's chips are read through
+    /// [`named_chips`]. The saga's front door then sets this field again
+    /// from its own list of the model's chips, which can hold fewer (see
+    /// "Bounds" in [`crate::saga`]), so the floors listed here are exactly
+    /// the floors whose member has the model's sage hook.
     pub sage_chips: Vec<EntityKey>,
 }
 
@@ -186,8 +207,8 @@ struct Pending {
     biome: Biome,
     /// The model whose `Ready` asked for it, if one did.
     model: Option<EntityKey>,
-    /// The chips that model named (empty when it named none). Unused when
-    /// no model asked.
+    /// The chips that model named, through [`named_chips`] (empty when it
+    /// named none). Unused when no model asked.
     model_chips: Vec<EntityKey>,
 }
 
@@ -209,6 +230,11 @@ impl Lifecycle {
     /// The current world, or `None` before the first one is born.
     pub fn world(&self) -> Option<&World> {
         self.world.as_ref()
+    }
+
+    /// The model whose `Ready` made the current world, if one did.
+    pub fn model(&self) -> Option<&EntityKey> {
+        self.model.as_ref()
     }
 
     /// Takes in one observation and appends any world events to `out`. See
@@ -252,7 +278,7 @@ impl Lifecycle {
                 let want = Pending {
                     biome: Biome::Dungeon,
                     model: Some(model.clone()),
-                    model_chips: chips.clone(),
+                    model_chips: named_chips(chips),
                 };
                 self.supersede(want, at, out);
             }
@@ -398,7 +424,7 @@ impl Lifecycle {
             Some([]) => chips.clone(),
             Some(named) => chips
                 .iter()
-                .filter(|c| named.contains(c))
+                .filter(|c| named.binary_search(c).is_ok())
                 .cloned()
                 .collect(),
         };

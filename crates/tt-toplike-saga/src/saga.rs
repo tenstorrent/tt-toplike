@@ -57,7 +57,10 @@
 //! and its party has one member per floor: member `i` is the hero born on
 //! floor `i` (the party addendum, section 3.1). The member's index is its
 //! identity for the world's life. A one-chip world has a party of one, and
-//! everything below is then the saga of 0.16.
+//! everything below is then the saga of 0.16, as long as every `ModelReady`
+//! names that chip or names none. In 0.16 a model that named a chip never
+//! sampled got a dungeon on that chip's generic floor. Now its dungeon is
+//! on the sampled chip, and its sage stands on no floor.
 //!
 //! When a world is born:
 //!
@@ -166,7 +169,9 @@
 //! | a world's chips and floors | [`crate::world::MAX_FLOORS`] (32), the first in key order | [`crate::world`] |
 //! | entities with trails | [`MAX_CHIPS`] (64): only kept chips get trails | here |
 //! | trails per chip | [`crate::stats::MAX_TRAILS_PER_ENTITY`] (128) names, plus [`crate::stats::RESERVED_TRAILS`] (4) for the vitality inputs | [`crate::stats`] |
-//! | ready models | [`MAX_READY_MODELS`] (64), each with at most [`crate::world::MAX_FLOORS`] (32) of the chips it named, the first in key order | here |
+//! | ready models | [`MAX_READY_MODELS`] (64) | here |
+//! | chips a `ModelReady` names | the first [`crate::world::MAX_NAMED_CHIPS`] (64) entries of its list are read | [`crate::world::named_chips`] |
+//! | named chip keys that are not kept chips | [`MAX_CHIPS`] (64), in one set shared by every ready model; first seen wins | here |
 //! | party members | one per floor of the world, so at most [`crate::world::MAX_FLOORS`] (32) | here |
 //! | a member's hooks | [`MAX_READY_MODELS`] sage hooks (they come from the ready list), plus explore and rest | here |
 //! | undrained events | [`MAX_PENDING_EVENTS`] (4096); the oldest is dropped and counted in [`Saga::dropped_events`] | here |
@@ -189,18 +194,24 @@
 //!
 //! The entities the saga holds at once are at most 64 kept chips, 64 ready
 //! models and 32 world chips that need not be kept chips: 160, under the
-//! spec's 500 (spec 9). The chips a ready model named are kept with it (at
-//! most 32 per model) so that a later world can place its sage. A writer
-//! that names chips no backend reports can add up to 64 x 32 such keys,
-//! about 512 KB at 256 bytes each.
+//! spec's 500 (spec 9). The chips a ready model named are kept with it, so
+//! that a later world can place its sage. A named key that is a kept chip
+//! adds no entity. Every other named key goes into one set shared by all
+//! ready models, which holds at most [`MAX_CHIPS`] keys (ledger ruling
+//! R31). First seen wins: a key is held if the set already holds it or has
+//! room. A later key is read but not kept, so a model that names it has no
+//! sage on that chip's floor, even if the chip is kept later. A key leaves
+//! the set when no ready model names it any more. So the saga holds at
+//! most 160 + 64 = 224 entity keys, and 256 entities with the 32 heroes.
 //!
 //! **Cost of one record.** At most one world is born per record: an event
 //! births at most once, and a sweep's samples can start one training run,
 //! after which its tick finds the run fresh and the world newly active. A
 //! birth generates one maze per world chip, so it costs at most 32 mazes of
 //! at most 120 x 60 cells. Each member searches at most once per tick (at
-//! most 32 searches), and A* expands each cell at most once. Today's floors are 53 x 38 (Blackhole) and
-//! 50 x 32 (generic), so the widest birth generates about 64,000 cells. The
+//! most 32 searches), and A* expands each cell at most once. Today's floors
+//! are 53 x 38 (Blackhole) and 50 x 32 (generic), so the widest birth
+//! generates about 64,000 cells. The
 //! test-only work counter (`src/cost.rs`) checks this against a budget of a
 //! million work units per record. A unit (a maze cell, an A* expansion, a
 //! trail push or an event) is not an elementary operation: a maze cell costs
@@ -258,7 +269,7 @@
 //! themselves carry none: without it, a hero that walked one tick slower
 //! would give the same digest. Draining events does not change the digest.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use tt_toplike_bus::{EntityKey, Event, Payload, Record};
 
@@ -278,7 +289,7 @@ use crate::rng::Pcg32;
 use crate::seed::{fnv1a64, fnv1a64_extend, SeedPool};
 use crate::stats::TrailBook;
 use crate::topology::{Arch, FloorSpec};
-use crate::world::{Lifecycle, World, MAX_CHIPS, MAX_FLOORS, NO_CHIP};
+use crate::world::{named_chips, Lifecycle, World, MAX_CHIPS, NO_CHIP};
 
 /// Stream selector of member 0's plan generator, which names it and plans
 /// its quests. It is the hero's stream from before the party, so a one-chip
@@ -441,16 +452,19 @@ struct MemberCore {
 #[derive(Debug, Clone)]
 struct Ready {
     cause: Cause,
-    /// The chips the model named, sorted, without repeats, at most
-    /// [`MAX_FLOORS`] of them (the first in key order). Empty when it named
-    /// none, which means its sage stands on every floor.
+    /// The model's `ModelReady` named no chips, so its sage stands on every
+    /// floor.
+    anywhere: bool,
+    /// The chips the model named that the saga holds, sorted, without
+    /// repeats (see "Bounds" in the module comment): each is a kept chip or
+    /// a key in `Saga::named_unseen`.
     chips: Vec<EntityKey>,
 }
 
 impl Ready {
     /// Whether this model's sage stands on the floor of `chip`.
     fn stands_on(&self, chip: &EntityKey) -> bool {
-        self.chips.is_empty() || self.chips.binary_search(chip).is_ok()
+        self.anywhere || self.chips.binary_search(chip).is_ok()
     }
 }
 
@@ -479,6 +493,9 @@ pub struct Saga {
     topo_dirty: bool,
     /// Ready models, the cause of their `ModelReady` and their chips.
     ready: BTreeMap<EntityKey, Ready>,
+    /// The chip keys ready models named that are not kept chips, shared by
+    /// every ready model: at most [`MAX_CHIPS`] (see "Bounds").
+    named_unseen: BTreeSet<EntityKey>,
     /// One per member of the party, index aligned with `state.party`.
     members: Vec<MemberCore>,
     /// The chronicle's own stream, shared by every member. Reseeded at each
@@ -543,6 +560,7 @@ impl Saga {
             topo: Vec::new(),
             topo_dirty: false,
             ready: BTreeMap::new(),
+            named_unseen: BTreeSet::new(),
             members: vec![MemberCore {
                 hooks: Vec::new(),
                 plan_rng: Pcg32::new(0, PLAN_STREAM),
@@ -788,26 +806,58 @@ impl Saga {
                     signal: "ModelReady".to_string(),
                     ordinal,
                 };
-                // A world has at most MAX_FLOORS floors, the first chips in
-                // key order, so the first MAX_FLOORS named chips are enough
-                // to place the sage in any world a real box makes.
-                let mut chips = chips.clone();
-                chips.sort();
-                chips.dedup();
-                chips.truncate(MAX_FLOORS);
-                self.ready.insert(model.clone(), Ready { cause, chips });
+                // The model's earlier chips leave the shared set first, so
+                // a model that is ready again is placed by its new list.
+                if self.ready.remove(model).is_some() {
+                    self.rebuild_named_unseen();
+                }
+                // A kept chip is always held. Another key is held while the
+                // shared set has room or already holds it; first seen wins,
+                // and a later key is read but not kept (see "Bounds").
+                let mut held = Vec::new();
+                for chip in named_chips(chips) {
+                    if self.chips.contains_key(&chip) || self.named_unseen.contains(&chip) {
+                        held.push(chip);
+                    } else if self.named_unseen.len() < MAX_CHIPS {
+                        self.named_unseen.insert(chip.clone());
+                        held.push(chip);
+                    }
+                }
+                let ready = Ready {
+                    cause,
+                    anywhere: chips.is_empty(),
+                    chips: held,
+                };
+                self.ready.insert(model.clone(), ready);
             }
             Event::ModelGone { model } => {
                 // The model's sage leaves every member of every world,
                 // including a world the model did not make (ruling R14
                 // keeps such a world alive).
-                self.ready.remove(model);
+                if self.ready.remove(model).is_some() {
+                    self.rebuild_named_unseen();
+                }
                 for core in &mut self.members {
                     core.hooks.retain(|h| h.target.as_ref() != Some(model));
                 }
             }
             _ => {}
         }
+    }
+
+    /// Rebuilds the shared set of named keys that are not kept chips from
+    /// the ready models' lists. It holds only keys the set held before (a
+    /// key that became a kept chip leaves it), so it stays within
+    /// [`MAX_CHIPS`].
+    fn rebuild_named_unseen(&mut self) {
+        let chips = &self.chips;
+        self.named_unseen = self
+            .ready
+            .values()
+            .flat_map(|r| &r.chips)
+            .filter(|c| !chips.contains_key(*c))
+            .cloned()
+            .collect();
     }
 
     /// One [`HEARTBEAT_ALIVE`] push per chip that has reported a heartbeat.
@@ -957,6 +1007,20 @@ impl Saga {
         }
         let (id, biome) = (world.id, world.biome);
         self.state.world = world;
+        // The sage's floors are the floors whose member got the model's
+        // hook: the lifecycle's list, read again through the saga's own
+        // list of the model's chips, which can hold fewer (see "Bounds").
+        // A model that is not on the ready list (it was full) has no sage.
+        let world = &mut self.state.world;
+        world.sage_chips = match self.life.model().and_then(|m| self.ready.get(m)) {
+            Some(r) => world
+                .chips
+                .iter()
+                .filter(|c| r.stands_on(c))
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
         #[cfg(test)]
         self.wall_test_sage();
 
