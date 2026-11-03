@@ -659,6 +659,11 @@ fn every_event_variant_has_its_own_tag() {
 
 /// The bytes of `one_of_each()[i]` at tick 9, written out by hand from the
 /// module comment's table (digest version 2).
+///
+/// The encoding is written down in three places: the table in `saga.rs`'s
+/// module comment (and the addendum's section 3.6), the encoders in
+/// `saga.rs`, and this hand-written copy. The three change together, in one
+/// commit, with `DIGEST_VERSION` moved and the digest goldens re-pinned.
 fn one_of_each_by_hand() -> Vec<Vec<u8>> {
     // Tick 9 and world 1, 8 bytes little-endian each.
     let tick_world = [9, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
@@ -872,8 +877,9 @@ fn the_digest_encoding_matches_a_hand_written_byte_string() {
 /// world's event gives `None`, a hero's or a quest's event gives the floor
 /// it names.
 ///
-/// The one case of two beats in a row is a party's line, which follows the
-/// world's line: a beat after a world's beat is a world's beat too.
+/// Two beats come in a row only at a party's birth: the party's line
+/// follows the world's line. A beat after a world's beat is a world's beat
+/// too.
 fn floor_after(ev: &SagaEvent) -> Option<u8> {
     match ev {
         SagaEvent::WorldBorn { .. } | SagaEvent::WorldEnded { .. } => None,
@@ -1420,6 +1426,35 @@ fn a_dropped_quest_still_raises_its_event_with_a_clean_cause() {
     assert!(reasons
         .iter()
         .all(|r| r.entity == EntityKey::model(ODD_MODEL)));
+}
+
+/// A real name longer than 32 characters is cut to its first 32 (R5), and
+/// the target label is the cut name, the same text the beat writes. The
+/// whole id stays in the quest's target and the event's cause.
+#[test]
+fn a_long_model_id_labels_its_quest_with_the_first_32_characters() {
+    const LONG: &str = "Zyxwv-Model-9B-Instruct-Long-Context-v2";
+    assert!(LONG.chars().count() > 32);
+    let mut saga = Saga::new(config(NameMode::Real, Label::Live));
+    saga.feed(&sample(&chip_b(), ASIC_TEMPERATURE, Value::F64(46.0)));
+    saga.feed(&event(Event::ModelReady {
+        model: EntityKey::model(LONG),
+        chips: Vec::new(),
+    }));
+    run_ticks(&mut saga, 5);
+    let cut: String = LONG.chars().take(32).collect();
+    let quest = &saga.state.party[0].quest;
+    assert_eq!(quest.verb, Verb::VisitSage);
+    assert_eq!(quest.target, Some(EntityKey::model(LONG)));
+    assert_eq!(quest.target_label.as_deref(), Some(cut.as_str()));
+    let line = saga
+        .state
+        .chronicle
+        .lines(CAPACITY)
+        .find(|b| b.floor == Some(0))
+        .expect("member 0's first line");
+    assert!(line.text.contains(&cut), "{}", line.text);
+    assert!(!line.text.contains(LONG), "{}", line.text);
 }
 
 #[test]

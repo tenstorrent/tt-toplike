@@ -719,15 +719,6 @@ pub fn floor_chip(state: &SagaState, floor: usize) -> Option<&tt_toplike_bus::En
     state.world.chips.get(floor)
 }
 
-/// The chip of the floor the lead hero is on ([`floor_chip`] of
-/// [`hero_floor_index`]). The TUI's loop reads every floor's chip now
-/// ([`PartyMemory::set_heats`]), so only the tests call this today; it is
-/// kept for callers that want the lead's chip alone.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn hero_chip(state: &SagaState) -> Option<&tt_toplike_bus::EntityKey> {
-    floor_chip(state, hero_floor_index(state)?)
-}
-
 /// The light the hero at `from` casts on `floor`: for each cell, row-major,
 /// 0 when it is dark or its value in percent (100 at the hero, falling to
 /// [`LIGHT_EDGE`] at the edge of the ellipse). A cell is lit when it lies in

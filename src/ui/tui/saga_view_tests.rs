@@ -2201,7 +2201,11 @@ fn heat_is_per_floor() {
         assert_eq!(floor_chip(state, i), state.world.chips.get(i));
     }
     assert_eq!(floor_chip(state, 4), None, "no chip past the last floor");
-    assert_eq!(hero_chip(state), floor_chip(state, 0), "the lead's chip");
+    assert_eq!(
+        hero_floor_index(state).and_then(|f| floor_chip(state, f)),
+        floor_chip(state, 0),
+        "the lead's chip"
+    );
     assert_eq!(floor_chip(&empty_state(Label::Mock), 0), None);
 
     // One reading per chip, told apart by the chip's index.

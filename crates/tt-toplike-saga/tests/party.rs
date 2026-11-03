@@ -461,6 +461,38 @@ fn every_floor_is_heard_within_a_minute() {
     );
 }
 
+/// The longest stretch of ticks with no chronicle line on the 32-chip log,
+/// from the first world's birth to the log's end. The pace holds routine
+/// lines back, and this pins how far. Measured at 26 ticks (party Task
+/// A.8); the bound of 32 leaves about 25% for a later change to the pace or
+/// the templates. A pace that gives open windows only to overdue members
+/// turns this red.
+const LONGEST_CHRONICLE_GAP: u64 = 32;
+
+#[test]
+fn the_chronicle_is_never_silent_for_long_with_32_chips() {
+    let steps = thirty_two();
+    let mut last: Option<u64> = None;
+    let mut longest = 0;
+    for (tick, events) in steps {
+        for e in events {
+            if let SagaEvent::Beat { .. } = e {
+                if let Some(l) = last {
+                    longest = longest.max(tick - l);
+                }
+                last = Some(*tick);
+            }
+        }
+    }
+    let last = last.expect("the 32-chip log writes lines");
+    longest = longest.max(PACE_TICKS - last);
+    println!("longest chronicle gap on the 32-chip log: {longest} ticks");
+    assert!(
+        longest <= LONGEST_CHRONICLE_GAP,
+        "the chronicle was silent for {longest} ticks"
+    );
+}
+
 #[test]
 fn a_one_member_party_never_drops_a_line() {
     // One floor owns every window, so a one-chip story is today's story:
@@ -527,11 +559,19 @@ fn generated_mode_leaves_no_fixture_name_anywhere_in_a_party() {
         for name in FIXTURE_NAMES {
             assert!(!shown.contains(name), "{what}: generated mode shows {name}");
         }
-        // The control: real mode shows the sage's name in the same places,
-        // labels included.
+        // The control: real mode shows each fixture name in the same
+        // places, labels included, so the search above can find either one.
         let real = everything_shown(records, NameMode::Real);
-        assert!(real.contains("\ndemo-sage\n"), "{what}: no real label");
-        assert!(real.contains("model:demo-sage"), "{what}: no real cause");
+        for name in FIXTURE_NAMES {
+            assert!(
+                real.contains(&format!("\n{name}\n")),
+                "{what}: no real label {name}"
+            );
+            assert!(
+                real.contains(&format!("model:{name}")),
+                "{what}: no real cause {name}"
+            );
+        }
     }
 }
 

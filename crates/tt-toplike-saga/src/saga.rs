@@ -1664,8 +1664,14 @@ fn encode_line(out: &mut Vec<u8>, beat: &Beat) {
 /// Appends the end item: its tag, the current world's seed, the number of
 /// members as one byte, then each member's floor, x and y in index order.
 /// The party has at most [`crate::world::MAX_FLOORS`] (32) members, so the
-/// count fits a byte; a longer list would record 255.
+/// count fits a byte; a longer list would record 255, and a debug build
+/// stops on it.
 fn encode_end(out: &mut Vec<u8>, seed: u64, members: &[(u8, u8, u8)]) {
+    debug_assert!(
+        members.len() <= usize::from(u8::MAX),
+        "the end item counts {} members in one byte",
+        members.len()
+    );
     out.push(TAG_END);
     put_u64(out, seed);
     out.push(u8::try_from(members.len()).unwrap_or(u8::MAX));
