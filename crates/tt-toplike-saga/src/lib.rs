@@ -23,6 +23,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod maze;
 pub mod observe;
 pub mod rng;
 pub mod seed;
