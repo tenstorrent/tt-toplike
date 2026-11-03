@@ -13,6 +13,7 @@
 //!   monitor's `ServiceState` list from the world.
 //! * [`gozer`] watches `gozer status --json` for chip leases and holds the
 //!   `Governor` that lets a chip-opening source ask whether a chip is ours.
+//! * [`query`] finds the entities of a kind that carry a set of signals.
 //! * [`redact`] hides secrets in process command lines.
 //! * [`proc_argv`] reads command lines and start times from `/proc` for the
 //!   process source.
@@ -32,6 +33,7 @@ pub mod headless;
 pub mod host;
 pub mod identity;
 pub mod proc_argv;
+pub mod query;
 pub mod redact;
 pub mod signals;
 pub mod source;
