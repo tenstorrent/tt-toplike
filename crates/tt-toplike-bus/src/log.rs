@@ -1870,7 +1870,7 @@ mod tests {
         drop(bus);
         let bus = Bus::open(cfg).unwrap();
         assert_eq!(bus.head(), 10);
-        // This instance's first record is the one after the old head.
+        // This instance's first record follows the old head.
         assert_eq!(bus.first_seq(), 11);
         assert_eq!(bus.publish("t", sample(10)), 11);
         assert_eq!(bus.first_seq(), 11, "publishing does not move it");

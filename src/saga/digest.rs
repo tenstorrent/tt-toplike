@@ -21,7 +21,7 @@
 //!   ran live under another label wrote another first line, so its digest
 //!   differs from this one even on the same records;
 //! * names are real ([`NameMode::Real`]);
-//! * the season is the one the log's header records (the tag
+//! * the season comes from the log's header (the tag
 //!   `saga.season_ticks`, which the host that recorded it wrote from its
 //!   own `[saga]` settings and `--interval`). A log recorded before the tag
 //!   existed uses the default, 20 minutes at 10 Hz
