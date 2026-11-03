@@ -19,8 +19,8 @@ list is a summary and is not kept for every release.
 
 ### 0.16.3
 - Saga's `y` ("why") line is now a sentence. It used to print the raw cause
-  (`model:mock-llama · ModelReady · #379`); it now reads `why: the model mock-llama came online,
-  which woke the hero (record 379)`, and says plainly when nothing asked for the hero's move.
+  (`model:mock-llama · ModelReady · #379`); it now reads `why: this goes back to the model
+  mock-llama coming online (record 379)`, and says plainly when nothing set the hero's move off.
 
 ### 0.16.2
 - tmux no longer forces 256 colours. `COLORTERM=truecolor` (or `24bit`) now turns on full colour

@@ -113,12 +113,12 @@ to another floor.
 The chronicle keeps the last 500 lines. Each line starts with the sweep it was written at (`t42`)
 and a mark for its tone: `·` calm in teal, `▲` tense in orange, `★` triumphant in yellow. The
 names of heroes, places, sages and monsters are bold. Older lines are drawn a little dimmer.
-Press `y` to show what set each line off, in a sentence under it: `why: the model mock-llama came
-online, which woke the hero (record 379)`. The hero acts on the signal that was in front of it when
-it chose its next goal, so a wander can trace back to a model coming online. When nothing asked for
-the hero's next move, the line says so: `why: nothing asked for this, so the hero follows its own
-curiosity near chip 0000:01:00.0`. The record number is the signal's place in the stream the core
-was fed. Signals the view has no words for are shown by name (`reported a new fan rpm`).
+Press `y` to show what set each line off, in a sentence under it: `why: this goes back to the model
+mock-llama coming online (record 379)`. The line says "goes back to" because the cause is the signal
+the hero had in front of it when it chose its quest, so several lines in a row can share one cause.
+When nothing set the hero's next move off, the line says so: `why: nothing set this off, so the hero
+follows its own curiosity near chip 0000:01:00.0`. The record number is the signal's place in the stream the core
+was fed. Signals the view has no words for are shown by name (`reporting a new fan rpm`).
 
 ## The same records give the same saga
 

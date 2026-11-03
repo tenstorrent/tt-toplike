@@ -33,22 +33,22 @@ fn thing(key: &str) -> String {
 /// name as a cause. `None` for a signal this table does not know.
 fn happened(signal: &str) -> Option<&'static str> {
     Some(match signal {
-        "ModelLoading" => "started loading",
-        "ModelReady" => "came online",
-        "ModelGone" => "went away",
-        "RequestsCompleted" => "finished some requests",
-        "KernelCompiled" => "compiled a kernel",
-        "Reset" => "was reset",
-        "LinkChanged" => "had a link change",
-        "LeaseGranted" => "was granted",
-        "LeaseReleased" => "was released",
-        "EccTick" => "logged a memory error",
-        "Spark" => "threw a spark",
-        "ViewChanged" => "changed what it was showing",
-        "tt_asic_temperature_celsius" => "reported a new temperature",
-        "tt_ai_clock_mhz" => "reported a new clock speed",
-        "toplike.heartbeat" => "beat its heart",
-        "toplike.train.step" => "finished a training step",
+        "ModelLoading" => "starting to load",
+        "ModelReady" => "coming online",
+        "ModelGone" => "going away",
+        "RequestsCompleted" => "finishing some requests",
+        "KernelCompiled" => "compiling a kernel",
+        "Reset" => "being reset",
+        "LinkChanged" => "a link changing",
+        "LeaseGranted" => "being granted",
+        "LeaseReleased" => "being released",
+        "EccTick" => "logging a memory error",
+        "Spark" => "throwing a spark",
+        "ViewChanged" => "changing what it showed",
+        "tt_asic_temperature_celsius" => "reporting a new temperature",
+        "tt_ai_clock_mhz" => "reporting a new clock speed",
+        "toplike.heartbeat" => "beating its heart",
+        "toplike.train.step" => "finishing a training step",
         _ => return None,
     })
 }
@@ -62,25 +62,27 @@ fn plain_signal(signal: &str) -> String {
     name.replace(['_', '.'], " ")
 }
 
-/// The line, for example "why: the model mock-llama came online, which
-/// woke the hero (record 379)".
+/// The line, for example "why: this goes back to the model mock-llama
+/// coming online (record 379)". It says "goes back to" because the cause
+/// is the signal in front of the hero when it chose this quest (or the
+/// world began), not always the last thing that happened.
 pub fn why_line(cause: &Cause) -> String {
     let who = thing(cause.entity.as_str());
     let what = if cause.signal.is_empty() {
         // The quest planner found nothing asking for anything.
         return format!(
-            "why: nothing asked for this, so the hero follows its own curiosity near {who} (record {})",
+            "why: nothing set this off, so the hero follows its own curiosity near {who} (record {})",
             cause.ordinal
         );
     } else if let Some(w) = happened(&cause.signal) {
         w.to_string()
     } else if cause.signal.starts_with("toplike.train.") {
-        "reported training progress".to_string()
+        "reporting training progress".to_string()
     } else {
-        format!("reported a new {}", plain_signal(&cause.signal))
+        format!("reporting a new {}", plain_signal(&cause.signal))
     };
     format!(
-        "why: {who} {what}, which woke the hero (record {})",
+        "why: this goes back to {who} {what} (record {})",
         cause.ordinal
     )
 }
@@ -102,7 +104,7 @@ mod tests {
     fn a_model_coming_online_reads_as_a_sentence() {
         assert_eq!(
             why_line(&cause("model:mock-llama", "ModelReady", 379)),
-            "why: the model mock-llama came online, which woke the hero (record 379)"
+            "why: this goes back to the model mock-llama coming online (record 379)"
         );
     }
 
@@ -114,23 +116,23 @@ mod tests {
                 "tt_asic_temperature_celsius",
                 5
             )),
-            "why: chip 0000:01:00.0 reported a new temperature, which woke the hero (record 5)"
+            "why: this goes back to chip 0000:01:00.0 reporting a new temperature (record 5)"
         );
     }
 
     #[test]
     fn no_signal_says_nothing_asked_for_it() {
         let s = why_line(&cause("chip:0000:01:00.0", "", 9));
-        assert!(s.contains("nothing asked for this"), "{s}");
+        assert!(s.contains("nothing set this off"), "{s}");
         assert!(!s.contains("no signal"), "{s}");
     }
 
     #[test]
     fn an_unknown_signal_is_shown_in_words_not_dropped() {
         let s = why_line(&cause("chip:a", "tt_future_thing", 1));
-        assert!(s.contains("reported a new future thing"), "{s}");
+        assert!(s.contains("reporting a new future thing"), "{s}");
         let s = why_line(&cause("chip:a", "toplike.fan_rpm", 1));
-        assert!(s.contains("reported a new fan rpm"), "{s}");
+        assert!(s.contains("reporting a new fan rpm"), "{s}");
     }
 
     #[test]
