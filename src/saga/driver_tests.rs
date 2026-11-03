@@ -812,3 +812,115 @@ fn a_remote_driver_takes_the_season_from_the_snapshot() {
     d.stop();
     drop(server);
 }
+
+/// The chronicle's text with the label mark taken off the first line, so a
+/// live saga's chronicle and a replay's can be compared (ledger ruling R27:
+/// the two differ there on purpose).
+fn chronicle_text(state: &SagaState) -> Vec<String> {
+    state
+        .chronicle
+        .lines(tt_toplike_saga::chronicle::CAPACITY)
+        .map(|b| {
+            b.text
+                .trim_end_matches(" (mock)")
+                .trim_end_matches(" (replay)")
+                .to_string()
+        })
+        .collect()
+}
+
+/// The saga `--saga-digest` tells for the log at `dir`, with its state.
+fn digest_saga(dir: &std::path::Path) -> Saga {
+    let mut log = tt_toplike_bus::Replay::open(dir).unwrap();
+    let mut saga = Saga::new(super::super::digest::digest_config(log.header()));
+    for r in log.records() {
+        saga.feed(&r);
+        let _ = saga.drain_events();
+    }
+    saga
+}
+
+/// A TUI-shaped run end to end: a live TUI's driver reads its own bus while
+/// it records and publishes `ViewChanged` as a person switches views; a
+/// second TUI replays the recording and publishes its own `ViewChanged`
+/// records while the replay plays. The live saga and `--saga-digest` of the
+/// recording tell the same chronicle (apart from the label mark) and the
+/// same world, and the replaying TUI's saga has the digest's digest (final
+/// review findings M5 and C1).
+#[test]
+fn a_live_tui_its_replay_and_the_digest_tell_one_story() {
+    use crate::bus::host::BusHost;
+    use tt_toplike_bus::{Event, Payload};
+    let records = busy_records();
+    let view = |v: &str| {
+        Payload::Event(Event::ViewChanged {
+            view: v.to_string(),
+        })
+    };
+
+    // The live TUI: its saga reads its bus while it records.
+    let live_dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(0);
+    let bus = Bus::open(BusConfig {
+        dir: Some(live_dir.path().to_path_buf()),
+        clock: clock.clone(),
+        header_tags: short_season_tags(),
+        ..BusConfig::default()
+    })
+    .unwrap();
+    let d = SagaDriver::spawn(bus.clone(), default_cfg()).unwrap();
+    bus.publish(crate::bus::host::VIEW_SOURCE, view("arcade"));
+    for (i, r) in records.iter().enumerate() {
+        bus.publish(&r.source, r.payload.clone());
+        if i % 401 == 200 {
+            let name = if i % 2 == 0 { "saga" } else { "die3d" };
+            bus.publish(crate::bus::host::VIEW_SOURCE, view(name));
+        }
+    }
+    let head = bus.head();
+    assert!(wait_published(&d, &clock, |p| p.through == head));
+    let live = d.published();
+    d.stop();
+    assert!(bus.flush(WAIT));
+    drop(bus);
+
+    let told = digest_saga(live_dir.path());
+    assert_eq!(chronicle_text(&live.state), chronicle_text(told.state()));
+    assert_eq!(live.state.world.seed, told.state().world.seed);
+    assert_eq!(live.state.world.id, told.state().world.id);
+    assert_eq!(live.state.tick, told.state().tick);
+    assert_eq!(live.state.hero.pos, told.state().hero.pos);
+    assert!(told.state().world.id > 1, "the story ended worlds");
+    let want = super::super::digest::digest_log(live_dir.path()).unwrap();
+    assert_eq!(want.digest, told.digest());
+
+    // The replaying TUI publishes its own view changes while it plays.
+    let clock = ManualClock::new(0);
+    let host = BusHost::replay(
+        live_dir.path(),
+        1.0e9,
+        BusConfig {
+            clock: clock.clone(),
+            ..BusConfig::default()
+        },
+    )
+    .unwrap();
+    let d = SagaDriver::spawn(host.bus().clone(), default_cfg()).unwrap();
+    host.publish_view_changed("arcade");
+    host.publish_view_changed("saga");
+    let played = wait_replayed(&host);
+    host.publish_view_changed("grid");
+    let head = host.bus().head();
+    assert_eq!(
+        head,
+        played + 3,
+        "the replay bus holds the TUI's own records"
+    );
+    assert!(wait_published(&d, &clock, |p| p.through == head));
+    assert_eq!(
+        d.published().digest,
+        want.digest,
+        "the replay tells the digest's story"
+    );
+    d.stop();
+}
