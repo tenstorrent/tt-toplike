@@ -41,6 +41,15 @@ fn ctx(name: Option<RealName>, tone: Tone, tick: u64) -> BeatCtx {
 /// Every kind, tone and verb combination, with `name`, for `seed`. Returns
 /// the texts in order.
 fn sweep(name: Option<RealName>, names: NameMode, seed: u64) -> Vec<String> {
+    sweep_beats(name, names, seed, cause(0))
+        .into_iter()
+        .map(|b| b.text)
+        .collect()
+}
+
+/// As [`sweep`], with every beat caused by `cause` (its ordinal set to the
+/// beat's tick). Returns the whole beats.
+fn sweep_beats(name: Option<RealName>, names: NameMode, seed: u64, cause: Cause) -> Vec<Beat> {
     let pack = Pack::builtin();
     let mut rng = Pcg32::from_seed(seed);
     let mut chron = Chronicle::new();
@@ -54,12 +63,11 @@ fn sweep(name: Option<RealName>, names: NameMode, seed: u64) -> Vec<String> {
                     let mut c = ctx(name.clone(), tone, tick);
                     c.verb = Some(verb);
                     c.role = role;
-                    out.push(
-                        chron
-                            .push_beat(kind, &c, pack, names, &mut rng)
-                            .text
-                            .clone(),
-                    );
+                    c.cause = Cause {
+                        ordinal: tick,
+                        ..cause.clone()
+                    };
+                    out.push(chron.push_beat(kind, &c, pack, names, &mut rng).clone());
                 }
             }
         }
@@ -119,26 +127,124 @@ fn single_token_names_are_accepted_as_given() {
 
 #[test]
 fn generated_names_leave_no_real_name() {
-    let reals = [
-        "Zyxwv-Model-9B",
-        "qrstproc",
-        "meta-llama/Llama-3.1-8B-Instruct",
+    // Each real name arrives both as the beat's name and inside the cause's
+    // entity key, in every shape of key that can carry a name.
+    let cases = [
+        ("Zyxwv-Model-9B", EntityKey::model("Zyxwv-Model-9B")),
+        ("qrstproc", EntityKey::process(4242, 98765)),
+        (
+            "meta-llama/Llama-3.1-8B-Instruct",
+            EntityKey::model("meta-llama/Llama-3.1-8B-Instruct"),
+        ),
+        ("zyxhost-01", EntityKey::host("zyxhost-01")),
+        ("lease-qrst-7", EntityKey::lease("lease-qrst-7")),
+        ("run-zyx-42", EntityKey::training_run("run-zyx-42")),
+        ("board-zyx-serial", EntityKey::board("board-zyx-serial")),
     ];
-    for real in reals {
+    for (real, entity) in cases {
         let name = RealName::new(real);
         assert!(name.is_some(), "{real}");
-        // The search can see the name: in real mode it appears.
-        let shown = sweep(name.clone(), NameMode::Real, 1);
-        assert!(shown.iter().any(|t| t.contains(real)), "{real} never shown");
+        let key = entity.as_str().to_string();
+        let caused = |n: &str| Cause {
+            entity: entity.clone(),
+            signal: n.to_string(),
+            ordinal: 0,
+        };
+        // The search can see the name: in real mode it appears in the text,
+        // and the cause is kept exactly as given, in the beat and the event.
+        let shown = sweep_beats(name.clone(), NameMode::Real, 1, caused("model.ready"));
+        assert!(
+            shown.iter().any(|b| b.text.contains(real)),
+            "{real} never shown"
+        );
+        for b in &shown {
+            assert_eq!(b.cause.entity, entity);
+            assert!(format!("{b:?}").contains(&key));
+            assert!(format!("{:?}", b.event(3)).contains(&key));
+        }
         for seed in 0..SEEDS {
-            for text in sweep(name.clone(), NameMode::Generated, seed) {
-                assert!(!text.contains(real), "{text:?} leaks {real}");
-                assert!(!text.to_lowercase().contains("zyxwv"), "{text:?}");
-                assert!(!text.contains("qrstproc"), "{text:?}");
-                assert!(!text.contains("Llama"), "{text:?}");
+            for beat in sweep_beats(
+                name.clone(),
+                NameMode::Generated,
+                seed,
+                caused("model.ready"),
+            ) {
+                // The whole beat and its event: text, cause, everything.
+                let event = beat.event(3);
+                for seen in [format!("{beat:?}"), format!("{event:?}")] {
+                    let lower = seen.to_lowercase();
+                    for leak in [
+                        real,
+                        "zyxwv",
+                        "qrstproc",
+                        "llama",
+                        "zyxhost",
+                        "lease-qrst",
+                        "run-zyx",
+                        "board-zyx",
+                        "4242",
+                        "98765",
+                    ] {
+                        assert!(
+                            !lower.contains(&leak.to_lowercase()),
+                            "{seen:?} leaks {leak}"
+                        );
+                    }
+                }
+                // The kind prefix stays, so the "why" view can say what
+                // sort of thing caused the beat.
+                assert_eq!(beat.cause.entity.kind(), entity.kind());
+                assert_eq!(beat.cause.signal, "model.ready");
             }
         }
     }
+}
+
+#[test]
+fn generated_mode_keeps_chip_causes_and_shares_aliases_with_the_text() {
+    let pack = Pack::builtin();
+    // A chip key is a PCI address, a hardware identifier: it stays.
+    for beat in sweep_beats(None, NameMode::Generated, 4, cause(0)) {
+        assert_eq!(beat.cause.entity, EntityKey::chip("0000:01:00.0"));
+    }
+    let chip = EntityKey::chip("0000:01:00.0");
+    for part in [
+        EntityKey::tile(&chip, 1, 2),
+        EntityKey::dram_channel(&chip, 3),
+        EntityKey::eth_port(&chip, 4),
+    ] {
+        let mut rng = Pcg32::from_seed(1);
+        let mut chron = Chronicle::new();
+        let mut c = ctx(None, Tone::Calm, 1);
+        c.cause.entity = part.clone();
+        let beat = chron.push_beat(BeatKind::Ambient, &c, pack, NameMode::Generated, &mut rng);
+        assert_eq!(beat.cause.entity, part);
+    }
+    // The same real name gets the same alias in the text and in the cause.
+    let mut rng = Pcg32::from_seed(6);
+    let mut chron = Chronicle::new();
+    let mut c = ctx(RealName::new("Zyxwv-Model-9B"), Tone::Calm, 1);
+    c.cause.entity = EntityKey::model("Zyxwv-Model-9B");
+    c.verb = Some(Verb::VisitSage);
+    let beat = chron.push_beat(
+        BeatKind::QuestStarted,
+        &c,
+        pack,
+        NameMode::Generated,
+        &mut rng,
+    );
+    let alias = beat
+        .cause
+        .entity
+        .as_str()
+        .strip_prefix("model:")
+        .expect("a model key stays a model key")
+        .to_string();
+    assert!(
+        pack.lexicon.words("npc:model").contains(&alias.as_str()),
+        "{alias}"
+    );
+    assert!(beat.text.contains(&alias), "{:?} lacks {alias}", beat.text);
 }
 
 #[test]

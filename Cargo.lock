@@ -5584,6 +5584,7 @@ dependencies = [
 name = "tt-toplike-saga"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "tt-toplike-bus",
 ]
 

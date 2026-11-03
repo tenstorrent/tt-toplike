@@ -55,6 +55,13 @@
 //!   that runs many processes.
 //! * A beat with no name gets a fresh lexicon name for `{name}` in both
 //!   modes.
+//! * In [`NameMode::Generated`] the beat's cause is cleaned too, so the
+//!   stored [`Beat`] and its [`SagaEvent::Beat`] carry no real name. Chip,
+//!   tile, DRAM-channel and Ethernet-port keys stay: they are PCI addresses
+//!   and indexes, hardware identifiers that name nothing. Every other
+//!   entity key keeps its kind prefix and gets an alias for its id from the
+//!   same table, so `model:X` and the text name `X` share one alias. Real
+//!   mode keeps the cause exactly as given.
 //!
 //! The hero's name is not a real name. It comes from the lexicon (see
 //! [`Pack::hero_name`]) and is inserted as given.
@@ -73,6 +80,8 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
+
+use tt_toplike_bus::{EntityKey, EntityKind};
 
 use crate::event::{Biome, EndWhy, SagaEvent};
 use crate::hero::Cause;
@@ -248,7 +257,8 @@ impl Beat {
 pub struct Chronicle {
     ring: VecDeque<Arc<Beat>>,
     /// Generated names already given to real names (see the module comment).
-    aliases: BTreeMap<RealName, &'static str>,
+    /// Keyed by the real name or key id, cut to [`NAME_MAX`] characters.
+    aliases: BTreeMap<String, &'static str>,
 }
 
 impl Chronicle {
@@ -258,7 +268,13 @@ impl Chronicle {
     }
 
     /// Writes one beat of kind `kind` and returns it. See the module comment
-    /// for how the template is chosen and filled.
+    /// for how the template is chosen and filled, and "Names" there for how
+    /// [`NameMode::Generated`] treats the text and the cause.
+    ///
+    /// `rng` must be a stream used by the chronicle alone. Generated mode
+    /// draws more from it than real mode does (one draw or more per new
+    /// alias), so passing the world's generator would let the `names`
+    /// setting change the maze and the hero's walk.
     pub fn push_beat(
         &mut self,
         kind: BeatKind,
@@ -273,13 +289,20 @@ impl Chronicle {
             // tests check this). A user pack might not.
             None => format!("Something happens in world {}.", ctx.world),
         };
+        let cause = match names {
+            NameMode::Real => ctx.cause.clone(),
+            NameMode::Generated => Cause {
+                entity: self.alias_entity(&ctx.cause.entity, pack, rng),
+                ..ctx.cause.clone()
+            },
+        };
         if self.ring.len() == CAPACITY {
             self.ring.pop_front();
         }
         self.ring.push_back(Arc::new(Beat {
             tone: ctx.tone,
             text,
-            cause: ctx.cause.clone(),
+            cause,
             tick: ctx.tick,
         }));
         self.ring
@@ -364,10 +387,46 @@ impl Chronicle {
         if names == NameMode::Real {
             return real.as_str().to_string();
         }
-        if let Some(alias) = self.aliases.get(real) {
-            return (*alias).to_string();
+        self.alias(real.as_str(), tag, pack, rng).to_string()
+    }
+
+    /// The cause's entity key as generated mode stores it. Keys whose
+    /// [`EntityKey::chip_owner`] is a chip (a chip, a tile, a DRAM channel,
+    /// an Ethernet port) are PCI addresses and indexes: hardware
+    /// identifiers that name no model, person or host, so they stay. Every
+    /// other key (model, process, lease, host, training run, board, and any
+    /// kind this version does not know) keeps its kind prefix, and its id
+    /// becomes an alias from the same table as the text names, so a model
+    /// called `X` in the text and in `model:X` gets one alias in both. The
+    /// alias is drawn from `npc:model` for a model, `npc:process` for a
+    /// process, and `npc:service` for the rest.
+    fn alias_entity(&mut self, entity: &EntityKey, pack: &Pack, rng: &mut Pcg32) -> EntityKey {
+        if entity.chip_owner().is_some() {
+            return entity.clone();
         }
-        let lower = real.as_str().to_lowercase();
+        let (prefix, id) = entity
+            .as_str()
+            .split_once(':')
+            .unwrap_or(("other", entity.as_str()));
+        let role = match entity.kind() {
+            EntityKind::Model => NameRole::Model,
+            EntityKind::Process => NameRole::Process,
+            _ => NameRole::Service,
+        };
+        let alias = self.alias(id, name_tag(role), pack, rng);
+        entity_key(&format!("{prefix}:{alias}"))
+    }
+
+    /// The generated name for the real name or key id `real`, drawn from
+    /// `tag` the first time it is seen. The table is keyed by the first
+    /// [`NAME_MAX`] characters, the same cut [`RealName::new`] makes, so an
+    /// id and the name made from it share one entry.
+    fn alias(&mut self, real: &str, tag: &str, pack: &Pack, rng: &mut Pcg32) -> &'static str {
+        let key: String = real.chars().take(NAME_MAX).collect();
+        if let Some(alias) = self.aliases.get(&key) {
+            return alias;
+        }
+        let lower = key.to_lowercase();
         let mut alias = "?";
         for _ in 0..ALIAS_TRIES {
             alias = pack.lexicon.word(tag, rng).unwrap_or("?");
@@ -380,8 +439,8 @@ impl Chronicle {
         if self.aliases.len() >= ALIAS_LIMIT {
             self.aliases.clear();
         }
-        self.aliases.insert(real.clone(), alias);
-        alias.to_string()
+        self.aliases.insert(key, alias);
+        alias
     }
 }
 
@@ -427,6 +486,18 @@ fn push_value(out: &mut String, value: &str) {
         out.insert(out.len() - 1, 'n');
     }
     out.push_str(value);
+}
+
+/// An [`EntityKey`] holding exactly `text`. The bus crate builds keys only
+/// through per-kind constructors, and a process key takes numbers, so this
+/// goes through the key's serde form (a bare string), which accepts any
+/// text.
+fn entity_key(text: &str) -> EntityKey {
+    use serde::de::value::{Error, StrDeserializer};
+    use serde::de::IntoDeserializer;
+    use serde::Deserialize;
+    let de: StrDeserializer<'_, Error> = text.into_deserializer();
+    EntityKey::deserialize(de).expect("an EntityKey deserialises from any string")
 }
 
 /// The plain word for a biome.
