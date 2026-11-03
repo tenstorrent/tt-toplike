@@ -68,12 +68,24 @@ Each sketch shows the rows from the top, with the panels of a row side by side; 
 divider between two panels. The title row and Row 1 are above every layout, and the status bar
 is below. Every layout is tested at 0x0, at several small sizes, at 80x24, 60x20, 120x40 and
 200x60, and at every width from 1 to 240 at six heights: no row runs past the terminal and no
-row ends in a right-side border. At 120x40 and 200x60 every layout shows every panel it names.
+row ends in a right-side border glyph. At 120x40 and 200x60 every layout shows every panel it
+names.
 
-Changed from 0.15.3: when a cut leaves a `│` (or another right-edge glyph) in the terminal's last
-column, the arcade draws a space there. This happens to a panel divider at widths 1 and 2, to the
-title row's separator at width 18, and to the defrag view's field separators at widths such as
-23, 24, 52 and 53 in `classic`. Nothing else in those frames changed.
+Changed from 0.15.3: when one of these glyphs is in the terminal's last column, the arcade draws
+a space there in the same colours:
+
+* the verticals `│ ┃ ║`, their dashed forms `╎ ╏ ┆ ┇ ┊ ┋` and the half verticals `╵ ╷ ╹ ╻ ╽ ╿`;
+* the top-right corners `┐ ┑ ┒ ┓ ╕ ╖ ╗ ╮` and the bottom-right corners `┘ ┙ ┚ ┛ ╛ ╜ ╝ ╯`;
+* the right-edge joints `┤ ┥ ┦ ┧ ┨ ┩ ┪ ┫ ╡ ╢ ╣`;
+* the blocks `▐ ▕` and the ASCII bar `|`.
+
+No other cell changes. The list is `RIGHT_EDGE_GLYPHS` in `src/animation/arcade.rs`. In `classic`
+this clears a panel divider at widths 1 and 2, the title row's separator at width 18, the defrag
+view's field separators at widths such as 23, 24, 52 and 53, and the memory flow's field
+separator `|` at widths 7 and 23. When the inference panel is the rightmost panel (`now-serving`,
+`workload`, `deck`), it clears the right corners of the last stage card, which is then drawn
+open on its right side, and the loading scene's scaffold beam where it stands in the last
+column. The beam's `+` cells stay.
 
 A panel that does not fit is taken out of its row and named on the row's rule (see "How the
 space is shared"). The activity lanes need a starfield of 6 rows or more.

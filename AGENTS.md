@@ -1578,8 +1578,13 @@ both reviews.
   view while serving, from 1.17 MB/s); the shared clouds use the Waffler's `LoadScale`; a
   default a view refuses leaves it off with a note; dialogs and the command bar keep the
   backdrop out.
-- No arcade row ends in a right-side border at any width; 377 base-grid sizes changed, only in
-  their last column.
+- No arcade row ends in a right-side border at any width. The guard (`clear_right_edge`) puts a
+  space for a glyph of `RIGHT_EDGE_GLYPHS` in the last column: every box-drawing piece with a
+  vertical stroke and no stroke to the right (verticals, right corners, right-edge joints),
+  `▐`, `▕` and ASCII `|`. Nothing else changes. The first pass had no corners and no `|`, and the
+  sweep read the same list, so it could not see them (re-review SF1); the guard, the sweeps and
+  a test that the list holds every glyph AGENTS.md names now share the one constant. 418
+  base-grid sizes differ from 0.15.3, only in their last column; one backdrop pin was retaken.
 
 ### Arcade layout presets and `{` `}` (Nov 2 2026, branch `arcade-presets`)
 

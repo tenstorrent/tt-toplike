@@ -425,16 +425,20 @@ fn no_row_ends_in_a_right_border_at_any_width() {
     );
 }
 
-/// The glyphs AGENTS.md names as right-side borders: every character set in
-/// backticks on a line that says "right-side border". Today that is the
-/// BBS box's `┐ │ ┘`.
+/// The glyphs AGENTS.md names as right-side borders: the characters of each
+/// backtick span made of glyphs (no letter, digit or `_`, so a code name
+/// such as `clear_right_edge` is skipped) on a line that says "right-side
+/// border". Today that is the BBS box's `┐ │ ┘`.
 fn agents_md_right_borders() -> Vec<char> {
     let doc = include_str!("../../AGENTS.md");
     let mut named = Vec::new();
     for line in doc.lines().filter(|l| l.contains("right-side border")) {
         // The text between each pair of backticks.
         for (i, part) in line.split('`').enumerate() {
-            if i % 2 == 1 {
+            let glyphs = part
+                .chars()
+                .all(|c| c.is_whitespace() || !(c.is_alphanumeric() || c == '_'));
+            if i % 2 == 1 && glyphs {
                 named.extend(part.chars().filter(|c| !c.is_whitespace()));
             }
         }

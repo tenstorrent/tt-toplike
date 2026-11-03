@@ -25,8 +25,10 @@ list is a summary and is not kept for every release.
 - Arcade layouts: `{` and `}` step through eight built-in layouts and your own `[[arcade.layouts]]`;
   `--arcade-layout NAME`, `/arcade layout ...`. A layout can set the arcade's backdrop. See
   `docs/arcade-layout.md`.
-- No arcade row ends in a right-side border character at any width (377 sizes of the default layout lose
-  only their last column).
+- No arcade row ends in a right-side border character at any width. A vertical (`│ ┃ ║` and their dashed
+  and half forms), a right corner (`┐ ┘ ╗ ╝ ╮ ╯` and their heavy and mixed forms), a right-edge joint
+  (`┤ ┫ ╣` and the like), `▐`, `▕` or ASCII `|` in the last column is drawn as a space; nothing else
+  changes. 418 sizes of the default layout differ from 0.15.3, only in their last column.
 - Messages from the layout, backdrop and arcade keys go away when you leave the view.
 - Fix: switching layouts no longer flashes "no Tenstorrent device found" for one frame.
 - The backdrop's terminal traffic fell from 1.17 MB/s to 74 KB/s while a model serves (blank 200x60 view).
