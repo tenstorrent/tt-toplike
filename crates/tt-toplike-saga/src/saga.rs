@@ -120,6 +120,8 @@
 //!   10 Hz): window `k` is ticks `10k` to `10k + 9`.
 //! * The first floor to write a routine line in a window owns it. Its
 //!   routine lines in that window are written; another floor's are not.
+//!   A world's birth opens the window again, so the old world's owner does
+//!   not carry over into the new party.
 //! * One addition to the addendum's rule keeps every floor heard. A member
 //!   is overdue when its last written routine line, or its birth, is at
 //!   least [`OVERDUE_TICKS`] (300) ticks old. While any member is overdue, a
@@ -601,7 +603,7 @@ pub struct Saga {
     /// The window of the pace that last had an owner, and the floor that
     /// owns it: `(k, floor)` for ticks `10k` to `10k + 9` (see "Pace" in
     /// the module comment). A window other than the current tick's has no
-    /// owner yet.
+    /// owner yet. A world's birth clears it.
     window_owner: Option<(u64, u8)>,
     /// Whether the first chronicle line has been written (and marked).
     wrote_first: bool,
@@ -1073,6 +1075,10 @@ impl Saga {
         // empty and every index fits a byte.
         self.state.party.clear();
         self.members.clear();
+        // A new party starts with the window open: a floor of the old
+        // world that owned the current window does not silence the new
+        // party for the rest of it.
+        self.window_owner = None;
         let mut names: Vec<String> = Vec::with_capacity(world.floors.len());
         for (i, floor) in world.floors.iter().enumerate() {
             let chip = &world.chips[i];

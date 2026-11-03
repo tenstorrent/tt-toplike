@@ -375,8 +375,11 @@ fn routine_lines_come_from_one_floor_per_window() {
     use tt_toplike_saga::saga::ROUTINE_WINDOW_TICKS;
     assert_eq!(ROUTINE_WINDOW_TICKS, 10);
     let steps = thirty_two();
-    let mut windows: BTreeMap<u64, BTreeSet<u8>> = BTreeMap::new();
-    let (mut quests, mut lines) = (0, 0);
+    // Windows are keyed by the world and the window: a world's birth opens
+    // the window again, so a window a birth falls in can hold the old
+    // world's owner before the birth and a new member after it.
+    let mut windows: BTreeMap<(u32, u64), BTreeSet<u8>> = BTreeMap::new();
+    let (mut quests, mut lines, mut world) = (0, 0, 0u32);
     for (tick, events) in steps {
         quests += events
             .iter()
@@ -387,19 +390,24 @@ fn routine_lines_come_from_one_floor_per_window() {
                 )
             })
             .count();
-        lines += events.iter().filter_map(routine_floor).count();
-        for f in events.iter().filter_map(routine_floor) {
-            windows
-                .entry(tick / ROUTINE_WINDOW_TICKS)
-                .or_default()
-                .insert(f);
+        for e in events {
+            if let SagaEvent::WorldBorn { .. } = e {
+                world += 1;
+            }
+            if let Some(f) = routine_floor(e) {
+                lines += 1;
+                windows
+                    .entry((world, tick / ROUTINE_WINDOW_TICKS))
+                    .or_default()
+                    .insert(f);
+            }
         }
     }
-    for (k, floors) in &windows {
+    for ((w, k), floors) in &windows {
         assert_eq!(
             floors.len(),
             1,
-            "window {k} (ticks {} to {}) has lines from floors {floors:?}",
+            "world {w}, window {k} (ticks {} to {}) has lines from floors {floors:?}",
             k * 10,
             k * 10 + 9
         );

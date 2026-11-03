@@ -1332,6 +1332,44 @@ fn a_party_birth_writes_one_party_line() {
     );
 }
 
+/// A world's birth opens the routine window again. A window an old world's
+/// floor owned would otherwise silence the new party's first quest lines
+/// for the rest of that window: here floor 2 of the old world owns the
+/// window the birth falls in, and member 0 of the new world still writes
+/// its first quest's line.
+#[test]
+fn a_new_world_does_not_inherit_the_old_windows_owner() {
+    let mut saga = saga_on(&[chip_b(), chip_c()]);
+    saga.drain_events();
+    let born = saga.state.world.id;
+    // Floor 2 of the old world owns the current window.
+    saga.window_owner = Some((saga.state.tick / ROUTINE_WINDOW_TICKS, 2));
+    // A ready model naming no chips ends this world and births a dungeon on
+    // every chip, in the same record and so in the same window.
+    let tick = saga.state.tick;
+    saga.feed(&event(Event::ModelReady {
+        model: EntityKey::model(ODD_MODEL),
+        chips: Vec::new(),
+    }));
+    assert_ne!(saga.state.world.id, born, "a new world was born");
+    assert_eq!(saga.state.tick, tick, "in the same tick");
+    let events = saga.drain_events();
+    let at = events
+        .iter()
+        .position(|e| matches!(e, SagaEvent::WorldBorn { .. }))
+        .expect("the birth's events");
+    let birth = shape(&events[at..]);
+    let q0 = birth
+        .iter()
+        .position(|e| e == "Q0")
+        .expect("member 0's quest");
+    assert_eq!(
+        birth.get(q0 + 1).map(String::as_str),
+        Some("b0"),
+        "member 0's first quest line was not written: {birth:?}"
+    );
+}
+
 #[test]
 fn a_dropped_quest_still_raises_its_event_with_a_clean_cause() {
     // At the birth both members set off for the sage. Member 0's line owns
