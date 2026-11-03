@@ -186,8 +186,9 @@ pub struct Cli {
             crate::die3d_mode_alias!(),
             ", the ",
             crate::die3d_display_name!(),
-            "), saga (a hero's quest through a dungeon built from the machine's ",
-            "signals, with a chronicle that says what set each line off; also `S` in-app)"
+            "), saga (a party of heroes, one per chip, questing through a dungeon built ",
+            "from the machine's signals, with a chronicle that says what set each line ",
+            "off; also `S` in-app)"
         )
     )]
     pub mode: Option<VisualizationMode>,
@@ -720,9 +721,10 @@ pub enum VisualizationMode {
     )]
     Die3d,
 
-    /// Saga: a hero's quest through a dungeon built from the machine's own
-    /// signals, with a chronicle of what happens. Also reachable in-app with
-    /// `S`. Needs `[saga] enabled` (on by default).
+    /// Saga: a party of heroes, one per chip's floor, questing through a
+    /// dungeon built from the machine's own signals, with a chronicle of
+    /// what happens. Also reachable in-app with `S`. Needs `[saga] enabled`
+    /// (on by default).
     Saga,
 }
 

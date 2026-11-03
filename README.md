@@ -269,11 +269,16 @@ tt-toplike-tui --bus-attach /tmp/tt-toplike-$UID/replay.sock    # a TUI that rea
 
 ## Saga: a quest drawn from the machine's signals (`S`)
 
-Press `S` in any view, or start with `tt-toplike --mode saga`. A hero quests through a dungeon
-built from this box's own signals: each chip is a floor, a Blackhole floor follows the chip's
-tile grid, and the seed comes from the readings themselves. A model becoming ready, a reset,
-a model going away, a training run or a quiet season ends a world, and the next one has a new
-maze. A chronicle tells what happens, and `y` says in a sentence what set each line off.
+Press `S` in any view, or start with `tt-toplike --mode saga`. A party of heroes quests through
+a dungeon built from this box's own signals: each chip is a floor with its own hero, a Blackhole
+floor follows the chip's tile grid, and the seed comes from the readings themselves. With more
+than one chip, the view shows every floor at once as a grid of tiles, each centred on its hero;
+`[` and `]` move the focus from floor to floor, and `z` shows the focused floor alone. Boxes with
+more than 32 chips get floors for the first 32. A hero never leaves its floor yet; crossing
+between linked chips comes next. A model becoming ready, a reset, a model going away, a training
+run or a quiet season ends a world, and the next one has a new maze. One chronicle tells what
+happens on every floor, each line tagged with its floor, and `y` says in a sentence what set each
+line off. One chip looks as it did before the party.
 
 The same recorded log always tells the same saga. `tt-toplike-tui --bus-inspect DIR
 --saga-digest` prints a digest you can compare between a recording and a replay of it. This is
@@ -425,7 +430,7 @@ tt-toplike --mode starfield   # Starfield — Tensix cores as stars
 tt-toplike --mode flow        # Memory Flow — NoC DDR channel streams
 tt-toplike --mode hivemind    # HivemindSweeper — read-only activity sniffer (or press ~)
 tt-toplike --mode waffler     # Wafer Waffler — isometric Blackhole boards (or press 3)
-tt-toplike --mode saga        # Saga — a hero's quest built from the machine's signals (or press S)
+tt-toplike --mode saga        # Saga — a party of heroes, one per chip, questing through the machine's signals (or press S)
 tt-toplike                    # then press d  — Defrag (no --mode flag; use keypress)
 
 # Filter to specific devices
@@ -447,7 +452,7 @@ tt-toplike --devices 0,2
 | `i` | Open the Inference Server Monitor from **any** view; `i` while in it jumps to Insights (a quick back-and-forth), `Esc` backs out to where you came from. Also sits at the tail of the `v` cycle. |
 | `t` | Open the Training view from **any** view — auto-attaches to a running tt-train process with no further input; `Esc` backs out to where you came from. Deliberately excluded from the `v` cycle, like `i`. Scriptable as `--mode training`. |
 | `3` | Open the Wafer Waffler from **any** view: an isometric picture of each Blackhole board. `3` or `Esc` leaves. Also the last stop of the `v` cycle. Also `--mode waffler`, `/mode waffler` or `/waffler` (`die3d` works in each). Inside it: `[` `]` previous/next board and Space cuts the camera. Every other setting is a slash command: `/board`, `/scene`, `/cut`, `/autocut`, `/transition`, `/cells` (with `/blocks` and `/braille` as shortcuts), `/bg`, `/labels`, `/clouds`, `/history`. `/theme` sets the colours. `/help` lists them. |
-| `S` | Open Saga from **any** view: a hero's quest through a dungeon built from the machine's signals, with a chronicle. `S` or `Esc` leaves. `y` says what set each chronicle line off. Not in the `v` cycle or the rotation. Also `--mode saga`, `/mode saga` or `/saga`. See [docs/saga.md](docs/saga.md). |
+| `S` | Open Saga from **any** view: a party of heroes, one per chip's floor, questing through a dungeon built from the machine's signals, with one chronicle. `S` or `Esc` leaves. `y` says what set each chronicle line off. With more than one chip, `[` `]` move the focus from floor to floor and `z` shows the focused floor alone. Not in the `v` cycle or the rotation. Also `--mode saga`, `/mode saga` or `/saga`. See [docs/saga.md](docs/saga.md). |
 | `R` | Toggle the unattended rotation. It cycles every view except Grid (the same chip portraits as Insights in another layout), including the key-only ones (`i`, `~`, `t`, `3`) that `v` skips. 30s each, 45s on arcade. Training and the inference monitor are visited only while a training run exists or a model server is starting or running. The Wafer Waffler is visited only on a box with a Blackhole chip. Also `--rotate` at launch. |
 | `b` | Cycle backend (live switching): Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them. |
 | `/` | Command bar — type `/mode defrag`, `/fps 30`, `/theme grayskull`, `/quit`, etc. |
@@ -459,7 +464,7 @@ Arcade's rows and panels (starfield, castle, flow, defrag, Wafer Waffler, traini
 
 The Inference view, the Training view and the Wafer Waffler each carry a backdrop behind what they show: the scene (forge, storm, aurora), the sky, and the clouds, each following real signals. Each draws its own by default and can be switched to another of the three or off, in the `[backdrop]` section of the same file or with `w` and `/backdrop` at run time. Other views, the arcade among them, carry no backdrop. See [docs/backdrop.md](docs/backdrop.md).
 
-Saga, the quest view, tells a story from the signal bus: a world per stretch of activity, a dungeon floor per chip, a hero whose health follows the chips. The TUI runs its story on a small background thread from start-up, whether or not the view is on screen, so the story has no gaps. The `[saga]` section of the same file sets it:
+Saga, the quest view, tells a story from the signal bus: a world per stretch of activity, a dungeon floor per chip, a hero on each floor whose health follows its chip. The TUI runs its story on a small background thread from start-up, whether or not the view is on screen, so the story has no gaps. The `[saga]` section of the same file sets it:
 
 ```toml
 [saga]

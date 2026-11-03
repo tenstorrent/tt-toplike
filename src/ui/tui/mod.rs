@@ -136,9 +136,10 @@ enum DisplayMode {
     /// While active it also takes `[ ] m c C B T X W H L` (see
     /// `die3d_key_for`).
     Die3d,
-    /// Saga: a hero's quest through a dungeon the machine's signals build
-    /// (`saga_view`). Entered with `S` only (`saga_view::ENTRY_KEY`;
-    /// excluded from the `v` cycle, and not in `--rotate` yet);
+    /// Saga: a party of heroes, one per chip's floor, questing through a
+    /// dungeon the machine's signals build (`saga_view`). Entered with `S`
+    /// only (`saga_view::ENTRY_KEY`; excluded from the `v` cycle, and not in
+    /// `--rotate` yet);
     /// `S` toggles back out to `prev_mode`, as does Esc. While active it
     /// also takes `y` for "why", `[` `]` for the party's focus and `z` for
     /// zoom (see `saga_key_for`).

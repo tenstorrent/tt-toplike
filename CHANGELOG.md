@@ -17,6 +17,22 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.17.0
+- Saga has a party: every chip's floor has its own hero, born with the world, and all of them quest
+  at the same time. With more than one chip the view shows every floor at once as a grid of tiles,
+  each centred on its hero, with a one-row HUD (floor tag, name, vitality, quest). `[` and `]` move
+  the focus from floor to floor, pages follow the focus, and `z` shows the focused floor alone. A
+  roster row lists every hero and says how many chips have no floor (a box with more than 32 chips
+  gets floors for the first 32).
+- One chronicle holds every floor's lines, each tagged with its floor (`F3`) in the floor's colour.
+  To keep it readable, one floor's quest lines are written per second; a hero not heard for 300
+  sweeps goes first. A party's birth writes one line for the whole party.
+- A model's dungeon now spans every chip, with the model's sage on the floors of the chips it names.
+- A hero never leaves its floor yet; crossing between linked chips comes next.
+- One chip draws the same view and tells the same story as before. The saga digest's encoding is now version 2 (floors and every
+  hero's position), so `--saga-digest` prints a different number than 0.16 did for the same log.
+  The saga crate is 0.2.0.
+
 ### 0.16.6
 - The status bar flags a stalled ARC. A chip whose firmware heartbeat reads 0 shows a red `ARC!` after
   its readings (`BH0  66°  990M  80W ARC!`). With more than four chips the averaged column ends with

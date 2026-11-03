@@ -1,3 +1,27 @@
+tt-toplike (0.17.0) noble; urgency=medium
+
+  * Saga has a party: every chip's floor has its own hero, born with the
+    world, and all of them quest at the same time. With more than one chip
+    the view shows every floor at once as a grid of tiles, each centred on
+    its hero under a one-row HUD (floor tag, name, vitality, quest).
+  * In Saga, "[" and "]" move the focus from floor to floor, and the page
+    follows the focus; "z" shows the focused floor alone. A roster row lists
+    every hero and says how many chips have no floor. A box with more than
+    32 chips gets floors for the first 32.
+  * One chronicle holds every floor's lines, each tagged with its floor. One
+    floor's quest lines are written per second, and a hero not heard for 300
+    sweeps goes first. A party's birth writes one line for the whole party.
+  * A model's dungeon now spans every chip, with the model's sage on the
+    floors of the chips it names.
+  * A hero never leaves its floor yet; crossing between linked chips comes
+    next.
+  * One chip draws the same view and tells the same story as before. The
+    saga digest's encoding is now version 2, so --saga-digest prints a
+    different number than 0.16 did for the same log. The saga crate is
+    0.2.0.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 15:30:00 -0800
+
 tt-toplike (0.16.6) noble; urgency=medium
 
   * The status bar flags a stalled ARC: a chip whose firmware heartbeat

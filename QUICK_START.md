@@ -1,6 +1,6 @@
 # tt-toplike Quick Start
 
-**Version**: 0.16.6
+**Version**: 0.17.0
 **Last Updated**: November 3, 2026
 
 ---
@@ -109,8 +109,9 @@ tt-toplike --mode training    # or press t in any mode (aliases: train, tt-train
 ```bash
 tt-toplike --mode saga    # or press S in any mode
 ```
-- A hero quests through a dungeon built from the box's own signals. Each chip is a floor, and a new world begins when a model becomes ready, a chip resets, a model goes away, a training run starts or the box has been quiet for a season
-- The chronicle tells what happens. `y` says in a sentence what set each line off
+- A party of heroes quests through a dungeon built from the box's own signals. Each chip is a floor with its own hero, and a new world begins when a model becomes ready, a chip resets, a model goes away, a training run starts or the box has been quiet for a season
+- With more than one chip, every floor is on screen at once as a grid of tiles. `[` `]` move the focus from floor to floor, and `z` shows the focused floor alone. A hero never leaves its floor yet; crossing between linked chips comes next
+- One chronicle tells what happens on every floor, each line tagged with its floor (`F3`). `y` says in a sentence what set each line off
 - `S` or `Esc` leaves. Not in the `v` cycle or the rotation. `[saga]` in `config.toml` sets `enabled`, `names` and `season_minutes`. See [docs/saga.md](docs/saga.md)
 
 ### Rotate every view (`--rotate` / `R`)
@@ -212,7 +213,7 @@ tt-toplike --host --mode arcade             # your real CPU/RAM in arcade mode (
 | `v` | Cycle visualization modes: Insights → Flow → Starfield → Castle → Arcade → Defrag → Inference → Insights |
 | `i` | Open the Inference Server Monitor from any view; `i` while in it jumps to Insights, `Esc` backs out to where you came from. Also at the tail of the `v` cycle |
 | `t` | Open the Training view from any view — auto-attaches to a running tt-train process with no further input; `Esc` backs out. Excluded from the `v` cycle, like `i` |
-| `S` | Open Saga from any view; `S` or `Esc` leaves, `y` shows each chronicle line's cause |
+| `S` | Open Saga from any view; `S` or `Esc` leaves, `y` shows each chronicle line's cause, `[` `]` move the focus between floors and `z` zooms to one |
 | `l` | Toggle legend overlay for the current view |
 | `b` | Cycle backend live: Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them |
 | `r` | Force refresh |
