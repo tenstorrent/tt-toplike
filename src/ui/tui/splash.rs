@@ -234,6 +234,65 @@ const LEAVE: &[u8] = b"\x1b[?1049l\x1b[?25h";
 /// Name of the splash thread.
 const THREAD_NAME: &str = "tt-toplike-splash";
 
+/// When set, everything the splash (and the TUI panic hook's restore) would
+/// write to the terminal goes into this buffer. Tests only; see
+/// [`capture_for_test`].
+static CAPTURE: Mutex<Option<Arc<Mutex<Vec<u8>>>>> = Mutex::new(None);
+
+/// Set by [`panic_in_next_draw_for_test`]: the next draw panics.
+static PANIC_NEXT_DRAW: AtomicBool = AtomicBool::new(false);
+
+/// Send the splash's output to a buffer for the rest of the process, and
+/// return it. For tests: the splash's bytes can then be checked in order.
+#[doc(hidden)]
+pub fn capture_for_test() -> Arc<Mutex<Vec<u8>>> {
+    let buf = Arc::new(Mutex::new(Vec::new()));
+    *CAPTURE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::clone(&buf));
+    buf
+}
+
+/// Make the splash thread's next draw panic. For tests of the panic hooks.
+#[doc(hidden)]
+pub fn panic_in_next_draw_for_test() {
+    PANIC_NEXT_DRAW.store(true, Ordering::SeqCst);
+}
+
+/// Write to the terminal, or to the test capture when one is set.
+fn emit(bytes: &[u8]) {
+    let cap = CAPTURE.try_lock().ok().and_then(|g| g.clone());
+    match cap {
+        Some(buf) => buf
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend_from_slice(bytes),
+        None => {
+            let mut out = std::io::stdout().lock();
+            let _ = out.write_all(bytes);
+            let _ = out.flush();
+        }
+    }
+}
+
+/// The TUI panic hook's terminal restore goes through here, so a test can
+/// see it in order with the splash's own output. In a test capture it is
+/// preceded by `<SPLASH ALIVE>` when the splash thread could still draw at
+/// that moment, which is the bug the hook's [`abandon`] call prevents.
+pub fn emit_for_hook(bytes: &[u8]) {
+    let capturing = CAPTURE.try_lock().map(|g| g.is_some()).unwrap_or(false);
+    if capturing && thread_alive() {
+        emit(b"<SPLASH ALIVE>");
+    }
+    emit(bytes);
+}
+
+/// True while a splash thread exists and has not ended.
+pub fn thread_alive() -> bool {
+    match ACTIVE.try_lock() {
+        Ok(g) => g.as_ref().is_some_and(|a| !a.thread.is_finished()),
+        Err(_) => true,
+    }
+}
+
 /// True while a splash thread exists.
 pub fn is_running() -> bool {
     RUNNING.load(Ordering::Acquire)
@@ -260,9 +319,17 @@ fn panic_bytes(drew: bool, handed_over: bool) -> &'static [u8] {
 }
 
 /// Stop the splash for a panic: no clear, no restore sequence from the
-/// thread. Returns `(drew, handed_over)`. Safe to call from a panic hook: it
-/// never blocks on a lock another thread holds, and does not join the thread
-/// when the splash thread itself panicked.
+/// thread. Returns `(drew, handed_over)`.
+///
+/// Safe to call from a panic hook on any thread, the splash thread included:
+///
+/// * it takes `ACTIVE` with `try_lock`, so a lock another thread holds never
+///   blocks it;
+/// * the splash thread never holds its state lock while it draws (see
+///   `run`), and on the splash thread the state is reached with `try_lock`
+///   too, so a panic inside `draw` cannot deadlock here;
+/// * it joins the thread only from another thread. On the splash thread it
+///   returns at once: that thread is unwinding and writes nothing more.
 pub fn abandon() -> (bool, bool) {
     let Ok(mut g) = ACTIVE.try_lock() else {
         return (false, true);
@@ -272,14 +339,22 @@ pub fn abandon() -> (bool, bool) {
     };
     drop(g);
     RUNNING.store(false, Ordering::Release);
-    let seen = {
-        let mut st = a.shared.state.lock().unwrap_or_else(|e| e.into_inner());
-        st.stop = true;
-        st.silent = true;
-        (st.drew, st.handed_over)
+    let on_splash_thread = std::thread::current().name() == Some(THREAD_NAME);
+    let state = if on_splash_thread {
+        a.shared.state.try_lock().ok()
+    } else {
+        Some(a.shared.state.lock().unwrap_or_else(|e| e.into_inner()))
+    };
+    let seen = match state {
+        Some(mut st) => {
+            st.stop = true;
+            st.silent = true;
+            (st.drew, st.handed_over)
+        }
+        None => (false, true),
     };
     a.shared.wake.notify_all();
-    if std::thread::current().name() != Some(THREAD_NAME) {
+    if !on_splash_thread {
         let _ = a.thread.join();
     }
     seen
@@ -297,9 +372,7 @@ pub fn install_panic_restore() {
             let (drew, handed_over) = abandon();
             let bytes = panic_bytes(drew, handed_over);
             if !bytes.is_empty() {
-                let mut out = std::io::stdout().lock();
-                let _ = out.write_all(bytes);
-                let _ = out.flush();
+                emit(bytes);
             }
             prev(info);
         }));
@@ -308,37 +381,43 @@ pub fn install_panic_restore() {
 
 fn run(shared: &Shared, started: Instant) {
     let version = env!("CARGO_PKG_VERSION");
-    let mut st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+    let lock = || shared.state.lock().unwrap_or_else(|e| e.into_inner());
     loop {
-        if st.stop {
-            // After hand-over: clear for the first frame (ratatui's buffer is
-            // empty, so it writes every cell it uses). Before: give the
-            // terminal back. After a panic: nothing.
-            let bytes = exit_bytes(st.drew, st.handed_over, st.silent);
-            if !bytes.is_empty() {
-                let mut out = std::io::stdout().lock();
-                let _ = out.write_all(bytes);
-                let _ = out.flush();
+        // The state lock is held only to read or set flags, never while
+        // drawing: a panic hook that runs during a draw (on this thread or
+        // another) can always reach the state (see `abandon`).
+        let (drew, handed_over) = {
+            let mut st = lock();
+            if st.stop {
+                // After hand-over: clear for the first frame (ratatui's buffer
+                // is empty, so it writes every cell it uses). Before: give the
+                // terminal back. After a panic: nothing.
+                let bytes = exit_bytes(st.drew, st.handed_over, st.silent);
+                if !bytes.is_empty() {
+                    emit(bytes);
+                }
+                if st.handlers {
+                    restore_signals();
+                    st.handlers = false;
+                }
+                return;
             }
-            if st.handlers {
-                restore_signals();
-                st.handlers = false;
-            }
-            return;
-        }
+            (st.drew, st.handed_over)
+        };
         let step = Step::from_u8(STEP.load(Ordering::Relaxed));
         if let Some(lines) = splash_lines(started.elapsed(), step, false, version) {
-            if !st.drew && !st.handed_over {
-                st.handlers = install_signals();
+            if !drew && !handed_over {
+                let installed = install_signals();
+                lock().handlers = installed;
             }
-            draw(&lines, !st.drew);
-            st.drew = true;
+            draw(&lines, !drew);
+            lock().drew = true;
         }
-        st = shared
-            .wake
-            .wait_timeout(st, TICK)
-            .map(|(g, _)| g)
-            .unwrap_or_else(|e| e.into_inner().0);
+        // A stop set since the flags were read is seen here, before waiting.
+        let st = lock();
+        if !st.stop {
+            let _ = shared.wake.wait_timeout(st, TICK);
+        }
     }
 }
 
@@ -371,9 +450,10 @@ fn draw(lines: &[String; 4], first: bool) {
             buf.extend_from_slice(text.as_bytes());
         }
     }
-    let mut out = std::io::stdout().lock();
-    let _ = out.write_all(&buf);
-    let _ = out.flush();
+    if PANIC_NEXT_DRAW.swap(false, Ordering::SeqCst) {
+        panic!("splash draw panicked (test)");
+    }
+    emit(&buf);
 }
 
 #[cfg(unix)]

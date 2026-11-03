@@ -168,9 +168,12 @@ impl ProcessMonitor {
                 let mut looked_at = 0usize;
                 while let Some(process_result) = processes.next() {
                     if looked_at >= self.limits.processes {
-                        // Stop here. The rest are counted, not read: each
-                        // costs one directory open and nothing else.
+                        // Stop here. The rest are counted without being
+                        // read; counting costs one directory open each.
                         self.counts.proc_truncated = 1 + processes.count();
+                        // The driver may list a holder among the unread
+                        // ones, so this scan did not see every holder.
+                        self.complete = false;
                         break;
                     }
                     looked_at += 1;
@@ -212,7 +215,8 @@ impl ProcessMonitor {
         }
     }
 
-    /// Whether the last scan saw every holder (it read the driver's lists).
+    /// Whether the last scan saw every holder: it read the driver's lists and
+    /// the process bound did not cut it short.
     pub fn complete(&self) -> bool {
         self.complete
     }
@@ -644,6 +648,48 @@ mod fake_root_tests {
         pm.update();
         assert_eq!(pm.holders(&DeviceMap::identity()).holders.len(), 2);
         assert_eq!(pm.counts().proc_truncated, 3);
+    }
+
+    /// When the bound cut the scan short, the answer is not complete, so
+    /// tt-smi's row for a holder the scan never reached still counts.
+    #[test]
+    fn a_scan_cut_by_the_bound_is_not_complete() {
+        let td = tempfile::tempdir().unwrap();
+        let pids: Vec<i32> = (0..4).map(|i| 4_100_081 + i).collect();
+        for &p in &pids {
+            fake_pid(td.path(), p, "w", &[]);
+        }
+        // The driver lists every one of them on device 0.
+        driver(td.path(), &[(0, &pids)]);
+        let mut pm = ProcessMonitor::with_root(td.path()).with_limits(Limits {
+            processes: 2,
+            ..Limits::default()
+        });
+        pm.update();
+        assert_eq!(pm.counts().proc_truncated, 2);
+        let seen: Vec<i64> = pm
+            .holders(&DeviceMap::identity())
+            .holders
+            .iter()
+            .map(|h| h.pid)
+            .collect();
+        let unvisited = pids
+            .iter()
+            .map(|&p| p as i64)
+            .find(|p| !seen.contains(p))
+            .expect("the bound left a holder unvisited");
+        assert!(!pm.complete(), "a cut scan says it saw every holder");
+        let smi = vec![crate::models::DeviceProcess {
+            pid: Some(unvisited),
+            device: Some(0),
+            cmdline: Some("python serve.py".into()),
+            ..Default::default()
+        }];
+        let out = crate::workload::device_holders::blend(&pm.holders(&DeviceMap::identity()), &smi);
+        assert!(
+            out.iter().any(|h| h.pid == unvisited),
+            "tt-smi's row was dropped"
+        );
     }
 
     /// The fd bound reaches the real scan: a process with more links than

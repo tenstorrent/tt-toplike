@@ -15,9 +15,12 @@
 //! A file that cannot be opened, or a path that is not a regular file (a
 //! FIFO, a device), turns the log off; the TUI never fails because of it.
 //!
-//! Nothing is written after the window closes: [`FRAME_WINDOW`] after the
-//! first frame, or 30 s after start when no frame is drawn (`--headless`), so
-//! a variable left set does not grow the file for the whole session.
+//! A path that exists and is not a regular file is refused before it is
+//! opened. Nothing is written after the window closes, [`FRAME_WINDOW`] after
+//! the first frame; before the first frame the log goes on however slow the
+//! start is. The file never gets more than [`MAX_LINES`] lines, so a
+//! variable left set (or `--headless`, which draws no frame) cannot grow it
+//! for the whole session.
 //!
 //! The clock starts at [`begin`]. Calls made before it count from the first
 //! call. It lives at the crate root, outside the TUI, so the backend and the
@@ -67,35 +70,65 @@ fn enabled() -> bool {
     }
 }
 
-/// Open the log for appending: a regular file only. The open does not block
-/// (a FIFO with no reader would otherwise hold start-up), and anything that
-/// is not a regular file is refused.
+/// True when `path` exists and is not a regular file (following links): a
+/// FIFO, a directory, a device node, a socket. Checked before the log is
+/// opened, so such a path is never opened at all (a device node opened by
+/// mistake would make this process a holder of that device).
+fn non_regular_target(path: &std::path::Path) -> bool {
+    match std::fs::metadata(path) {
+        Ok(m) => !m.is_file(),
+        // Missing: the log creates it. Any other error: the open fails too.
+        Err(_) => false,
+    }
+}
+
+/// Open the log for appending: a regular file only. A path that exists and
+/// is not a regular file is refused before any open. The open itself does
+/// not block (`O_NONBLOCK`, for a FIFO that appears between the check and
+/// the open) and does not take a controlling terminal (`O_NOCTTY`); what it
+/// opened is checked again.
 fn open_log(path: &std::path::Path) -> Option<std::fs::File> {
+    if non_regular_target(path) {
+        return None;
+    }
     let mut opts = std::fs::OpenOptions::new();
     opts.create(true).append(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        opts.custom_flags(libc::O_NONBLOCK);
+        opts.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
     }
     let f = opts.open(path).ok()?;
     f.metadata().ok()?.is_file().then_some(f)
 }
 
-/// How long after start the log is written when no frame is ever drawn
-/// (`--headless` runs the same backend code).
-const NO_FRAME_WINDOW: Duration = Duration::from_secs(30);
+/// Most lines written to one log. It bounds the file when no frame is ever
+/// drawn (`--headless` runs the same backend code): at a few lines every
+/// 2 s that is over an hour, about 0.5 MB.
+const MAX_LINES: usize = 10_000;
 
-/// Whether `now` is still inside the logging window: [`FRAME_WINDOW`] after
-/// the first frame, or [`NO_FRAME_WINDOW`] after start when there is none.
-fn in_window(now: Instant, start: Instant, first_frame: Option<Instant>) -> bool {
+/// Lines written so far.
+static LINES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn under_line_cap(written: usize) -> bool {
+    written < MAX_LINES
+}
+
+/// Whether `now` is still inside the logging window. Before the first frame
+/// the window is open, however long start-up takes, so the lines that say
+/// what a slow start waited on, and the first frame itself, are kept. After
+/// the first frame it closes [`FRAME_WINDOW`] later.
+fn in_window(now: Instant, first_frame: Option<Instant>) -> bool {
     match first_frame {
         Some(f) => now.saturating_duration_since(f) <= FRAME_WINDOW,
-        None => now.saturating_duration_since(start) <= NO_FRAME_WINDOW,
+        None => true,
     }
 }
 
 fn write_line(line: std::fmt::Arguments<'_>) {
+    if !under_line_cap(LINES.fetch_add(1, Ordering::Relaxed)) {
+        return;
+    }
     if let Ok(mut g) = FILE.lock() {
         if let Some(f) = g.as_mut() {
             let _ = writeln!(f, "{line}");
@@ -105,7 +138,7 @@ fn write_line(line: std::fmt::Arguments<'_>) {
 
 /// Note that a start-up phase was reached.
 pub fn phase(name: &str) {
-    if !enabled() || !in_window(Instant::now(), started(), FIRST_FRAME.get().copied()) {
+    if !enabled() || !in_window(Instant::now(), FIRST_FRAME.get().copied()) {
         return;
     }
     let ms = started().elapsed().as_secs_f64() * 1000.0;
@@ -138,31 +171,73 @@ pub fn frame(draw: Duration, work: Duration) {
 mod tests {
     use super::*;
 
+    /// No frame yet: the log goes on, however slow the start. After the
+    /// first frame it stops after [`FRAME_WINDOW`].
     #[test]
-    fn the_window_closes_after_the_first_frame_or_after_start() {
+    fn the_window_stays_open_until_a_frame_and_closes_after_it() {
         let t0 = Instant::now();
         let s = Duration::from_secs;
-        assert!(in_window(t0 + s(10), t0, None));
-        assert!(!in_window(t0 + s(31), t0, None), "no frame: 30 s");
-        assert!(in_window(t0 + s(6), t0, Some(t0 + s(2))));
+        assert!(in_window(t0 + s(10), None));
+        assert!(in_window(t0 + s(45), None), "a 45 s start is still logged");
+        assert!(in_window(t0 + s(6), Some(t0 + s(2))));
         assert!(
-            !in_window(t0 + s(8), t0, Some(t0 + s(2))),
+            !in_window(t0 + s(8), Some(t0 + s(2))),
             "5 s after the first frame"
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn a_fifo_is_refused_without_blocking() {
-        let td = tempfile::tempdir().unwrap();
-        let fifo = td.path().join("log");
+    fn the_line_cap_bounds_the_file() {
+        assert!(under_line_cap(0));
+        assert!(under_line_cap(MAX_LINES - 1));
+        assert!(!under_line_cap(MAX_LINES));
+    }
+
+    #[cfg(unix)]
+    fn mkfifo(path: &std::path::Path) {
         let ok = std::process::Command::new("mkfifo")
-            .arg(&fifo)
+            .arg(path)
             .status()
             .unwrap();
         assert!(ok.success());
-        // Without O_NONBLOCK this open would wait for a reader for ever.
+    }
+
+    /// The check made before any open: a FIFO, a directory, or a link to
+    /// either is not a log file. A path that does not exist yet is fine
+    /// (the log creates it), and so is a regular file.
+    #[cfg(unix)]
+    #[test]
+    fn non_regular_targets_are_found_before_opening() {
+        let td = tempfile::tempdir().unwrap();
+        let fifo = td.path().join("fifo");
+        mkfifo(&fifo);
+        let link = td.path().join("link");
+        std::os::unix::fs::symlink(&fifo, &link).unwrap();
+        let plain = td.path().join("plain");
+        std::fs::write(&plain, "").unwrap();
+        assert!(non_regular_target(&fifo));
+        assert!(non_regular_target(td.path()), "a directory");
+        assert!(non_regular_target(&link), "a link to a FIFO");
+        assert!(!non_regular_target(&plain));
+        assert!(!non_regular_target(&td.path().join("new")));
+    }
+
+    /// A FIFO that has a reader would open for writing; it is refused all
+    /// the same, and so is a directory. A missing path is created.
+    #[cfg(unix)]
+    #[test]
+    fn open_log_refuses_a_fifo_with_a_reader_and_a_directory() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let td = tempfile::tempdir().unwrap();
+        let fifo = td.path().join("log");
+        mkfifo(&fifo);
+        let _reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+            .unwrap();
         assert!(open_log(&fifo).is_none());
+        assert!(open_log(td.path()).is_none());
         assert!(open_log(&td.path().join("plain")).is_some());
     }
 }

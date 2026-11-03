@@ -783,7 +783,10 @@ pub fn install_panic_hook() {
         // screen, so it cannot draw over or erase the message below.
         splash::abandon();
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableFocusChange);
+        // Leave the alternate screen and turn focus reports off (the bytes
+        // crossterm's `LeaveAlternateScreen` and `DisableFocusChange` write),
+        // through the splash's writer so a test can see their order.
+        splash::emit_for_hook(b"\x1b[?1049l\x1b[?1004l");
         crate::logging::enable_stderr();
         original_hook(info);
     }));
