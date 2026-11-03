@@ -139,7 +139,7 @@ Saga is not in the `v` cycle and not in `--rotate`.
 | Key | Values | Default |
 |---|---|---|
 | `enabled` | `true` or `false`. `false` starts no saga thread at all. | `true` |
-| `names` | `"real"` or `"generated"` | `"real"` |
+| `names` | `"real"` or `"generated"`. Any other value is reported and hides names (`"generated"`). | `"real"` |
 | `season_minutes` | whole minutes of quiet that end a world, 1 to 1440 | `20` |
 
 ```toml

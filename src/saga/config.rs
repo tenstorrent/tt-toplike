@@ -188,8 +188,10 @@ mod tests {
         assert_eq!(c.names, NameMode::Generated);
         let c = saga_config(&loaded("[saga]\nnames = \"real\"\n"), None);
         assert_eq!(c.names, NameMode::Real);
-        // A bad value keeps the default, real names.
-        let c = saga_config(&loaded("[saga]\nnames = \"nope\"\n"), None);
-        assert_eq!(c.names, NameMode::Real);
+        // A bad value (a typo of "generated", say) hides names: a person
+        // who set the key meant to choose, and a wrong guess must not show
+        // real names on a shared screen (final review finding M1).
+        let c = saga_config(&loaded("[saga]\nnames = \"generate\"\n"), None);
+        assert_eq!(c.names, NameMode::Generated);
     }
 }

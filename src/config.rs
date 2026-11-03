@@ -1376,20 +1376,31 @@ fn parse_saga(item: &toml_edit::Item, saga: &mut SagaSettings, report: &mut Repo
             ),
         }
     }
+    // A bad `names` value hides names. A person who set the key meant to
+    // choose, and the usual reason to choose is to keep real names off a
+    // shared screen, so a typo such as "generate" must not show them
+    // (final review finding M1). Every other bad key keeps its default.
     if let Some(v) = table.get("names") {
         match v.as_str() {
             Some("real") => saga.names = SagaNames::Real,
             Some("generated") => saga.names = SagaNames::Generated,
-            Some(other) => report(
-                v.span(),
-                format!(
-                    "unknown saga.names {other:?} (expected \"real\" or \"generated\"); the saga uses real"
-                ),
-            ),
-            None => report(
-                v.span(),
-                "`saga.names` must be \"real\" or \"generated\"; the saga uses real".into(),
-            ),
+            Some(other) => {
+                saga.names = SagaNames::Generated;
+                report(
+                    v.span(),
+                    format!(
+                        "unknown saga.names {other:?} (expected \"real\" or \"generated\"); the saga uses generated names"
+                    ),
+                )
+            }
+            None => {
+                saga.names = SagaNames::Generated;
+                report(
+                    v.span(),
+                    "`saga.names` must be \"real\" or \"generated\"; the saga uses generated names"
+                        .into(),
+                )
+            }
         }
     }
     if let Some(v) = table.get("season_minutes") {
@@ -1903,7 +1914,8 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
     }
 
     /// Every bad `[saga]` value is a problem with its line, and that key
-    /// keeps its default while the good keys still apply.
+    /// keeps its default while the good keys still apply. A bad `names` is
+    /// the exception: it hides names (see `parse_saga`).
     #[test]
     fn bad_saga_values_are_reported_with_their_lines_and_keep_the_defaults() {
         let text =
@@ -1914,12 +1926,18 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
             p,
             vec![
                 "c.toml:2: `saga.enabled` must be true or false; the saga stays on",
-                "c.toml:3: unknown saga.names \"secret\" (expected \"real\" or \"generated\"); the saga uses real",
+                "c.toml:3: unknown saga.names \"secret\" (expected \"real\" or \"generated\"); the saga uses generated names",
                 "c.toml:4: `saga.season_minutes` must be a whole number from 1 to 1440; the saga uses 20",
                 "c.toml:5: unknown key `saga.host` (expected enabled, names or season_minutes)",
             ]
         );
-        assert_eq!(l.saga, SagaSettings::default());
+        assert_eq!(
+            l.saga,
+            SagaSettings {
+                names: SagaNames::Generated,
+                ..SagaSettings::default()
+            }
+        );
         for bad in ["1441", "-5", "2.5", "\"20\""] {
             let l = load(&[("c.toml", &format!("[saga]\nseason_minutes = {bad}\n"))]);
             assert_eq!(l.problems.len(), 1, "{bad}: {:?}", l.problems);
@@ -1928,6 +1946,11 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
         }
         let l = load(&[("c.toml", "[saga]\nnames = 3\nseason_minutes = 5\n")]);
         assert_eq!(l.problems.len(), 1, "{:?}", l.problems);
+        assert_eq!(
+            l.saga.names,
+            SagaNames::Generated,
+            "a bad names hides names"
+        );
         assert_eq!(l.saga.season_minutes, 5, "a good key still applies");
         let p = problems(&[("c.toml", "saga = 1\n")]);
         assert_eq!(p, vec!["c.toml:1: `saga` must be a table: [saga]"]);
