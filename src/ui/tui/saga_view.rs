@@ -2012,8 +2012,10 @@ fn wrap_words(text: &str, first: usize, rest: usize) -> Vec<Vec<(usize, String)>
 
 /// `  Wren the Unthrottled  ▰▰▰▰▰▰▰▱▱▱  74%  • visiting the sage demo-sage
 /// • mapped 34%  • t208`, for the seat's hero. With `keys` (a world of more
-/// than one floor) the party's keys go before the tick: `• [ ] focus z
-/// zoom`.
+/// than one floor) the party's keys come right after the quest, then the
+/// tick, then the mapped share: `• [ ] focus  z zoom`, or `• [ ] z` when
+/// the long form leaves no room for the tick, so at 80 columns the keys
+/// still show.
 fn status_row(
     state: &SagaState,
     memory: &SagaMemory,
@@ -2023,20 +2025,30 @@ fn status_row(
     keys: bool,
 ) -> Row {
     let mut row = Row::new(w);
-    status_body(&mut row, state, memory, look, seat);
-    if keys {
-        // `  • [ ] focus  z zoom` is 21 columns; dropped whole when it does
-        // not fit, so the tick still can.
-        if row.room() >= 21 {
-            let sep = separator(look);
-            row.push("  • ", sep)
-                .push("[ ]", look.head)
-                .push(" focus  ", look.dim)
-                .push("z", look.head)
-                .push(" zoom", look.dim);
-        }
+    status_body(&mut row, state, look, seat);
+    if !keys {
+        status_mapped(&mut row, state, memory, look, seat);
+        status_tick(&mut row, state, look);
+        return row;
+    }
+    // `  • [ ] focus  z zoom` is 21 columns and `  • [ ] z` nine. The long
+    // form goes when it leaves room for the tick (`  • t` and its digits).
+    let tick = 4 + format!("t{}", state.tick).len();
+    let sep = separator(look);
+    if row.room() >= 21 + tick {
+        row.push("  • ", sep)
+            .push("[ ]", look.head)
+            .push(" focus  ", look.dim)
+            .push("z", look.head)
+            .push(" zoom", look.dim);
+    } else if row.room() >= 9 {
+        row.push("  • ", sep)
+            .push("[ ]", look.head)
+            .push(" ", look.dim)
+            .push("z", look.head);
     }
     status_tick(&mut row, state, look);
+    status_mapped(&mut row, state, memory, look, seat);
     row
 }
 
@@ -2044,7 +2056,8 @@ fn status_row(
 /// pushed after what `row` already holds, for the lead. The arcade panel's
 /// HUD starts with the "(mock)" or "(replay)" mark ([`hud_row`]).
 fn status_after(mut row: Row, state: &SagaState, memory: &SagaMemory, look: &Look) -> Row {
-    status_body(&mut row, state, memory, look, lead_seat(state));
+    status_body(&mut row, state, look, lead_seat(state));
+    status_mapped(&mut row, state, memory, look, lead_seat(state));
     status_tick(&mut row, state, look);
     row
 }
@@ -2057,10 +2070,9 @@ fn status_tick(row: &mut Row, state: &SagaState, look: &Look) {
     }
 }
 
-/// The status row's hero, vitality, quest and mapped share for the seat's
-/// hero (the lead when the seat has none).
-fn status_body(row: &mut Row, state: &SagaState, memory: &SagaMemory, look: &Look, seat: Seat) {
-    let p = &look.p;
+/// The status row's hero, vitality and quest for the seat's hero (the lead
+/// when the seat has none).
+fn status_body(row: &mut Row, state: &SagaState, look: &Look, seat: Seat) {
     let member = seat
         .member
         .and_then(|m| state.party.get(m))
@@ -2080,8 +2092,14 @@ fn status_body(row: &mut Row, state: &SagaState, memory: &SagaMemory, look: &Loo
         )
         .push("  • ", sep)
         .push(&quest_text(member), look.quest);
-    // The last segments are dropped whole when they do not fit, so a
-    // narrow row never ends in half a word.
+}
+
+/// How much of the seat's floor the view has mapped, when the memory is
+/// that floor's. Dropped whole when it does not fit, as the tick is, so a
+/// narrow row never ends in half a word.
+fn status_mapped(row: &mut Row, state: &SagaState, memory: &SagaMemory, look: &Look, seat: Seat) {
+    let p = &look.p;
+    let sep = separator(look);
     if let Some(floor) = state
         .world
         .floors

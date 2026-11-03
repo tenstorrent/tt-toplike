@@ -903,9 +903,9 @@ fn mod_fn(name: &str) -> &'static str {
 ///
 /// * every line of `run_app` that names `saga_focus` or `saga_zoom`: each
 ///   is one of the declarations, the key arm's assignments or the two
-///   fields of the one `SagaFlags` literal, so neither is ever an argument
+///   fields of the single `SagaFlags` literal, so neither is ever an argument
 ///   of a call on the driver (`saga`, `d`) or of anything else;
-/// * the one `SagaFlags` literal in `run_app`: its fields are exactly the
+/// * the single `SagaFlags` literal in `run_app`: its fields are exactly the
 ///   stopped flag, "why", the focus and the zoom (no backend count), and
 ///   the flags go straight to `ui_saga`;
 /// * every line of `ui_saga`: its only call on the driver is
@@ -944,7 +944,7 @@ fn view_state_never_reaches_the_saga_driver() {
     }
     assert_eq!(named, allowed.len(), "every allowed line is there once");
 
-    // The one SagaFlags literal, its fields, and where it goes.
+    // The single SagaFlags literal, its fields, and where it goes.
     let lit = "let flags = saga_view::SagaFlags {";
     assert_eq!(
         run_app.matches("SagaFlags").count(),
@@ -1517,15 +1517,21 @@ fn golden_frames() -> Vec<u64> {
 /// chronicle's member lines and the party's keys on the status row. The
 /// frames are drawn from a `PartyMemory` built over the log, as the TUI
 /// draws them. All eight frames moved. The solo frames below did not.
+///
+/// Re-pinned in fix round 1 of Task A.7, for the same two changes as the
+/// party frames: the status row's party keys come right after the quest
+/// (short form at 80 columns), then the tick and the mapped share, and only
+/// the focused tile shows `✓`. All eight frames moved. The solo frames did
+/// not: a world of one floor has no keys and no tiles.
 const GOLDEN: [u64; 8] = [
-    7571048964412272060,
-    4777154084262469764,
-    3287335782298783969,
-    10812401408321409080,
-    9204706333865428866,
-    4711706745706634224,
-    472239707984335236,
-    11715230383402559548,
+    11917712682132199184,
+    11920290857694584326,
+    16856285753327876517,
+    624419604945615386,
+    15220565761517867015,
+    13439700959490747240,
+    17051540309075168881,
+    8921639599995668388,
 ];
 
 /// Prints the hashes for [`GOLDEN`]. Run with

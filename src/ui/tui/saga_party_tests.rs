@@ -344,11 +344,13 @@ fn all_seen(party: &PartyMemory) -> PartyMemory {
 /// right-side border glyph, and each tile's last column is blank on every
 /// row of the grid, so no wall glyph ever closes a tile on its right. Every
 /// cell of every floor is seen, and each hero stands at its floor's right
-/// edge, so every tile's window scrolls to the floor's last column.
+/// edge, so every tile's window scrolls to the floor's last column. The
+/// 40-chip story has chips without a floor, so its roster row shows on one
+/// page and its grid is what `fit` gives with the roster counted.
 #[test]
 fn no_party_row_ends_in_a_right_side_border() {
     use crate::animation::arcade::RIGHT_EDGE_GLYPHS;
-    for which in ["busy", "party4", "32"] {
+    for which in ["busy", "party4", "32", "40"] {
         let (state, party) = end_of(which);
         let party = all_seen(party);
         let mut right = state.clone();
@@ -380,9 +382,17 @@ fn no_party_row_ends_in_a_right_side_border() {
                     }
                     // The grid's rows start after the title, the banner
                     // and the roster.
-                    let g = party_grid(n, w as usize, h as usize - usize::from(f.stopped))
-                        .expect("a grid at the table's sizes");
-                    let first = 1 + usize::from(f.stopped) + usize::from(g.per_page < n);
+                    let avail = h as usize - usize::from(f.stopped);
+                    let extra = s.chips_seen > s.world.chips.len();
+                    let g = if extra {
+                        fit(n, w as usize, avail, true)
+                    } else {
+                        party_grid(n, w as usize, avail)
+                    }
+                    .expect("a grid at the table's sizes");
+                    let roster = extra || g.per_page < n;
+                    assert_eq!(roster_of(&lines).is_some(), roster, "{which} {w}x{h}");
+                    let first = 1 + usize::from(f.stopped) + usize::from(roster);
                     let on_page = (n - (f.focus / g.per_page) * g.per_page).min(g.per_page);
                     for slot in 0..on_page {
                         let (gx, gy) = (slot % g.cols, slot / g.cols);
@@ -518,6 +528,13 @@ fn focus_moves_the_page() {
         let status = text(&wide).pop().unwrap();
         assert!(status.contains(name.as_str()), "{status} names {name}");
         assert!(status.contains("[ ] focus  z zoom"), "{status}");
+        // At 80 columns the keys still show, in their short form. They go
+        // before the tick, which a long quest can push off the row.
+        for focus in [0, 8, 31] {
+            let lines = render_saga(state, party, flags(focus, false, false, false), (80, 23), 0);
+            let status = text(&lines).pop().unwrap();
+            assert!(status.contains("• [ ] z"), "{status}");
+        }
         // The focused tile's tag is drawn on its hue.
         let p = &Pack::builtin().palette;
         let hue = rgb(floor_hue(p, 8));
@@ -693,7 +710,7 @@ const REAL_NAMES: [&str; 3] = ["demo-sage", "demo-scribe", "demo-run"];
 #[test]
 fn no_tile_hud_or_roster_shows_a_fixture_name() {
     let mut seen_real = false;
-    for log in [party4(), log32()] {
+    for log in [busy(), party4(), log32()] {
         for names in [NameMode::Generated, NameMode::Real] {
             let (saga, party) = run(log, names);
             let state = saga.state();
@@ -825,15 +842,21 @@ fn party_frames() -> Vec<u64> {
 /// when the party view was first drawn. A change to the tiles, the HUD,
 /// the roster, the grid's shape or the chronicle's tags moves them; re-pin
 /// on purpose with `print_party_frames` and say why in the commit.
+///
+/// Re-pinned in fix round 1 of Task A.7. The status row puts the party's
+/// keys right after the quest (in the short form `[ ] z` at 80 columns),
+/// then the tick, then the mapped share; and only the focused tile marks a
+/// reached goal with `✓`. Every frame's status row moved, so all eight
+/// frames moved.
 const PARTY_GOLDEN: [u64; 8] = [
-    14822553245536003162,
-    18407291322666978306,
-    16685342915309974070,
-    5941585132995016157,
-    5922583961810723963,
-    7362451235971816641,
-    11507435028002847143,
-    10433589368542686763,
+    3614256140615889751,
+    11966794677219134434,
+    18041497242185267759,
+    6459969602449022339,
+    5478636191933416064,
+    3638826738490286981,
+    11340108049813700508,
+    13181516461788390151,
 ];
 
 /// Prints the hashes for [`PARTY_GOLDEN`]. Run with
@@ -882,4 +905,59 @@ fn the_roster_counts_the_storys_chips_not_the_local_boxs() {
         let (_, roster) = roster_of(&lines).expect("a roster");
         assert!(roster.contains("+8 chips without a floor"), "{roster}");
     });
+}
+
+/// A stopped driver in the party view: the banner sits under the title and
+/// the grid still draws every tile of the page under it.
+#[test]
+fn the_party_view_shows_the_stopped_banner_over_the_grid() {
+    let (state, party) = end_of("party4");
+    tc(|| {
+        for (w, h) in TABLE_SIZES {
+            let lines = render_saga(state, party, flags(0, false, false, true), (w, h), 0);
+            assert_fits(&lines, w, h, "stopped");
+            let t = text(&lines);
+            assert!(t[0].contains("party of 4"), "{}", t[0]);
+            assert!(t[1].contains("the story has stopped"), "{w}x{h}: {}", t[1]);
+            assert_eq!(hud_tags(&lines), ["F1", "F2", "F3", "F4"], "{w}x{h}");
+        }
+    });
+}
+
+/// Only the focused tile marks a reached goal with `✓`, so a grid of many
+/// tiles is not a wall of marks.
+#[test]
+fn only_the_focused_tile_marks_a_reached_goal() {
+    let (state, party) = end_of("party4");
+    let mut done = state.clone();
+    for m in done.party.iter_mut() {
+        m.quest.verb = tt_toplike_saga::quest::Verb::Explore;
+        m.quest.goal = m.hero.pos;
+    }
+    for focus in 0..4 {
+        let lines = tc(|| {
+            render_saga(
+                &done,
+                party,
+                flags(focus, false, false, false),
+                (140, 39),
+                0,
+            )
+        });
+        let huds: Vec<String> = text(&lines)
+            .into_iter()
+            .filter(|t| t.starts_with('▌') && !t.contains("SAGA"))
+            .collect();
+        let marked: Vec<bool> = huds
+            .iter()
+            .flat_map(|t| {
+                t.split('▌')
+                    .skip(1)
+                    .map(|h| h.contains('✓'))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        let want: Vec<bool> = (0..4).map(|i| i == focus).collect();
+        assert_eq!(marked, want, "focus {focus}: {huds:?}");
+    }
 }

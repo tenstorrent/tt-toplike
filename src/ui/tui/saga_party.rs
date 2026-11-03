@@ -34,8 +34,9 @@
 //!   reversed.
 //! * **Chronicle:** the merged chronicle, each member's line tagged with its
 //!   floor (`t42 · F3 Wren sets out`) in the floor's hue.
-//! * **Status row:** the focused hero's name, vitality, quest and mapped
-//!   share, then `[ ] focus  z zoom` and the tick.
+//! * **Status row:** the focused hero's name, vitality and quest, then
+//!   `[ ] focus  z zoom` (or `[ ] z` when the row is short), the tick and
+//!   the mapped share, each dropped whole when it does not fit.
 //!
 //! # Borders
 //!
@@ -362,7 +363,7 @@ fn tile_hud(state: &SagaState, look: &Look, seat: Seat, w: usize, focused: bool)
     };
     let (v, bar_style) = vitality(member, look);
     let filled = ((v * HUD_BAR_CELLS as f32).round() as usize).min(HUD_BAR_CELLS);
-    let quest = quest_word(member);
+    let quest = quest_word(member, focused);
     let width = |s: &str| -> usize {
         s.chars()
             .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
@@ -398,8 +399,10 @@ fn tile_hud(state: &SagaState, look: &Look, seat: Seat, w: usize, focused: bool)
 
 /// A member's quest in a word or two for its tile's HUD: `explore`,
 /// `rest`, `visit demo-sage` (the core's target label, the alias in
-/// generated mode), with `✓` once the hero stands on its goal.
-fn quest_word(member: &Member) -> String {
+/// generated mode). The focused tile adds `✓` once its hero stands on its
+/// goal; the other tiles leave it off, so a grid of 32 is not a wall of
+/// marks (the status row says `(done)` for the focused hero too).
+fn quest_word(member: &Member, focused: bool) -> String {
     let q = &member.quest;
     let target = quest_target(member);
     let named = |what: &str, fallback: &str| match &target {
@@ -415,7 +418,7 @@ fn quest_word(member: &Member) -> String {
         Verb::Cleanse => named("cleanse", "cleanse"),
         Verb::Rebuild => named("rebuild", "rebuild"),
     };
-    if q.verb != Verb::Rest && member.hero.pos == q.goal {
+    if focused && q.verb != Verb::Rest && member.hero.pos == q.goal {
         text.push_str(" ✓");
     }
     text
