@@ -116,7 +116,7 @@ fn a_snapshot_of_the_digests_matches() {
     let golden: [(&str, u64, u64); 3] = [
         ("quiet.jsonl", 0xf8b2d7d6ff73eaa8, 0xf8b2d7d6ff73eaa8),
         ("bringup.jsonl", 0xe06ca19a1295002d, 0xe06ca19a1295002d),
-        ("busy.jsonl", 0xc9b045f373ff63b1, 0xb0c2b646d8116749),
+        ("busy.jsonl", 0x58fd37ddc51342e9, 0x4cade946337512e2),
     ];
     let mut actual = Vec::new();
     for (name, _, _) in golden {

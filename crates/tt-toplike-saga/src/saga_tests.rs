@@ -494,3 +494,64 @@ fn the_name_mode_changes_only_the_chronicle() {
         );
     }
 }
+
+#[test]
+fn a_model_that_goes_away_takes_its_sage_hook_with_it() {
+    // Review finding for Task 1.11: under ruling R14 a `ModelGone` ends only
+    // the dungeon that model made. A world born by something else (here a
+    // reset) must still forget the gone model's sage: no quest for it is
+    // started or finished after it goes away.
+    let sage = EntityKey::model("demo-sage");
+    let mut saga = Saga::new(config(NameMode::Real, Label::Live));
+    run_ticks(&mut saga, 6);
+    saga.feed(&event(Event::ModelReady {
+        model: sage.clone(),
+        chips: vec![chip_a()],
+    }));
+    run_ticks(&mut saga, 3);
+    // A reset births a dungeon that was not made by the model, so the model
+    // going away does not end it.
+    saga.feed(&event(Event::Reset { chips: vec![] }));
+    assert_eq!(saga.state.quest.verb, Verb::VisitSage);
+    assert_eq!(saga.state.quest.target.as_ref(), Some(&sage));
+    let world = saga.state.world.id;
+    run_ticks(&mut saga, 3);
+    saga.drain_events();
+
+    saga.feed(&event(Event::ModelGone {
+        model: sage.clone(),
+    }));
+    run_ticks(&mut saga, 600);
+    let events = saga.drain_events();
+    assert_eq!(
+        saga.state.world.id, world,
+        "the model's going ended an unrelated world"
+    );
+    for e in &events {
+        assert!(
+            !matches!(
+                e,
+                SagaEvent::QuestDone {
+                    verb: Verb::VisitSage,
+                    ..
+                } | SagaEvent::QuestStarted {
+                    verb: Verb::VisitSage,
+                    ..
+                }
+            ),
+            "a quest for a model that went away: {e:?}"
+        );
+    }
+    // The hero left the sage's quest at once and kept questing.
+    assert!(matches!(
+        events.first(),
+        Some(SagaEvent::QuestStarted {
+            verb: Verb::Explore,
+            ..
+        })
+    ));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, SagaEvent::QuestDone { .. })));
+    assert!(saga.hooks.iter().all(|h| h.target.as_ref() != Some(&sage)));
+}

@@ -72,6 +72,9 @@
 //! * **Arrived.** `QuestDone` and a beat. A sage hook is dropped once its
 //!   sage is visited. The hero then waits [`DWELL_TICKS`] ticks and plans its
 //!   next quest, so the chronicle does not fill with arrivals.
+//! * **A model goes away.** Its sage hook leaves the current world, whichever
+//!   signal made that world, and a hero on its way to that sage plans again
+//!   at once.
 //! * **No path.** The hook behind the quest is dropped for this world, so the
 //!   hero does not retry one unreachable goal forever, and the hero plans
 //!   again at once (ruling R15). The explore hook is never dropped: each plan
@@ -421,6 +424,16 @@ impl Saga {
         }
         self.world_events = wev;
 
+        // A hero walking to a sage that just went away plans again at once.
+        // When the model's own dungeon ended, the new world already planned.
+        if let Observation::Event(Event::ModelGone { model }) = o {
+            let walking_to_it = self.state.quest.target.as_ref() == Some(model);
+            if !born && walking_to_it && self.state.world.id > 0 {
+                self.dwell_until = None;
+                self.start_quest(false);
+            }
+        }
+
         if matches!(o, Observation::Tick) && !born && self.state.world.id > 0 {
             self.hero_tick();
         }
@@ -485,7 +498,10 @@ impl Saga {
                 self.ready.insert(model.clone(), cause);
             }
             Event::ModelGone { model } => {
+                // The model's sage leaves every world, including one the
+                // model did not make (ruling R14 keeps such a world alive).
                 self.ready.remove(model);
+                self.hooks.retain(|h| h.target.as_ref() != Some(model));
             }
             _ => {}
         }
