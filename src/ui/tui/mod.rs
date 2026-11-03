@@ -109,7 +109,7 @@ enum DisplayMode {
     MemoryCastle,
     /// Memory Flow Topology (full-screen DRAM motion visualization)
     MemoryFlow,
-    /// Arcade mode (unified visualization with all three modes + hero character)
+    /// Arcade mode (the views as panels of one screen, laid out by `[arcade]`)
     Arcade,
     /// Defrag view — model-loading visualization (inspired by disk defragmenters)
     Defrag,
@@ -4340,10 +4340,9 @@ fn saga_panel_feed(saga: Option<&crate::saga::SagaDriver>, enabled: bool) -> sag
     }
 }
 
-/// Render Arcade mode — uses the composite canvas so the hero `@` and trail
-/// actually appear.  The previous ratatui-Layout approach called sub-viz methods
-/// directly into separate Rects, bypassing ArcadeVisualization::render() and
-/// overlay_hero() entirely — the hero was computed but never drawn.
+/// Render Arcade mode from the composite canvas (`ArcadeVisualization::render`),
+/// so the shared header, the bus effects and the activity lanes, which are
+/// drawn across panels, appear.
 ///
 /// The composite path: arcade.render(backend) → Vec<Line> → single Paragraph
 /// over the full terminal area.  No border boxes around each sub-panel, but
@@ -5433,11 +5432,9 @@ fn overlay_lines_with(
                         "Arcade Mode — Unified View",
                         "",
                         "Starfield, Memory Castle, Defrag and Memory Flow on one",
-                        "screen. The @ hero roams on live telemetry: x is current",
-                        "draw (0–100 A), y is power, colour is die temperature.",
-                        "The glyph is its health: @ healthy, ! throttled or",
-                        "faulted, ? ARC stalled, % undervolt (a busy Blackhole",
-                        "under 0.65 V, other chips under 0.75 V).",
+                        "screen. While a model serves, row 2 is a duel: the @",
+                        "lunges on a power spike, the snake on each finished",
+                        "request, and the ⚔ slides to whoever is winning.",
                         "",
                         "While something trains, loads or serves, the top rows",
                         "become up to two lanes, most urgent first: ▶ TRAIN,",
@@ -6709,7 +6706,7 @@ fn legend_parts(
 
 /// Legend for Arcade. It shows the four views at once, so each gets one
 /// packed line with the glyphs its own legend explains (`l` in that view has
-/// the full list), then the hero and the activity lanes, which only Arcade
+/// the full list), then the duel and the activity lanes, which only Arcade
 /// draws. The glyph colours match the views' own legends.
 fn arcade_legend_lines(
     bar: ratatui::style::Color,
@@ -6761,8 +6758,14 @@ fn arcade_legend_lines(
             (" writes · ring = GDDR channels", None),
         ]),
     ];
-    v.push(l(&[("@ Hero", Some(head))]));
-    v.extend(hero_legend_lines(bar, bg, dim));
+    v.push(l(&[
+        ("⚔ Duel ", Some(head)),
+        ("row 2 while a model serves: ", None),
+        ("@", Some(colors::info())),
+        (" chip ⚔ ", None),
+        ("▶●●", Some(colors::rgb(80, 200, 230))),
+        (" snake", None),
+    ]));
     v.push(l(&[
         ("▶ Activity lanes ", Some(head)),
         ("while something runs", None),
@@ -6817,46 +6820,6 @@ fn activity_legend_lines(
         l(&[
             ("  ○ ◌ · ", Some(label)),
             ("a flare for each step or request finished", None),
-        ]),
-    ]
-}
-
-/// The Arcade hero's lines: where it stands and what its glyph says.
-fn hero_legend_lines(
-    bar: ratatui::style::Color,
-    bg: ratatui::style::Color,
-    dim: ratatui::style::Color,
-) -> Vec<Line<'static>> {
-    let label = colors::rgb(200, 230, 255);
-    let l =
-        |parts: &[(&'static str, Option<ratatui::style::Color>)]| legend_parts(bar, bg, dim, parts);
-    vec![
-        l(&[
-            ("  x ", Some(label)),
-            ("current 0–100 A  ", None),
-            ("y ", Some(label)),
-            ("power  ", None),
-            ("colour ", Some(label)),
-            ("temperature  ", None),
-            ("trail ", Some(label)),
-            ("GDDR temp, ETH", None),
-        ]),
-        l(&[
-            ("  @", Some(colors::rgb(79, 209, 197))),
-            (" healthy  ", None),
-            ("!", Some(colors::rgb(255, 100, 80))),
-            (" throttled/faulted  ", None),
-            ("?", Some(colors::rgb(255, 220, 80))),
-            (" ARC stalled  ", None),
-            ("( )", Some(colors::rgb(180, 140, 255))),
-            (" harvested", None),
-        ]),
-        l(&[
-            ("  %", Some(colors::rgb(255, 180, 80))),
-            (
-                " undervolt: a busy Blackhole under 0.65 V, others under 0.75 V",
-                None,
-            ),
         ]),
     ]
 }
@@ -12446,12 +12409,9 @@ mod host_default_screen_tests {
 
         // Deliberate column alignment must survive — `split_whitespace`
         // would collapse the double spaces that line these up.
-        let hero = [
-            "@  healthy   !  throttled/faulted",
-            "?  ARC stall  %  undervolt",
-        ];
-        let got = wrap_overlay_text(&hero, 56);
-        assert_eq!(got, vec![hero[0].to_string(), hero[1].to_string()]);
+        let defrag = ["░  empty     ▒  loading", "▓  resident  █  peak"];
+        let got = wrap_overlay_text(&defrag, 56);
+        assert_eq!(got, vec![defrag[0].to_string(), defrag[1].to_string()]);
 
         // An unindented list whose items are ordinary prose must not merge
         // either — the rule is "never join", not "never join glyphs".

@@ -11,7 +11,32 @@ use super::*;
 use crate::animation::arcade_bus::{gauge_of, ArcadeBusState, ArcadeFx, Gauge};
 use crate::animation::bus_test_support::{chip, Bus, SEC, TICK};
 use crate::animation::die3d::overlay::{Fill, Overlay, OverlayState};
+use crate::animation::starfield_bus::{FieldChip, StarfieldBusState, StarfieldFx};
 use tt_toplike_bus::{LocalView, Provenance};
+
+/// The Starfield's smoothed tokens per second for chip 0 over `worlds`.
+/// The arcade smoothed the same reading for the roaming hero's heartbeat
+/// until 0.16.5; the Starfield is now the view that applies the shared
+/// tokens-per-second rule, so it stands in for the arcade on that column.
+fn starfield_tps(worlds: &[LocalView]) -> Vec<Option<f64>> {
+    let chips = [FieldChip {
+        slot: 0,
+        index: 0,
+        key: chip(0),
+        channels: 0,
+    }];
+    let mut prev = StarfieldBusState::default();
+    worlds
+        .iter()
+        .map(|w| {
+            let fx = StarfieldFx::from_world(w, &chips, 1, w.now_mono_ns(), &mut prev);
+            fx.chips
+                .iter()
+                .find(|c| c.slot == 0)
+                .and_then(|c| c.tokens_per_s)
+        })
+        .collect()
+}
 
 /// The arcade and the shared pieces, as the Starfield and MemoryFlow use
 /// them, over one sequence with a reconnect and a stale reading.
@@ -23,16 +48,18 @@ mod same_rules_as_the_arcade {
     /// change memo), and the smoothed tokens per second.
     type Decision = (bool, u32, Option<Gauge>, Option<f64>);
 
-    /// The arcade's decisions over `worlds`.
+    /// The arcade's decisions over `worlds`, with the Starfield's smoothed
+    /// tokens per second (see [`starfield_tps`]).
     fn arcade(worlds: &[LocalView]) -> Vec<Decision> {
         let chips = [(0usize, chip(0))];
         let mut prev = ArcadeBusState::default();
         worlds
             .iter()
-            .map(|w| {
+            .zip(starfield_tps(worlds))
+            .map(|(w, tps)| {
                 let fx = ArcadeFx::from_world(w, &chips, 1, w.now_mono_ns(), &mut prev);
                 let gauge = fx.chips.iter().find(|c| c.slot == 0).and_then(|c| c.gauge);
-                (fx.fresh, fx.new_requests, gauge, fx.tokens_per_s)
+                (fx.fresh, fx.new_requests, gauge, tps)
             })
             .collect()
     }
@@ -144,7 +171,8 @@ mod arcade_die3d_and_the_shared_intake {
     }
 
     /// One update of the arcade: the shared part, whether it was live, the
-    /// requests drawn and the smoothed tokens per second.
+    /// requests handed out, and the smoothed tokens per second (the
+    /// Starfield's, see [`starfield_tps`]).
     type ArcadeDecision = (Shared, bool, u32, Option<f64>);
 
     /// One update of Die 3D: the shared part and whether channel 0 of chip
@@ -165,7 +193,8 @@ mod arcade_die3d_and_the_shared_intake {
         let mut prev = ArcadeBusState::default();
         worlds
             .iter()
-            .map(|w| {
+            .zip(starfield_tps(worlds))
+            .map(|(w, tps)| {
                 let now = w.now_mono_ns();
                 let fx = ArcadeFx::from_world(w, &chips(), 1, now, &mut prev);
                 let co = fx.chips.iter().find(|c| c.slot == 0);
@@ -176,7 +205,7 @@ mod arcade_die3d_and_the_shared_intake {
                         _ => None,
                     }),
                 };
-                (shared, fx.fresh, fx.new_requests, fx.tokens_per_s)
+                (shared, fx.fresh, fx.new_requests, tps)
             })
             .collect()
     }

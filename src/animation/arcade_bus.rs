@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 //! What the arcade draws from the signal bus: a bring-up gauge and a model
-//! label per chip, request hits around the hero, the hero's heartbeat from
-//! tokens per second, spark and compile particles in the starfield, and a
-//! flash on a chip that was reset.
+//! label per chip, spark and compile particles in the starfield, and a flash
+//! on a chip that was reset. It also counts the requests completed, which
+//! make the duel's snake lunge.
 //!
 //! # Two steps
 //!
@@ -14,7 +14,7 @@
 //!    per arcade update. It reads the world through [`WorldRead`], compares
 //!    it with what the arcade saw last ([`ArcadeBusState`]) and returns an
 //!    [`ArcadeFx`]: for each chip, what is on it and since when, plus the
-//!    hits and the smoothed tokens per second. All the reading, matching and
+//!    count of requests completed. All the reading, matching and
 //!    bookkeeping happens here.
 //! 2. [`draw`] runs in `ArcadeVisualization::render` (the frame path). It
 //!    turns the `ArcadeFx` into cells at a bus time with arithmetic only. It
@@ -38,13 +38,14 @@
 //! * **The model label**, right-aligned in the slot, in the phase's colour,
 //!   with `~` in front when the model's readings are estimates. When no
 //!   form of the label fits in the slot, an estimated model still gets a
-//!   bare `~` where the label would end, since its gauge and the heartbeat
-//!   still show.
+//!   bare `~` where the label would end, since its gauge still shows.
 //! * **A reset flash**: the slot's cells shown reversed for [`FLASH_NS`]
 //!   after a new `reset_seq` on the chip.
 //!
-//! Request hits are a ring of `✦` glyphs that grows out from the hero. Spark
-//! and compile particles rise in the starfield rows of the chip's slot.
+//! Spark and compile particles rise in the starfield rows of the chip's
+//! slot. Request hits are not drawn on the arcade (until 0.16.5 they were a
+//! ring of `✦` around the roaming hero, which is gone): they make the duel's
+//! snake lunge, and Memory Castle and Defrag read the per-chip hits.
 //!
 //! # What drives what
 //!
@@ -56,23 +57,19 @@
 //!   the same phase changes nothing.
 //! * **Hits** come from `RequestsCompleted` events seen since the last
 //!   update, for a model on one of this arcade's chips. Their glyph count
-//!   follows the event's `n`, up to [`MAX_HIT_GLYPHS`].
+//!   follows the event's `n`, up to [`MAX_HIT_GLYPHS`]. The sum of `n` is
+//!   [`ArcadeFx::new_requests`].
 //! * **Particles** come from `Spark` events naming one of this arcade's
 //!   chips, in `spark_rgb` colours, and from `KernelCompiled` events naming
 //!   one, in the load purple. Events with no chip draw nothing, as in Die 3D.
 //! * **Resets** come from `reset_seq` of each chip.
-//! * **The heartbeat**: the sum of `model.tokens_per_s` over the ready models
-//!   on this arcade's chips, when the reading is at most [`TPS_STALE_MS`]
-//!   old, smoothed over [`TPS_TAU_S`]. A faster rate makes the hero's
-//!   heartbeat faster. With no fresh reading the hero beats as before.
 //!
 //! Events already in the world at the first read are history and draw
 //! nothing. So do events that arrived while the arcade was away (off screen
 //! or another mode shown): an update more than a pulse lifetime after the
 //! last one, and more than four times the usual gap between updates, records
-//! the newest event and draws nothing for it. The rule, the phase memo and
-//! the tokens-per-second smoothing are the shared ones in `bus_intake`
-//! (`EventIntake`, `PhaseBook`, `fresh_tps`, `smooth_tps`).
+//! the newest event and draws nothing for it. The rule and the phase memo
+//! are the shared ones in `bus_intake` (`EventIntake`, `PhaseBook`).
 //!
 //! # Provenance
 //!
@@ -82,10 +79,10 @@
 //! the `i` view use. The gauge's length is derived from the reported
 //! progress. The following are decoration: the sweep shown with no progress
 //! figure (it says the model is busy and does not say how far), the shape,
-//! growth and fade of the hit ring and of the particles, where in the slot a
-//! particle starts, and the length of the settle, fade and flash.
+//! growth and fade of the particles, where in the slot a particle starts,
+//! and the length of the settle, fade and flash.
 
-use crate::animation::bus_intake::{fresh_tps, smooth_tps, EventIntake, PhaseBook};
+use crate::animation::bus_intake::{EventIntake, PhaseBook};
 use crate::animation::die3d::overlay::{
     lerp, model_text_is_estimated, phase_rgb, spark_rgb, ModelFlag, BAND_HALF, DOWN_GREY, FLASH_NS,
     LOAD_PURPLE, MAX_PULSES, MAX_SPARKS, PULSE_NS, SERVE_TEAL, SETTLE_NS, SPARK_NS,
@@ -100,26 +97,15 @@ use tt_toplike_bus::{EntityKey, Event, ModelPhase, ModelView, WorldRead};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 const NS_PER_S: u64 = 1_000_000_000;
-/// Glyphs in the ring of one hit at most. One request draws one glyph.
+/// Glyphs of one hit at most. One request is one glyph.
 pub const MAX_HIT_GLYPHS: u32 = 8;
-/// How fast a hit's ring grows, in rows per second (columns grow twice as
-/// fast, since a terminal cell is about twice as tall as it is wide).
-/// Decoration.
-const HIT_ROWS_PER_S: f32 = 4.0;
 /// How fast a particle rises, in rows per second. Decoration.
 const PARTICLE_ROWS_PER_S: f32 = 4.0;
-/// A tokens-per-second reading older than this is ignored, and the hero
-/// beats as it did before the bus.
+/// A tokens-per-second reading older than this is ignored (`bus_intake`,
+/// for the starfield and the backdrop).
 pub const TPS_STALE_MS: u64 = 10_000;
 /// The time constant of the tokens-per-second smoothing, in seconds.
 pub const TPS_TAU_S: f64 = 2.0;
-/// The hero's heartbeat period in frames with no serving rate: the period
-/// `ArcadeVisualization::overlay_hero` has always used.
-pub const HEARTBEAT_FRAMES: u32 = 60;
-/// The shortest heartbeat period, in frames.
-const HEARTBEAT_MIN_FRAMES: u32 = 12;
-/// Tokens per second that halve the heartbeat period.
-const HEARTBEAT_TPS: f64 = 50.0;
 /// Steps per second effects move at, as in Die 3D.
 const FX_STEPS_PER_S: f64 = 12.0;
 
@@ -140,13 +126,14 @@ pub enum Gauge {
     Fade { since_ns: u64 },
 }
 
-/// One request hit: a ring of glyphs around the hero.
+/// One request hit: requests completed for a model on a chip. Memory
+/// Castle and Defrag draw them.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hit {
     pub start_ns: u64,
-    /// Glyphs in the ring: the requests completed, 1 to [`MAX_HIT_GLYPHS`].
+    /// Glyphs: the requests completed, 1 to [`MAX_HIT_GLYPHS`].
     pub glyphs: u32,
-    /// The event's sequence number, which turns the ring (decoration).
+    /// The event's sequence number (decoration for the views that draw it).
     pub seq: u64,
 }
 
@@ -210,13 +197,9 @@ pub struct ArcadeFx {
     pub slots: usize,
     /// One entry per chip that has something, in slot order.
     pub chips: Vec<ChipFx>,
-    pub hits: Vec<Hit>,
     /// Requests completed in the events this update handled, for this
     /// arcade's chips. The duel's snake lunges when it is above 0.
     pub new_requests: u32,
-    /// Smoothed tokens per second of the ready models on this arcade's
-    /// chips. `None` with no fresh reading.
-    pub tokens_per_s: Option<f64>,
     /// Whether this update handled the events since the last one: false on
     /// the first update, after the world's head went backwards, and after
     /// the view was away. A view that acts on a change it sees between two
@@ -243,7 +226,6 @@ pub struct ArcadeBusState {
     intake: EventIntake,
     /// The phase each model was last seen in.
     phases: PhaseBook,
-    hits: Vec<Hit>,
     /// By chip key.
     particles: HashMap<EntityKey, Vec<Particle>>,
     /// The last `reset_seq` seen, by chip key.
@@ -254,14 +236,12 @@ pub struct ArcadeBusState {
     chip_hits: HashMap<EntityKey, Vec<Hit>>,
     /// ECC ticks by chip key.
     cracks: HashMap<EntityKey, Vec<Crack>>,
-    /// The smoothed tokens per second.
-    tps: Option<f64>,
 }
 
 impl ArcadeFx {
     /// Whether nothing is drawn from the bus.
     pub fn is_empty(&self) -> bool {
-        self.chips.is_empty() && self.hits.is_empty() && self.tokens_per_s.is_none()
+        self.chips.is_empty()
     }
 
     /// The effects of `chips` (each a device's slot and its chip key,
@@ -291,7 +271,6 @@ impl ArcadeFx {
                     if let Some(m) = models.iter().find(|m| m.key == model && ours(m)) {
                         if n > 0 {
                             new_requests = new_requests.saturating_add(n);
-                            add_hit(&mut prev.hits, now, n, q);
                             for c in m.chips.iter().filter(|c| drawn(c)) {
                                 add_hit(prev.chip_hits.entry(c.clone()).or_default(), now, n, q);
                             }
@@ -339,19 +318,9 @@ impl ArcadeFx {
         // Phases: a change against the last phase seen is timed from now.
         prev.phases.update(&models, now);
 
-        // Tokens per second: the ready models on these chips with a fresh
-        // reading, summed and smoothed. No fresh reading drops the smoothing.
-        let raw: Option<f64> = models
-            .iter()
-            .filter(|m| ours(m))
-            .filter_map(|m| fresh_tps(world, m, now))
-            .fold(None, |sum, t| Some(sum.unwrap_or(0.0) + t));
-        prev.tps = smooth_tps(raw, prev.tps, intake.gap);
-
         let mut out = ArcadeFx {
             slots,
             new_requests,
-            tokens_per_s: prev.tps,
             fresh: intake.live,
             ..ArcadeFx::default()
         };
@@ -395,9 +364,6 @@ impl ArcadeFx {
                 out.chips.push(co);
             }
         }
-        prev.hits
-            .retain(|h| now.saturating_sub(h.start_ns) < PULSE_NS);
-        out.hits = prev.hits.clone();
         // Nothing is kept for a chip no longer drawn, or a flash that ended.
         prev.particles.retain(|k, p| drawn(k) && !p.is_empty());
         prev.flashes
@@ -405,19 +371,6 @@ impl ArcadeFx {
         prev.chip_hits.retain(|k, h| drawn(k) && !h.is_empty());
         prev.cracks.retain(|k, c| drawn(k) && !c.is_empty());
         out
-    }
-
-    /// The hero's heartbeat period in frames: [`HEARTBEAT_FRAMES`] with no
-    /// serving rate, shorter as the smoothed tokens per second rise, down to
-    /// 12 frames.
-    pub fn heartbeat_frames(&self) -> u32 {
-        match self.tokens_per_s {
-            None => HEARTBEAT_FRAMES,
-            Some(t) => {
-                let p = HEARTBEAT_FRAMES as f64 / (1.0 + t / HEARTBEAT_TPS);
-                (p.round() as u32).clamp(HEARTBEAT_MIN_FRAMES, HEARTBEAT_FRAMES)
-            }
-        }
     }
 }
 
@@ -509,9 +462,6 @@ pub struct Stage {
     pub sky: Range<usize>,
     /// The starfield panel's columns, cut into the chips' slots.
     pub sky_cols: Range<usize>,
-    /// The hero's cell, and the first row it may use (below the lanes).
-    pub hero: (f32, f32),
-    pub top_row: usize,
 }
 
 /// The columns of slot `slot` of `slots` across `width`.
@@ -529,7 +479,7 @@ fn slot_in(cols: &Range<usize>, slot: usize, slots: usize) -> Range<usize> {
 /// Draw `fx` at bus time `now` onto `lines`. Arithmetic on `fx` only. An
 /// empty `fx` changes nothing.
 pub fn draw(fx: &ArcadeFx, now: u64, stage: &Stage, lines: &mut [Line<'static>]) {
-    if fx.chips.is_empty() && fx.hits.is_empty() {
+    if fx.chips.is_empty() {
         return;
     }
     for co in &fx.chips {
@@ -550,9 +500,6 @@ pub fn draw(fx: &ArcadeFx, now: u64, stage: &Stage, lines: &mut [Line<'static>])
         for p in &co.particles {
             draw_particle(p, now, sky_cols.clone(), &stage.sky, lines);
         }
-    }
-    for h in &fx.hits {
-        draw_hit(h, now, stage, lines);
     }
 }
 
@@ -624,8 +571,8 @@ fn draw_label(
         let w = UnicodeWidthStr::width(t.as_str());
         end >= w && end - w >= start_min
     }) else {
-        // No form fits. The gauge and the heartbeat still draw from this
-        // model, so an estimate keeps its `~`, alone at the label's right
+        // No form fits. The gauge still draws from this model, so an
+        // estimate keeps its `~`, alone at the label's right
         // end, when that one column is free.
         if flag.estimated && end > start_min {
             crate::animation::ArcadeVisualization::splice_char(lines, row, end - 1, '~', style);
@@ -736,36 +683,6 @@ fn draw_particle(
     crate::animation::ArcadeVisualization::splice_char(lines, row, col, glyph, style);
 }
 
-/// A hit's ring of glyphs around the hero, growing as it fades.
-fn draw_hit(h: &Hit, now: u64, stage: &Stage, lines: &mut [Line<'static>]) {
-    let w = left(h.start_ns, now, PULSE_NS);
-    if w <= 0.0 {
-        return;
-    }
-    // Decoration: the ring's size, turn and fade.
-    let r = 1.0 + stepped_secs(h.start_ns, now) * HIT_ROWS_PER_S;
-    let glyph = if w > 0.5 { '✦' } else { '·' };
-    let style = Style::default()
-        .fg(colors::rgb(SERVE_TEAL[0], SERVE_TEAL[1], SERVE_TEAL[2]))
-        .add_modifier(Modifier::BOLD);
-    let turn = (h.seq % 8) as f32 * std::f32::consts::PI / 8.0;
-    let (hx, hy) = stage.hero;
-    for j in 0..h.glyphs {
-        let angle = turn + j as f32 * std::f32::consts::TAU / h.glyphs as f32;
-        let x = hx + angle.cos() * r * 2.0;
-        let y = hy + angle.sin() * r;
-        if x < 0.0 || y < stage.top_row as f32 {
-            continue;
-        }
-        let (col, row) = (x as usize, y as usize);
-        // The hero's own cell stays the hero's.
-        if col >= stage.width || row >= lines.len() || (col, row) == (hx as usize, hy as usize) {
-            continue;
-        }
-        crate::animation::ArcadeVisualization::splice_char(lines, row, col, glyph, style);
-    }
-}
-
 /// Blend the foreground of the cells `cols` of `row` toward `rgb` by
 /// `weight`, keeping the characters.
 pub(crate) fn tint(
@@ -839,10 +756,9 @@ pub const LEGEND_TEXT: &[&str] = &[
     "          sweeps, decoration); teal at ready, grey when down",
     "  label   model, phase and tokens/s right of the rule;",
     "          '~' marks an estimate",
-    "  ✦ ring  from the hero, one per request completed (8 max)",
     "  * rise  a hivemind spark or kernel compile (decoration)",
     "  flash   the chip's share of the rule after a reset",
-    "  @ beat  faster as the ready models' tokens/s rise",
+    "  lunge   the duel's snake, on each request completed",
 ];
 
 /// The arcade explain text's paragraph on what the bus draws.
@@ -853,10 +769,9 @@ pub const EXPLAIN_TEXT: &[&str] = &[
     "fills purple as a model compiles or loads, as far as its",
     "progress (with no figure a band sweeps: decoration). It",
     "goes teal at ready and grey when down. Model, phase and",
-    "tokens/s sit at its right ('~' marks an estimate). Each",
-    "request completed adds a ✦ to a ring round the hero,",
-    "sparks and compiles rise as *, a reset flashes the rule,",
-    "and the hero's heart beats faster as tokens/s rise.",
+    "tokens/s sit at its right ('~' marks an estimate).",
+    "Sparks and compiles rise as *, a reset flashes the rule,",
+    "and each request completed makes the duel's snake lunge.",
 ];
 
 /// The legend lines for [`LEGEND_TEXT`], with the overlay's left bar.
@@ -872,7 +787,7 @@ pub fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The hero duel's serving stats. `local` is the local monitor's choice;
+/// The duel's serving stats. `local` is the local monitor's choice;
 /// `attached_rows` are the rows built from an attached host's world
 /// (`inference_bus::attached_rows`), `None` when the TUI hosts its own bus.
 pub fn duel_serving(
@@ -885,7 +800,7 @@ pub fn duel_serving(
     }
 }
 
-/// The bus's hero serving stats when the TUI is attached to a host, from
+/// The duel's serving stats when the TUI is attached to a host, from
 /// the rows built from the host's world. The local monitor's stats belong
 /// to this machine and say nothing about the host.
 ///

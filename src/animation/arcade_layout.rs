@@ -323,8 +323,6 @@ pub struct Layout {
     pub width: usize,
     pub height: usize,
     pub rows: Vec<LaidRow>,
-    /// [`Layout::bands`], made with the layout.
-    bands: Vec<std::ops::Range<usize>>,
 }
 
 impl Layout {
@@ -351,13 +349,6 @@ impl Layout {
         self.panels()
             .find(|p| HOSTS.contains(&p.view))
             .or_else(|| self.panels().next())
-    }
-
-    /// The rows that show a panel, top to bottom, as the hero's bands:
-    /// `rule_y .. rule_y + height` (the old `*_start .. *_end` fields). A
-    /// row given no content rows still counts, as the old fields did.
-    pub fn bands(&self) -> &[std::ops::Range<usize>] {
-        &self.bands
     }
 
     /// Lines the composed arcade has: the header, every rule, every content
@@ -455,16 +446,10 @@ pub fn layout(rows: &[RowSpec], width: usize, height: usize) -> Layout {
             });
             y = rule_y + 1 + h;
         }
-        let bands = out
-            .iter()
-            .filter(|r| !r.panels.is_empty())
-            .map(|r| r.rule_y..r.rule_y + r.height)
-            .collect();
         return Layout {
             width,
             height,
             rows: out,
-            bands,
         };
     }
 }
