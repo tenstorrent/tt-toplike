@@ -245,6 +245,34 @@ impl Feeder {
     }
 }
 
+/// The name of a local driver's thread.
+const LOCAL_THREAD: &str = "tt-toplike-saga";
+/// The name of a remote driver's thread.
+const REMOTE_THREAD: &str = "tt-toplike-saga-remote";
+
+/// How long stopping a remote driver waits for its thread. The thread can be
+/// inside a connect or a snapshot request that waits up to 10 s on a hung
+/// server; past this wait it is left to end on its own (it holds only its
+/// own `Arc` and checks the stop flag at its next step), so quitting the
+/// TUI is never held up by a dead host. A local driver is always joined.
+const REMOTE_STOP_WAIT: Duration = Duration::from_millis(500);
+
+/// True when the calling thread is a saga driver's. The TUI's panic hook
+/// checks it: a panic in the driver is caught there (the driver stops and
+/// the view keeps its last state) and must not take the terminal out of raw
+/// mode.
+pub fn is_saga_thread() -> bool {
+    matches!(thread::current().name(), Some(LOCAL_THREAD | REMOTE_THREAD))
+}
+
+/// Runs a driver loop and catches a panic in it, so the thread ends
+/// quietly and the last published state stays readable.
+fn guarded(f: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
+        log::warn!("saga: the driver stopped after a panic; the view keeps its last state");
+    }
+}
+
 /// A saga fed on a background thread. See the module comment.
 ///
 /// Dropping it stops the thread and waits for it, as [`SagaDriver::stop`]
@@ -252,6 +280,8 @@ impl Feeder {
 pub struct SagaDriver {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+    /// A remote driver: stopping waits at most [`REMOTE_STOP_WAIT`].
+    remote: bool,
 }
 
 impl std::fmt::Debug for SagaDriver {
@@ -277,11 +307,12 @@ impl SagaDriver {
         let shared = Arc::new(Shared::new(Feeder::initial(cfg, 1)));
         let s = shared.clone();
         let thread = thread::Builder::new()
-            .name("tt-toplike-saga".into())
-            .spawn(move || run_local(&bus, cfg, &s))?;
+            .name(LOCAL_THREAD.into())
+            .spawn(move || guarded(|| run_local(&bus, cfg, &s)))?;
         Ok(SagaDriver {
             shared,
             thread: Some(thread),
+            remote: false,
         })
     }
 
@@ -301,11 +332,12 @@ impl SagaDriver {
         let s = shared.clone();
         let path = path.to_path_buf();
         let thread = thread::Builder::new()
-            .name("tt-toplike-saga-remote".into())
-            .spawn(move || remote::run(client, &path, cfg, &s))?;
+            .name(REMOTE_THREAD.into())
+            .spawn(move || guarded(|| remote::run(client, &path, cfg, &s)))?;
         Ok(SagaDriver {
             shared,
             thread: Some(thread),
+            remote: true,
         })
     }
 
@@ -333,18 +365,30 @@ impl SagaDriver {
         pred(&guard)
     }
 
-    /// Stops the thread and waits for it to end.
+    /// Stops the thread and waits for it to end (a remote driver's for at
+    /// most [`REMOTE_STOP_WAIT`]).
     pub fn stop(mut self) {
         self.halt();
     }
 
     fn halt(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
-        if let Some(t) = self.thread.take() {
-            // A local driver may be parked; wake it so it sees the flag.
-            t.thread().unpark();
-            let _ = t.join();
+        let Some(t) = self.thread.take() else {
+            return;
+        };
+        // The thread may be parked; wake it so it sees the flag.
+        t.thread().unpark();
+        if self.remote {
+            let end = std::time::Instant::now() + REMOTE_STOP_WAIT;
+            while !t.is_finished() && std::time::Instant::now() < end {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if !t.is_finished() {
+                // Left to end on its own; see REMOTE_STOP_WAIT.
+                return;
+            }
         }
+        let _ = t.join();
     }
 
     /// A handle that outlives the driver only while its thread still runs,

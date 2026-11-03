@@ -478,6 +478,16 @@ impl TuiBus {
         }
     }
 
+    /// The socket path of the host this TUI is attached to, or `None` when
+    /// this process hosts the bus.
+    pub fn attached_path(&self) -> Option<&Path> {
+        match &self.view {
+            BusView::Local(_) => None,
+            #[cfg(unix)]
+            BusView::Attached(r) => Some(r.path()),
+        }
+    }
+
     /// The host, when this process hosts the bus.
     pub fn host(&self) -> Option<&BusHost> {
         match &self.view {

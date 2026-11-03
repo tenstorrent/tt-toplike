@@ -779,6 +779,11 @@ pub fn install_panic_hook() {
             log::warn!("process scan thread panicked: {info}");
             return;
         }
+        // The saga driver catches its own panic too (`crate::saga::driver`).
+        if crate::saga::driver::is_saga_thread() {
+            log::warn!("saga driver thread panicked: {info}");
+            return;
+        }
         // Stop the start-up splash first, without letting it clear the
         // screen, so it cannot draw over or erase the message below.
         splash::abandon();
@@ -880,6 +885,9 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     let mut loaded_config = crate::config::load_config();
     // `--arcade-layout NAME` wins over `[arcade] layout`.
     crate::config::choose_layout(&mut loaded_config, cli.arcade_layout.as_deref());
+    // The saga's driver runs from start-up, on or off screen, unless
+    // `[saga] enabled = false` (ledger ruling R24; see `crate::saga`).
+    let saga = crate::saga::start_for_tui(&loaded_config, &tui_bus, cli.interval);
 
     // Setup terminal
     enable_raw_mode().map_err(|e| {
@@ -939,7 +947,11 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // Drop the bus after the terminal is restored, so a slow shutdown never
     // leaves the screen frozen in the alternate screen: a recording
     // flushes, a served socket file is removed, and an attached follower
-    // gets at most half a second to stop (`RemoteWorld`'s drop).
+    // gets at most half a second to stop (`RemoteWorld`'s drop). The saga
+    // driver stops first: it holds a clone of a hosted bus.
+    if let Some(d) = saga {
+        d.stop();
+    }
     drop(tui_bus);
 
     res

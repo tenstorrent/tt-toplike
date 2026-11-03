@@ -405,3 +405,24 @@ fn a_remote_driver_starts_from_the_snapshot() {
     d.stop();
     drop(server);
 }
+
+#[test]
+fn only_a_driver_thread_is_a_saga_thread() {
+    assert!(!is_saga_thread(), "the test thread is not a driver");
+    for name in [LOCAL_THREAD, REMOTE_THREAD] {
+        let on = std::thread::Builder::new()
+            .name(name.into())
+            .spawn(is_saga_thread)
+            .unwrap()
+            .join()
+            .unwrap();
+        assert!(on, "{name}");
+    }
+    let off = std::thread::Builder::new()
+        .name("tt-toplike-sagas".into())
+        .spawn(is_saga_thread)
+        .unwrap()
+        .join()
+        .unwrap();
+    assert!(!off);
+}
