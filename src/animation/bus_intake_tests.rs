@@ -355,7 +355,7 @@ mod arcade_die3d_and_the_shared_intake {
         let arc_shared: Vec<Shared> = arc.iter().map(|d| d.0).collect();
         assert_eq!(die_shared, arc_shared);
 
-        // ECC. Die 3D flashes any rise, including the one first seen after
+        // ECC. Die 3D flashes any rise, including a rise first seen after
         // being away (update 4); the shared intake under `FlashAnyRise`
         // makes the same decisions. Under `SuppressAfterAway`, the policy of
         // every other view, the rise after being away is recorded and

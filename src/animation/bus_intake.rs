@@ -5,10 +5,13 @@
 //! each model was last seen in, how the ECC counters of a DRAM channel add
 //! up, and the smoothing of tokens per second.
 //!
-//! This is the one copy of these rules. The arcade (`arcade_bus`, which
-//! Memory Castle and Defrag also read through), Die 3D (`die3d::overlay`),
-//! the Starfield and MemoryFlow call [`EventIntake::take`] and
-//! [`PhaseBook`]. The tests in `bus_intake_tests.rs` feed one sequence of
+//! The arcade (`arcade_bus`, which Memory Castle and Defrag also read
+//! through), Die 3D (`die3d::overlay`), the Starfield and MemoryFlow take
+//! these rules from here, through [`EventIntake::take`] and [`PhaseBook`].
+//! Three readers still carry their own copy of the away test: the Grid
+//! (`ui::tui::grid_bus`, also its own phase memo), Training (`train_bus`,
+//! which reads no event sequence) and the hivemind (`ui::tui::hivemind_bus`,
+//! which marks away events as history and keeps them). The tests in `bus_intake_tests.rs` feed one sequence of
 //! worlds to the arcade, to Die 3D and to these pieces and assert the same
 //! decisions. The rules:
 //!
