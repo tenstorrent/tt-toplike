@@ -82,8 +82,16 @@ nothing to do has no signal behind its rest, and its line says `no signal`.
 The saga core is a pure library with no clock, no I/O and no terminal. Its contract: **the same
 ordered stream of records gives the same saga.**
 
-* **Time is counted in sweeps.** The bus records one sweep per backend update, and the saga's clock
-  is the number of sweeps it has seen. A season is a number of sweeps.
+* **Time is counted in sweeps.** The backend sweeps every chip once per update. The first chip
+  whose sweep the saga sees is its clock, and each sweep of that chip is one tick. A season is a
+  number of ticks. Only a chip can be the clock: a process scan also sends sweeps, but only every
+  2 seconds. If the clock's chip misses three updates in a row (it went away, or `b` switched the
+  backend and every chip key changed), the next chip to sweep becomes the clock, so there is still
+  one tick per update. The timeout counts updates, never time.
+* **Records about the TUI itself play no part.** A TUI that hosts its bus publishes a `ViewChanged`
+  when its first frame is drawn and on every view key, and a replay host publishes a gap at each
+  hole it finds in the log. Their positions depend on key presses and timing, so the saga skips
+  them, as it skips the bus's own disk-outage gaps.
 * **Sequence numbers and timestamps play no part.** The saga reads only each record's source and
   payload. A replay host numbers and times every record afresh, and the story is still the same.
 * **Records from source `saga` are skipped**, so a recording that carries the saga's own output

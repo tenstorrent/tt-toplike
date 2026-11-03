@@ -247,32 +247,131 @@ fn the_first_sweep_entity_is_the_pacemaker() {
     assert_eq!(ticks(&out), 0);
 }
 
-#[test]
-fn the_fallback_tick_fires_when_the_pacemaker_goes_quiet() {
-    let quiet_then_other = |quiet: u64| {
-        let mut payloads = vec![("tt-smi", sweep(chip(1), vec![("a", Value::U64(1))]))];
-        for _ in 0..quiet {
-            payloads.push(("tt-smi", filler()));
-        }
-        payloads.push(("tt-smi", sweep(chip(2), vec![("a", Value::U64(1))])));
-        run(&payloads, |i| (i, i)).0
-    };
-    // One pacemaker tick, plus the other chip's sweep only after 2000 quiet records.
-    assert_eq!(ticks(&quiet_then_other(1999)), 1);
-    assert_eq!(ticks(&quiet_then_other(2000)), 2);
+/// One sweep of `entity` from the backend.
+fn sweep_of(entity: EntityKey) -> (&'static str, Payload) {
+    ("backend", sweep(entity, vec![("a", Value::U64(1))]))
+}
 
-    // While the pacemaker stays quiet, every sweep ticks; once it sweeps
-    // again the others stop ticking.
-    let mut payloads = vec![("tt-smi", sweep(chip(1), vec![("a", Value::U64(1))]))];
-    for _ in 0..2000 {
-        payloads.push(("tt-smi", filler()));
+/// `rounds` backend ticks, each one sweep of every chip in `chips`, in
+/// order.
+fn rounds(chips: &[u32], rounds: usize) -> Vec<(&'static str, Payload)> {
+    let mut out = Vec::new();
+    for _ in 0..rounds {
+        for &c in chips {
+            out.push(sweep_of(chip(c)));
+        }
     }
-    payloads.push(("tt-smi", sweep(chip(2), vec![("a", Value::U64(1))])));
-    payloads.push(("tt-smi", sweep(chip(3), vec![("a", Value::U64(1))])));
-    payloads.push(("tt-smi", sweep(chip(1), vec![("a", Value::U64(2))])));
-    payloads.push(("tt-smi", sweep(chip(2), vec![("a", Value::U64(1))])));
-    let (out, _) = run(&payloads, |i| (i, i));
-    assert_eq!(ticks(&out), 4);
+    out
+}
+
+/// Ticks per round of `per_round` records, in order.
+fn ticks_per_round(out_by_record: &[usize], per_round: usize) -> Vec<usize> {
+    out_by_record
+        .chunks(per_round)
+        .map(|c| c.iter().sum())
+        .collect()
+}
+
+/// Feeds each payload and returns the number of ticks each one gave.
+fn ticks_by_record(payloads: &[(&str, Payload)]) -> Vec<usize> {
+    let mut feed = Feed::new();
+    payloads
+        .iter()
+        .enumerate()
+        .map(|(i, (source, p))| {
+            let mut out = Vec::new();
+            feed.push(&record(i as u64, 0, source, p.clone()), &mut out);
+            ticks(&out)
+        })
+        .collect()
+}
+
+/// Only a chip sweep can be the pacemaker. A process scan sweeps each TT
+/// process every 2 s, so before the final fix wave a process sweep that
+/// arrived first (an attached TUI's first record, or a backend whose first
+/// poll had no telemetry) became the clock and ran it 20 times slower
+/// (finding I2).
+#[test]
+fn a_sweep_of_anything_but_a_chip_never_ticks() {
+    let process = EntityKey::process(4242, 17);
+    let dram = EntityKey::dram_channel(&chip(1), 0);
+    let mut payloads = vec![sweep_of(process.clone()), sweep_of(dram.clone())];
+    payloads.extend(rounds(&[1], 1));
+    payloads.push(sweep_of(process.clone()));
+    payloads.extend(rounds(&[1], 1));
+    payloads.push(sweep_of(dram));
+    assert_eq!(ticks_by_record(&payloads), vec![0, 0, 1, 0, 1, 0]);
+    // A stream with no chip sweep at all has no clock.
+    let only_processes: Vec<_> = (0..10).map(|_| sweep_of(process.clone())).collect();
+    assert!(ticks_by_record(&only_processes).iter().all(|&t| t == 0));
+}
+
+/// On a box with several chips the first chip to sweep stays the pacemaker
+/// for as long as it sweeps: one tick per backend tick.
+#[test]
+fn a_live_pacemaker_keeps_the_clock() {
+    let per = ticks_by_record(&rounds(&[1, 2, 3], 200));
+    assert_eq!(ticks_per_round(&per, 3), vec![1; 200]);
+    // The tick follows chip 1's sweep, the first in each round.
+    assert!(per.chunks(3).all(|c| c == [1, 0, 0]));
+}
+
+/// When the pacemaker stops sweeping (its chip went away, or a backend
+/// switch changed every key), the chip whose sweep completes the
+/// [`PACEMAKER_TIMEOUT_ROUNDS`]th round without it takes over. From then on
+/// there is still exactly one tick per backend tick. Before the final fix
+/// wave every sweep ticked once 2,000 records had passed, for the rest of
+/// the run (finding I2).
+#[test]
+fn a_quiet_pacemaker_hands_the_clock_to_the_next_chip() {
+    let mut payloads = rounds(&[1, 2, 3], 5);
+    payloads.extend(rounds(&[2, 3], 40));
+    let per = ticks_by_record(&payloads);
+    let (before, after) = per.split_at(15);
+    assert_eq!(ticks_per_round(before, 3), vec![1; 5]);
+    let after = ticks_per_round(after, 2);
+    // A round is noticed as missed when a chip sweeps a second time since
+    // the pacemaker last swept. Chip 1 would have swept first in each
+    // round, so chip 2's sweep in quiet round 3 completes the third round
+    // chip 1 missed, takes over and ticks. Rounds 1 and 2 have no tick.
+    let n = PACEMAKER_TIMEOUT_ROUNDS as usize;
+    assert_eq!(after[..n - 1], vec![0; n - 1]);
+    assert_eq!(after[n - 1..], vec![1; 41 - n]);
+
+    // The same after a backend switch: every key is new. The first round
+    // of new keys repeats no chip, so the handover comes one round later.
+    let mut payloads = rounds(&[1, 2, 3], 5);
+    payloads.extend(rounds(&[5, 6, 7], 40));
+    let per = ticks_by_record(&payloads);
+    let after = ticks_per_round(&per[15..], 3);
+    assert_eq!(after[..n], vec![0; n]);
+    assert_eq!(after[n..], vec![1; 40 - n]);
+
+    // A pacemaker that comes back is one chip among the others: the clock
+    // stays with the chip that took over, at one tick a round.
+    let mut payloads = rounds(&[1, 2], 5);
+    payloads.extend(rounds(&[2], 10));
+    payloads.extend(rounds(&[1, 2], 10));
+    let per = ticks_by_record(&payloads);
+    assert_eq!(ticks_per_round(&per[20..], 2), vec![1; 10]);
+    assert!(per[20..].chunks(2).all(|c| c == [0, 1]));
+}
+
+/// Records that are not chip sweeps do not count toward the timeout: a
+/// pacemaker that sweeps once per round keeps the clock however many other
+/// records arrive between its sweeps.
+#[test]
+fn other_records_do_not_count_toward_the_timeout() {
+    let mut payloads = Vec::new();
+    for _ in 0..20 {
+        payloads.push(sweep_of(chip(1)));
+        for _ in 0..500 {
+            payloads.push(("backend", filler()));
+        }
+        payloads.push(sweep_of(EntityKey::process(1, 1)));
+    }
+    let per = ticks_by_record(&payloads);
+    assert_eq!(per.iter().sum::<usize>(), 20);
 }
 
 /// Feeds one record from `source` to a fresh feed and returns the feed and

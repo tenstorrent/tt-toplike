@@ -7,21 +7,43 @@
 //! ordered stream of record contents gives the same observations however the
 //! records were numbered or timed (a live run and its replay agree).
 //!
-//! The clock is the pacemaker sweep. The first sweep entity the feed ever sees
-//! is the pacemaker, and each of its sweeps ends with one
-//! [`Observation::Tick`], after that sweep's samples. If the pacemaker is quiet
-//! for [`PACEMAKER_TIMEOUT`] records, any sweep ticks until the pacemaker
-//! sweeps again.
+//! The clock is the pacemaker sweep. The first chip whose sweep the feed
+//! sees is the pacemaker, and each of its sweeps ends with one
+//! [`Observation::Tick`], after that sweep's samples. Only a chip can be the
+//! pacemaker: the backend sweeps every chip once per poll, while a process
+//! scan sweeps each process only every 2 s, and a process comes and goes.
+//!
+//! The timeout is counted in rounds, never in time. A round without the
+//! pacemaker is noticed when some other chip sweeps a second time since the
+//! pacemaker last swept (a backend poll sweeps each chip once). After
+//! [`PACEMAKER_TIMEOUT_ROUNDS`] such rounds, the chip whose sweep completes
+//! the last of them becomes the pacemaker and ticks. So when the pacemaker's
+//! chip goes away, or a backend switch changes every chip key, the clock
+//! moves to another chip and still ticks once per poll. Before the final fix
+//! wave the first sweep of any kind became the pacemaker for good, and once
+//! it had been quiet for 2,000 records every sweep ticked (final review
+//! finding I2).
 
-use tt_toplike_bus::{EntityKey, Event, Payload, Record, Value};
+use std::collections::BTreeSet;
+
+use tt_toplike_bus::{EntityKey, EntityKind, Event, Payload, Record, Value};
 
 /// Source name the saga core uses for the records it publishes itself.
 /// The feed skips them so the core never reacts to its own output.
 const SAGA_SOURCE: &str = "saga";
 
-/// Number of records that may pass without a pacemaker sweep before any sweep
-/// counts as a tick.
-pub const PACEMAKER_TIMEOUT: u64 = 2000;
+/// Rounds of chip sweeps that may pass without the pacemaker before another
+/// chip takes over the clock (see the module comment). Three rounds are
+/// 0.3 s at the default 10 Hz poll.
+pub const PACEMAKER_TIMEOUT_ROUNDS: u64 = 3;
+
+/// The most chips the feed remembers within one round. A round that reaches
+/// it counts as missed, as a repeated chip does, so the set stays small
+/// whatever a local writer sends. It is the saga's own chip cap
+/// ([`crate::world::MAX_CHIPS`]); on a box with more chips than three times
+/// this, a pacemaker that still sweeps can lose the clock to another chip.
+/// The clock then still ticks about once per poll.
+const MAX_ROUND_CHIPS: usize = 64;
 
 /// The longest text, in UTF-8 bytes, that a record may carry into the saga
 /// (ledger ruling R21). It applies to every entity key (the whole key, kind
@@ -67,10 +89,13 @@ pub enum Observation {
 pub struct Feed {
     /// Records pushed so far, not counting records from source "saga".
     ordinal: u64,
-    /// The first sweep entity ever seen.
+    /// The chip whose sweeps tick (see the module comment).
     pacemaker: Option<EntityKey>,
-    /// The ordinal of the pacemaker's latest sweep.
-    last_pacemaker_sweep: u64,
+    /// Other chips that have swept since the pacemaker last swept, in the
+    /// current round. At most [`MAX_ROUND_CHIPS`].
+    round: BTreeSet<EntityKey>,
+    /// Rounds that have passed without a pacemaker sweep.
+    missed_rounds: u64,
     /// Records dropped for an item longer than [`MAX_ITEM_BYTES`].
     oversized: u64,
     /// Records dropped for a signal named with [`SAGA_SIGNAL_PREFIX`].
@@ -252,17 +277,43 @@ impl Feed {
     }
 
     /// Decides whether a sweep from `entity` is a tick, and updates the
-    /// pacemaker state. The first sweep entity becomes the pacemaker.
+    /// pacemaker state (see the module comment). A sweep of anything but a
+    /// chip never ticks and does not count toward the timeout.
     fn sweep_ticks(&mut self, entity: &EntityKey) -> bool {
-        let pacemaker = self.pacemaker.get_or_insert_with(|| entity.clone());
-        if pacemaker == entity {
-            self.last_pacemaker_sweep = self.ordinal;
-            return true;
+        if entity.kind() != EntityKind::Chip {
+            return false;
         }
-        // Records that passed since the pacemaker's last sweep, not counting
-        // this one.
-        let quiet = self.ordinal - self.last_pacemaker_sweep - 1;
-        quiet >= PACEMAKER_TIMEOUT
+        match &self.pacemaker {
+            None => {
+                self.elect(entity);
+                return true;
+            }
+            Some(p) if p == entity => {
+                self.round.clear();
+                self.missed_rounds = 0;
+                return true;
+            }
+            Some(_) => {}
+        }
+        // Another chip. Its second sweep since the pacemaker's last one
+        // means a whole round passed without the pacemaker.
+        if self.round.contains(entity) || self.round.len() >= MAX_ROUND_CHIPS {
+            self.missed_rounds += 1;
+            self.round.clear();
+            if self.missed_rounds >= PACEMAKER_TIMEOUT_ROUNDS {
+                self.elect(entity);
+                return true;
+            }
+        }
+        self.round.insert(entity.clone());
+        false
+    }
+
+    /// Makes `entity` the pacemaker with a fresh round.
+    fn elect(&mut self, entity: &EntityKey) {
+        self.pacemaker = Some(entity.clone());
+        self.round.clear();
+        self.missed_rounds = 0;
     }
 }
 
