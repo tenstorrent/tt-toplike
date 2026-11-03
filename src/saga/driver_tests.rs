@@ -111,6 +111,68 @@ fn the_driver_feeds_every_record_in_order() {
     d.stop();
 }
 
+/// Two snapshots published within one world share its floors: a snapshot
+/// copies a pointer to them and no cell (the party addendum, section 3.7).
+/// The floors never change during a world's life, so sharing them is safe.
+#[test]
+fn a_snapshot_shares_its_floors() {
+    let records = busy_records();
+    // Two cut points in the busy log, 200 records apart and in one world,
+    // found by a saga fed the same records: the first cut is just after a
+    // birth, and it moves to the next birth when a world ends too soon.
+    const APART: usize = 200;
+    let mut saga = Saga::new(cfg());
+    let mut first: Option<(usize, u64)> = None;
+    let mut cuts = Vec::new();
+    for (i, r) in records.iter().enumerate() {
+        saga.feed(r);
+        let id = saga.state().world.id;
+        match first {
+            _ if id == 0 => {}
+            Some((cut, world)) if world == id => {
+                if i + 1 >= cut + APART {
+                    cuts = vec![cut, i + 1];
+                    break;
+                }
+            }
+            _ => first = Some((i + 1, id)),
+        }
+    }
+    assert_eq!(
+        cuts.len(),
+        2,
+        "no world of the busy log lasts {APART} records"
+    );
+    let world = first.map_or(0, |(_, id)| id);
+
+    let clock = ManualClock::new(0);
+    let bus = manual_bus(&clock);
+    let d = SagaDriver::spawn(bus.clone(), cfg()).unwrap();
+    let mut published = Vec::new();
+    let mut from = 0;
+    for cut in cuts {
+        publish_all(&bus, &records[from..cut]);
+        from = cut;
+        let head = bus.head();
+        assert!(
+            wait_published(&d, &clock, |p| p.through == head),
+            "the driver never caught up: {:?}",
+            d.published()
+        );
+        published.push(d.published());
+    }
+    d.stop();
+    let (a, b) = (&published[0].state, &published[1].state);
+    assert_eq!(a.world.id, world, "the first snapshot's world");
+    assert_eq!(b.world.id, world, "the second snapshot's world");
+    assert!(!Arc::ptr_eq(a, b), "two snapshots, two states");
+    assert_ne!(a.tick, b.tick, "the second snapshot is later");
+    assert!(
+        Arc::ptr_eq(&a.world.floors, &b.world.floors),
+        "the two snapshots hold two copies of the floors"
+    );
+}
+
 /// A bus reopened on a directory that holds earlier sessions continues
 /// their sequence numbers and reads their records back from the segment
 /// files. A local saga starts at this bus instance's first record, so the

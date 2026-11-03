@@ -82,7 +82,13 @@ fn check_state(saga: &Saga, seed: u64, i: usize, last_tick: u64) {
     assert!(!w.floors.is_empty(), "{at}: a world with no floor");
     assert!(w.chips.len() <= MAX_FLOORS, "{at}: {} chips", w.chips.len());
     assert_eq!(s.has_world(), w.id > 0, "{at}: has_world disagrees with id");
-    // One member per floor, each on its own floor.
+    // One member per floor, each on its own floor, and never more members
+    // than a world has floors (the party addendum, section 3.7).
+    assert!(
+        s.party.len() <= MAX_FLOORS,
+        "{at}: {} members",
+        s.party.len()
+    );
     assert_eq!(
         s.party.len(),
         w.floors.len(),
@@ -192,6 +198,70 @@ fn random_record_streams_never_panic() {
                 "seed {seed:#x}: one stream gave two digests"
             );
         }
+    }
+}
+
+/// A fuzz stream offers 80 chips, more than the saga keeps (64) and more
+/// than a world has floors (32). The party stays at most [`MAX_FLOORS`]
+/// members, one per floor, after every record (`check_state`), and the
+/// stream does reach a party of exactly [`MAX_FLOORS`], so the bound is
+/// tested at its limit. `random_record_streams_never_panic` runs the same
+/// check on every seed; this test runs the first seed and also looks at the
+/// largest party.
+#[test]
+fn members_never_exceed_max_floors_under_fuzz() {
+    let seed = SEEDS[0];
+    let records = random_stream(seed, FUZZ_RECORDS);
+    let mut saga = Saga::new(config(seed));
+    let mut largest = 0;
+    let mut last_tick = 0;
+    for (i, rec) in records.iter().enumerate() {
+        saga.feed(rec);
+        check_state(&saga, seed, i, last_tick);
+        last_tick = saga.state().tick;
+        largest = largest.max(saga.state().party.len());
+        saga.drain_events();
+    }
+    assert_eq!(
+        largest, MAX_FLOORS,
+        "seed {seed:#x}: the largest party had {largest} members"
+    );
+}
+
+/// A box with more chips than a world has floors: the 32-chip party script
+/// with 1, 32 and 96 chips more (33, 64 and 128 chips in all). Every world
+/// has 32 floors, on the first 32 chips in key order, and 32 members, member
+/// `i` on floor `i` (the party addendum, section 3.7).
+#[test]
+fn more_than_32_chips_give_32_members() {
+    // The addendum's cap, copied here so that raising `CAP` in the
+    // code makes this test fail.
+    const CAP: usize = 32;
+    let first: Vec<EntityKey> = (0..32).map(support::party::chip).collect();
+    for chips in [33, 64, 128] {
+        let records = support::party::records_with_extra_chips(chips, 120);
+        let mut saga = Saga::new(config(1));
+        let mut worlds = 0;
+        for (i, rec) in records.iter().enumerate() {
+            saga.feed(rec);
+            saga.drain_events();
+            let s = saga.state();
+            let at = format!("{chips} chips, record {i}");
+            assert!(s.party.len() <= CAP, "{at}: {} members", s.party.len());
+            if !s.has_world() {
+                continue;
+            }
+            worlds = worlds.max(s.world.id);
+            assert_eq!(s.world.chips, first, "{at}: the world's chips");
+            assert_eq!(s.world.floors.len(), CAP, "{at}: floors");
+            assert_eq!(s.party.len(), CAP, "{at}: members");
+            for (m, member) in s.party.iter().enumerate() {
+                assert_eq!(usize::from(member.hero.floor), m, "{at}: member {m}");
+            }
+        }
+        // The seed gate opened and `demo-sage`'s ready made a second world,
+        // so two births were checked.
+        assert!(worlds >= 2, "{chips} chips: only {worlds} worlds were born");
     }
 }
 

@@ -86,6 +86,8 @@
 //! tick, so the first tick is tick 1. `ordinal` is the observation's record
 //! ordinal from [`crate::observe::Feed::ordinal`].
 
+use std::sync::Arc;
+
 use tt_toplike_bus::{EntityKey, Event};
 
 use crate::event::{Biome, EndWhy, SagaEvent};
@@ -161,8 +163,13 @@ pub struct World {
     /// The chip each floor belongs to: `floors[i]` is the floor of
     /// `chips[i]`. Ascending by key, never empty.
     pub chips: Vec<EntityKey>,
-    /// One floor per chip, in the order of `chips`.
-    pub floors: Vec<Floor>,
+    /// One floor per chip, in the order of `chips`. A world's floors never
+    /// change after its birth, so they sit behind an `Arc`: a clone of the
+    /// world (the driver clones the saga's state for every snapshot, ten
+    /// times a second at most) copies one pointer and no cell (the party
+    /// addendum, section 3.7). Two worlds compare equal when their floors
+    /// hold the same cells, wherever the cells live.
+    pub floors: Arc<[Floor]>,
     pub biome: Biome,
     /// The chips of the model whose `Ready` made this world, in key order:
     /// the floors its sage stands on. Every chip of the world when the
@@ -416,7 +423,7 @@ impl Lifecycle {
                     .unwrap_or_else(|| FloorSpec::generic(chip));
                 maze::generate(&spec, floor_seed(seed, chip), 0.0)
             })
-            .collect::<Vec<_>>();
+            .collect::<Arc<[Floor]>>();
         // The sage stands on the floors of the chips its model named, in
         // the world's key order; on every floor when it named none.
         let sage_chips = match sage {

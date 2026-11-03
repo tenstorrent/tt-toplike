@@ -282,7 +282,9 @@ fn a_no_path_quest_drops_its_hook_and_plans_again() {
     run_ticks(&mut saga, 5);
     assert_eq!(saga.state.party[0].quest.verb, Verb::VisitSage);
     // Wall the sage in: its exit becomes a wall cell in the hero's world.
-    let floor = &mut saga.state.world.floors[0];
+    // The floors are shared behind an `Arc`; this saga holds the only
+    // reference, so `make_mut` changes them in place.
+    let floor = &mut std::sync::Arc::make_mut(&mut saga.state.world.floors)[0];
     let exit = floor.exit;
     let w = floor.w as usize;
     floor.cells[exit.1 as usize * w + exit.0 as usize] = Cell::Wall;
@@ -993,9 +995,10 @@ fn has_world_is_false_until_the_first_world_is_born() {
 
 // ---- The party ------------------------------------------------------------
 
+// Also used by `fuzz_tests.rs` (the file may be included only once).
 #[allow(dead_code)]
 #[path = "../tests/support/party.rs"]
-mod party_gen;
+pub(super) mod party_gen;
 
 /// A third chip, sorting after chip B.
 fn chip_c() -> EntityKey {

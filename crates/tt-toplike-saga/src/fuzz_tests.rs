@@ -9,7 +9,7 @@
 //! tests compare the saga's collections with these copies, so raising a cap
 //! in the code makes them fail.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::cost;
@@ -22,6 +22,10 @@ use crate::world::MAX_FLOORS;
 #[allow(dead_code)]
 #[path = "../tests/support/fuzz.rs"]
 mod gen;
+
+// The party generator, included once by `saga_tests.rs` (clippy forbids a
+// second `#[path]` include of one file).
+use super::saga_tests::party_gen as party;
 
 /// Chips a saga keeps (ruling R20).
 const RULED_CHIPS: usize = 64;
@@ -180,7 +184,7 @@ fn memory_stays_bounded() {
             w.chips.len()
         );
         assert_eq!(w.chips.len(), w.floors.len(), "{at}: chips and floors");
-        for f in &w.floors {
+        for f in w.floors.iter() {
             assert!(
                 usize::from(f.w) <= 120 && usize::from(f.h) <= 60,
                 "{at}: a {}x{} floor",
@@ -319,4 +323,86 @@ fn a_step_stays_under_a_million_work_units() {
         units.cells <= RULED_FLOORS as u64 * cells,
         "the worst record ({at}, {units:?}) generated more than 32 floors"
     );
+}
+
+/// Ticks of the 32-chip party log the cost test plays: the same length as
+/// the pace tests' log in `tests/party.rs`, so it holds the seed-gate birth,
+/// `demo-sage`'s world, `demo-scribe`'s ready, the heartbeat stall, the link
+/// change and the quiet stretch.
+const PARTY_TICKS: u64 = 1300;
+
+/// Every record of the 32-chip party log costs under a million work units,
+/// birth included (the party addendum, section 3.7). A party of 32 steps
+/// every member on every tick, so this is the budget at the largest party
+/// the caps allow, on a script that looks like a real box.
+///
+/// A member's step along its path is not a work unit: it moves one cell and
+/// costs the same at any floor size. What a party adds per tick shows up as
+/// A* expansions (each member replans when its quest ends) and events.
+///
+/// The test prints the worst birth record, the worst record that is not a
+/// birth, the mean of the records that are not births, and the worst and
+/// mean units per tick, the records of one tick added up (shown with
+/// `--nocapture`; the Task A.5 report quotes them).
+#[test]
+fn a_record_costs_under_a_million_units_with_32_chips() {
+    let records = party::records(32, PARTY_TICKS);
+    let mut saga = Saga::new(config(NameMode::Generated));
+    cost::take();
+    let mut worst = (cost::Units::default(), 0usize);
+    let mut worst_steady = (cost::Units::default(), 0usize);
+    let mut births = 0u64;
+    let mut steady_total = 0u64;
+    let mut steady_records = 0u64;
+    // Units per tick, keyed by the saga's tick after each record.
+    let mut per_tick: BTreeMap<u64, u64> = BTreeMap::new();
+    for (i, r) in records.iter().enumerate() {
+        saga.feed(r);
+        let u = cost::take();
+        *per_tick.entry(saga.state.tick).or_default() += u.total();
+        if u.total() > worst.0.total() {
+            worst = (u, i);
+        }
+        if u.cells > 0 {
+            births += 1;
+        } else {
+            steady_total += u.total();
+            steady_records += 1;
+            if u.total() > worst_steady.0.total() {
+                worst_steady = (u, i);
+            }
+        }
+    }
+    let (units, at) = worst;
+    let (worst_tick, worst_tick_units) = per_tick
+        .iter()
+        .max_by_key(|(_, u)| **u)
+        .map_or((0, 0), |(t, u)| (*t, *u));
+    let tick_total: u64 = per_tick.values().sum();
+    eprintln!(
+        "32 chips, {} records, {births} births: worst record {at}: {units:?} = {} units; \
+         worst record that is not a birth {}: {:?} = {} units; mean of the others {:.1} \
+         units; worst tick {worst_tick}: {worst_tick_units} units; mean per tick {:.1} units",
+        records.len(),
+        units.total(),
+        worst_steady.1,
+        worst_steady.0,
+        worst_steady.0.total(),
+        steady_total as f64 / steady_records.max(1) as f64,
+        tick_total as f64 / per_tick.len().max(1) as f64,
+    );
+    assert!(
+        units.total() < BUDGET,
+        "record {at} of the 32-chip log cost {units:?} = {} units",
+        units.total()
+    );
+    // The log reached the party this test is about: the worst record is a
+    // birth of 32 floors, and the saga ends with 32 members.
+    let smallest_floor = u64::from(MIN_W) * u64::from(MIN_H);
+    assert!(
+        units.cells >= RULED_FLOORS as u64 * smallest_floor,
+        "the worst record ({at}, {units:?}) was not a 32-floor birth"
+    );
+    assert!(births >= 2, "only {births} births in the 32-chip log");
+    assert_eq!(saga.state.party.len(), RULED_FLOORS, "members at the end");
 }

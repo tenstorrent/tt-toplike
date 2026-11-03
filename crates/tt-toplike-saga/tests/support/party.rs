@@ -146,10 +146,37 @@ fn temperature(tick: u64, offset: f64) -> f64 {
 
 /// Every record of a party of `chips` chips over `ticks` ticks, in order.
 pub fn records(chips: u8, ticks: u64) -> Vec<Record> {
-    let n = chips as u64;
-    assert!(n >= 1, "a party has at least one chip");
+    script(chips, chips, ticks)
+}
+
+/// The script of [`records`] for 32 chips, played on `chips` chips (at
+/// least 32) over `ticks` ticks. The first 32 chips play the 32-chip script
+/// as the table above says: `demo-sage` on chips 0 to 16, `demo-scribe` and
+/// the heartbeat stall on chip 31, chip 1 throttling. Every chip after
+/// chip 31 sweeps on every tick, reports its topology at tick 1 and its
+/// heartbeat every 5 ticks, and plays no other part.
+///
+/// Chip `i` is `chip:0000:{i+1:02x}:00.0`, so the keys of chips 32 and up
+/// sort after the first 32, and a world that keeps 32 floors in key order
+/// keeps the first 32 chips. With more than 64 chips the saga keeps the
+/// first 64 it sees, which are chips 0 to 63, because chip 0 sweeps first on
+/// every tick and the others follow in order.
+pub fn records_with_extra_chips(chips: u8, ticks: u64) -> Vec<Record> {
+    assert!(chips >= 32, "the extra chips come after the first 32");
+    script(chips, 32, ticks)
+}
+
+/// The script behind [`records`] and [`records_with_extra_chips`]: `chips`
+/// chips sweep, of which the first `story` play the models, the stall, the
+/// throttle and the link change. `story` is at most `chips`.
+fn script(chips: u8, story: u8, ticks: u64) -> Vec<Record> {
+    assert!(story >= 1, "a party has at least one chip");
+    assert!(story <= chips, "the story's chips are among the chips");
+    let n = story as u64;
     let keys: Vec<EntityKey> = (0..chips).map(chip).collect();
-    let last = keys.len() - 1;
+    // The last chip of the story, which the scribe serves and whose
+    // heartbeat stalls.
+    let last = story as usize - 1;
     let sage = EntityKey::model("demo-sage");
     let scribe = EntityKey::model("demo-scribe");
     // The chips that serve demo-sage: 0 through n/2.
@@ -161,7 +188,7 @@ pub fn records(chips: u8, ticks: u64) -> Vec<Record> {
         within: 0,
         lcg: LCG_START,
     };
-    let mut heartbeats: Vec<u64> = (0..n).map(|i| 100 + 100 * i).collect();
+    let mut heartbeats: Vec<u64> = (0..chips as u64).map(|i| 100 + 100 * i).collect();
 
     for tick in 1..=ticks {
         w.tick = tick;

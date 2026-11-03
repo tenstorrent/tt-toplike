@@ -468,7 +468,7 @@ fn world_of(floor: Floor) -> World {
         seed: 9,
         born_tick: 5,
         chips: vec![chip()],
-        floors: vec![floor],
+        floors: vec![floor].into(),
         biome: Biome::Dungeon,
         sage_chips: Vec::new(),
     }
@@ -552,7 +552,7 @@ fn plan_visits_the_sage_then_explores_or_rests() {
         seed: 9,
         born_tick: 5,
         chips: vec![chip()],
-        floors: vec![floor.clone()],
+        floors: vec![floor.clone()].into(),
         biome: Biome::Dungeon,
         sage_chips: Vec::new(),
     };

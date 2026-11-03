@@ -60,8 +60,15 @@
 //! the story never depends on it.
 //!
 //! Cloning the state is cheap: the chronicle shares its beats through `Arc`s
-//! (ruling R7). A full state (32 floors, 500 beats) took about 6 us to clone
-//! and its digest about 27 us, in release mode on the development box.
+//! (ruling R7), and the world shares its floors through an `Arc<[Floor]>`
+//! (the party addendum, section 3.7), so two snapshots of one world hold
+//! one copy of its floors. A full state (32 floors, 500 beats) took about
+//! 6 us to clone and its digest about 27 us, in release mode on the
+//! development box (phase 1, when each clone copied the floors). With 32
+//! members and shared floors, a state at the end of the 32-chip party log
+//! (32 floors of 64,448 cells in all, 134 chronicle lines) took about 4.5 us
+//! to clone and its digest about 7.7 us; a copy of the floors alone took
+//! about 1.9 us (Task A.5, release mode, loaded box).
 //!
 //! # Labels and seasons
 //!
@@ -98,8 +105,9 @@
 //! birth, the largest world the core builds, took 0.94 ms on average and
 //! 1.30 ms at worst over 30 runs; a batch of 512 sweeps with no birth took
 //! 0.16 ms on average. A batch is fed whole. The controller accepted the
-//! 1.30 ms worst case for phase 1; lazy floors or a birth rate limit are
-//! deferred to phase 2.6.
+//! 1.30 ms worst case for phase 1. The party addendum (section 3.7) keeps
+//! it: every floor of a world is simulated and has a member, with no lazy
+//! floors and no birth rate limit, because a birth is rare.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};

@@ -227,6 +227,7 @@
 //! | seed pool | [`crate::seed::RING_LEN`] (64) values, 512 bytes | [`crate::seed`] |
 //! | one floor | [`crate::topology::MAX_COLS`] x [`crate::topology::MAX_ROWS`] (120 x 60) cells | [`crate::topology`] |
 //! | a member's path | one floor's cells | [`crate::hero`] |
+//! | copies of a world's floors | one: [`World::floors`] is an `Arc<[Floor]>`, so a clone of the state shares it | [`crate::world`] |
 //!
 //! The scratch buffers (`obs`, `enc`, `world_events`) keep the capacity of
 //! the largest record or event seen so far.
@@ -264,6 +265,23 @@
 //! trail push or an event) is not an elementary operation: a maze cell costs
 //! roughly 30 of them. Trail pushes grow with the record's own size: one per
 //! sweep value, plus one per kept chip on a tick.
+//!
+//! **Cost with 32 chips.** A box with more than 32 kept chips still gets 32
+//! floors and 32 members: the first 32 chips in key order (the party
+//! addendum, section 3.7). Every member steps on every tick, and no floor is
+//! lazy. A step along a path moves one cell, so it is not counted as a work
+//! unit; a member that ends a quest replans with one A* search, which is.
+//! On the 32-chip party log (1,300 ticks, about 50,000 records), the worst
+//! record is a 32-floor birth at 64,520 units. The worst record that is not
+//! a birth is about 10,900 units (members replanning at once), and the mean
+//! of those records is about 6 units, or about 400 units per tick. The test
+//! `a_record_costs_under_a_million_units_with_32_chips` in
+//! `src/fuzz_tests.rs` measures these numbers and checks the budget.
+//!
+//! **Cost of a snapshot.** A world's floors never change during its life,
+//! so [`World::floors`] is an `Arc<[Floor]>`. Cloning the state, which the
+//! root crate's driver does for each snapshot, copies a pointer to the
+//! floors and no cell.
 //!
 //! # The digest
 //!
@@ -317,6 +335,7 @@
 //! would give the same digest. Draining events does not change the digest.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use tt_toplike_bus::{EntityKey, Event, Payload, Record};
 
@@ -616,7 +635,7 @@ impl Saga {
             seed: 0,
             born_tick: 0,
             chips: vec![chip.clone()],
-            floors: vec![floor],
+            floors: Arc::from([floor]),
             biome: Biome::Dungeon,
             sage_chips: Vec::new(),
         };
@@ -1495,9 +1514,11 @@ impl Saga {
     /// Applies `with_walled_sage` to the world just born.
     fn wall_test_sage(&mut self) {
         let Some(i) = self.walled_sage else { return };
-        let (Some(core), Some(floor)) =
-            (self.members.get_mut(i), self.state.world.floors.get_mut(i))
-        else {
+        // The floors are shared behind an `Arc` and never change in a
+        // world's life. This test hook runs at the birth, before anything
+        // else holds them, so `make_mut` adds the wall in place.
+        let floors = Arc::make_mut(&mut self.state.world.floors);
+        let (Some(core), Some(floor)) = (self.members.get_mut(i), floors.get_mut(i)) else {
             return;
         };
         core.hooks.insert(
