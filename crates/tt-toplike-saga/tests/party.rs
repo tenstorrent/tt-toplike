@@ -16,7 +16,10 @@ mod support;
 use support::party::{self, PARTY4_TICKS, SOLO_TICKS};
 use tt_toplike_bus::{Payload, Record};
 use tt_toplike_saga::chronicle::NameMode;
-use tt_toplike_saga::{Label, Saga, SagaConfig};
+use tt_toplike_saga::pack::Pack;
+use tt_toplike_saga::rng::Pcg32;
+use tt_toplike_saga::saga::plan_stream;
+use tt_toplike_saga::{Label, Saga, SagaConfig, SagaEvent};
 
 /// The note every fixture failure carries: how to write the files again.
 const WRITERS: &str = "regenerate them with `cargo test -p tt-toplike-saga --test party -- --ignored write_solo_fixture write_party4_fixture`";
@@ -177,4 +180,141 @@ fn solo_story_print_is_unchanged() {
         SOLO_STORY,
         "the single-chip story changed; if that is intended, say which rule moved"
     );
+}
+
+// ---- The party in the core (Task A.3) -----------------------------------------
+
+/// Feeds `records` until the first world is born, and returns the saga,
+/// every event raised so far and the records not yet fed.
+fn first_birth(records: &[Record]) -> (Saga, Vec<SagaEvent>, &[Record]) {
+    let mut s = saga(NameMode::Real);
+    let mut events = Vec::new();
+    for (i, r) in records.iter().enumerate() {
+        s.feed(r);
+        events.extend(s.drain_events());
+        if s.state().has_world() {
+            return (s, events, &records[i + 1..]);
+        }
+    }
+    panic!("no world was born");
+}
+
+#[test]
+fn a_world_on_four_chips_has_four_members_each_on_its_floor() {
+    let records = party::records(4, 60);
+    let (mut s, events, rest) = first_birth(&records);
+    let state = s.state();
+    assert_eq!(state.world.chips.len(), 4);
+    assert_eq!(state.party.len(), 4);
+    // Member i is born on floor i, at that floor's gate, and plans its
+    // first quest there.
+    for (i, m) in state.party.iter().enumerate() {
+        let floor = &state.world.floors[i];
+        assert_eq!(m.hero.floor as usize, i);
+        assert_eq!(m.hero.pos, floor.entrance, "member {i}");
+        assert!(floor.cell(m.quest.goal.0, m.quest.goal.1).walkable());
+        assert_eq!(m.unwritten, 0);
+    }
+    assert_eq!(state.lead().hero, state.party[0].hero);
+    let on_2: Vec<usize> = state.on_floor(2).map(|(i, _)| i).collect();
+    assert_eq!(on_2, [2]);
+
+    // The birth's events: the world and its beat, every HeroBorn in floor
+    // order with no beat (a party of more than one), then each member's
+    // first quest and its beat.
+    let shape: Vec<String> = events
+        .iter()
+        .map(|e| match e {
+            SagaEvent::WorldBorn { .. } => "W".to_string(),
+            SagaEvent::HeroBorn { floor, .. } => format!("H{floor}"),
+            SagaEvent::QuestStarted { floor, .. } => format!("Q{floor}"),
+            SagaEvent::Beat { floor: None, .. } => "b".to_string(),
+            SagaEvent::Beat { floor: Some(f), .. } => format!("b{f}"),
+            other => panic!("unexpected at a birth: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        ["W", "b", "H0", "H1", "H2", "H3", "Q0", "b0", "Q1", "b1", "Q2", "b2", "Q3", "b3"]
+    );
+    let born: Vec<&String> = events
+        .iter()
+        .filter_map(|e| match e {
+            SagaEvent::HeroBorn { name, .. } => Some(name),
+            _ => None,
+        })
+        .collect();
+    let names: Vec<&String> = s.state().party.iter().map(|m| &m.hero.name).collect();
+    assert_eq!(born, names);
+
+    // Each member walks its own floor and stays on it.
+    for r in rest {
+        s.feed(r);
+        for (i, m) in s.state().party.iter().enumerate() {
+            assert_eq!(m.hero.floor as usize, i);
+            let floor = &s.state().world.floors[i];
+            assert!(floor.cell(m.hero.pos.0, m.hero.pos.1).walkable());
+        }
+    }
+    let moved = s
+        .state()
+        .party
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| m.hero.pos != s.state().world.floors[*i].entrance)
+        .count();
+    assert!(moved >= 3, "only {moved} members left their gate");
+}
+
+#[test]
+fn a_party_of_32_has_32_names() {
+    let records = party::records(32, 6);
+    let (s, _, _) = first_birth(&records);
+    let state = s.state();
+    assert_eq!(state.party.len(), 32);
+    let mut names: Vec<&str> = state.party.iter().map(|m| m.hero.name.as_str()).collect();
+    // Each name comes from its own member's generator: member 0 on today's
+    // plan stream, member i on stream 16 + i, unique against the members
+    // before it.
+    let mut taken: Vec<String> = Vec::new();
+    for (i, m) in state.party.iter().enumerate() {
+        let mut rng = Pcg32::new(state.world.seed, plan_stream(i));
+        let want = Pack::builtin().hero_name_unique(&mut rng, &taken);
+        assert_eq!(m.hero.name, want, "member {i}");
+        taken.push(want);
+    }
+    names.sort_unstable();
+    names.dedup();
+    assert_eq!(names.len(), 32, "{names:?}");
+}
+
+#[test]
+fn four_and_thirty_two_chips_give_the_same_digest_after_renumbering() {
+    // A replay host renumbers and retimes every record (sequence numbers in
+    // steps of 3). A party's saga reads neither, so the digest stays. 450
+    // ticks reach every scripted event of the generator.
+    for chips in [4u8, 32] {
+        let records = party::records(chips, 450);
+        let replayed = support::renumber(&records);
+        assert!(records
+            .iter()
+            .zip(&replayed)
+            .all(|(a, b)| a.seq != b.seq && a.t_mono_ns != b.t_mono_ns));
+        assert!(replayed.windows(2).all(|w| w[1].seq == w[0].seq + 3));
+        for names in [NameMode::Real, NameMode::Generated] {
+            let digest = |records: &[Record]| {
+                let mut s = saga(names);
+                for r in records {
+                    s.feed(r);
+                }
+                assert_eq!(s.state().party.len(), chips as usize);
+                s.digest()
+            };
+            assert_eq!(
+                digest(&records),
+                digest(&replayed),
+                "{chips} chips ({names:?}): a replay host's numbering changed the saga"
+            );
+        }
+    }
 }

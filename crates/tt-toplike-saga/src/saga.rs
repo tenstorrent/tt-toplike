@@ -11,7 +11,7 @@
 //!                                ├─► chip readings ─► FloorSpecs
 //!                                └─► Lifecycle ─► world events
 //!                                                   │
-//!                     hero, quests and chronicle ◄──┘ ─► SagaEvents
+//!                    party, quests and chronicle ◄──┘ ─► SagaEvents
 //! ```
 //!
 //! # One observation, in order
@@ -37,8 +37,8 @@
 //!    the 19 after it), else 0.0 (ruling R15).
 //! 5. The [`Lifecycle`] steps. Each world it ends or births becomes events
 //!    and chronicle beats (below).
-//! 6. On a tick in a world that was not born by this observation, the hero
-//!    acts (below).
+//! 6. On a tick in a world that was not born by this observation, each
+//!    member of the party acts, in index order (below).
 //!
 //! # Floors
 //!
@@ -51,43 +51,63 @@
 //! Every other chip is [`Arch::Generic`]. A world takes its floors from the
 //! specs at its birth and keeps them for its life.
 //!
-//! # Worlds, heroes and quests
+//! # Worlds, the party and quests
+//!
+//! A world has one floor per chip (at most [`crate::world::MAX_FLOORS`]),
+//! and its party has one member per floor: member `i` is the hero born on
+//! floor `i` (the party addendum, section 3.1). The member's index is its
+//! identity for the world's life. A one-chip world has a party of one, and
+//! everything below is then the saga of 0.16.
 //!
 //! When a world is born:
 //!
-//! * two generators are seeded from its seed. The plan stream names the hero
-//!   and plans its quests. The chronicle stream is used by the chronicle
-//!   alone (ruling R16): generated names draw more from it than real names
-//!   do, and that must not change the maze or the hero's walk;
-//! * the hooks are rebuilt: one visit-the-sage hook per ready model, in model
-//!   key order, then one explore hook and one rest hook whose cause is the
-//!   world's birth;
-//! * a hero is born at floor 0's entrance, named by [`Pack::hero_name`] from
-//!   the plan stream, and plans its first quest.
+//! * the chronicle's generator is seeded from the world seed on
+//!   [`CHRONICLE_STREAM`]. The chronicle alone draws from it (ruling R16):
+//!   generated names draw more from it than real names do, and that must
+//!   not change a maze or a walk. All members share it, because the
+//!   chronicle is one log and its draws come in beat order;
+//! * each member gets its own plan generator, seeded from the world seed on
+//!   [`plan_stream`] of its index: [`PLAN_STREAM`] for member 0, as before
+//!   the party, and [`PARTY_STREAM_BASE`] plus `i` for member `i` (the
+//!   addendum, section 4.2). It names the member and plans its quests, so
+//!   one member's extra draw never changes another member's walk;
+//! * each member gets its own hooks: one visit-the-sage hook per ready model
+//!   whose sage stands on the member's floor (the model named the floor's
+//!   chip, or named no chips), in model key order, then one explore hook and
+//!   one rest hook whose cause is the world's birth;
+//! * member `i` is born at floor `i`'s entrance, named by
+//!   [`Pack::hero_name_unique`] from its generator against the names of the
+//!   members before it, and plans its first quest.
 //!
-//! The events of a birth come in this order: `WorldBorn`, its `Beat`,
-//! `HeroBorn`, its `Beat`, `QuestStarted`, its `Beat`. An end comes before
-//! the birth that follows it: `WorldEnded`, its `Beat`.
+//! The events of a birth come in this order: `WorldBorn` and its `Beat`;
+//! then for each member in index order its `HeroBorn` (with a beat only in a
+//! party of one); then for each member its `QuestStarted` and its `Beat`. An
+//! end comes before the birth that follows it: `WorldEnded`, its `Beat`.
 //!
-//! On each tick in a world the hero's vitality is read from the trails of
-//! its floor's chip, and the hero takes one step. Then:
+//! On each tick in a world, each member in index order reads its vitality
+//! from the trails of its floor's chip and takes one step. A member's step
+//! reads only its own floor, quest, hooks and generator. Then:
 //!
-//! * **Arrived.** `QuestDone` and a beat. A sage hook is dropped once its
-//!   sage is visited. The hero then waits [`DWELL_TICKS`] ticks and plans its
-//!   next quest, so the chronicle does not fill with arrivals.
-//! * **A model goes away.** Its sage hook leaves the current world, whichever
-//!   signal made that world, and a hero on its way to that sage plans again
-//!   at once.
-//! * **No path.** The hook behind the quest is dropped for this world, so the
-//!   hero does not retry one unreachable goal forever, and the hero plans
-//!   again at once (ruling R15). The explore hook is never dropped: each plan
-//!   draws a new room, so the next one may be reachable.
+//! * **Arrived.** `QuestDone` and a beat. A sage hook is dropped, for this
+//!   member only, once it has visited the sage. The member then waits
+//!   [`DWELL_TICKS`] ticks and plans its next quest, so the chronicle does
+//!   not fill with arrivals.
+//! * **A model goes away.** Its sage hooks leave every member of the current
+//!   world, whichever signal made that world, and every member on its way
+//!   to that sage plans again at once, in index order.
+//! * **No path.** The hook behind the quest is dropped for this member, so
+//!   it does not retry one unreachable goal forever, and it plans again at
+//!   once (ruling R15). The explore hook is never dropped: each plan draws a
+//!   new room, so the next one may be reachable.
 //!
 //! # Tone
 //!
-//! Each beat's tone is chosen from the machine's state (spec 5):
+//! Each beat's tone is chosen from the machine's state (spec 5). A member's
+//! beat (its birth and its quests) uses that member's vitality. A world's
+//! beat (born or ended) uses the lowest vitality in the party. With one
+//! member both are the hero's vitality.
 //!
-//! * **Tense** when the hero's vitality is below [`REST_BELOW`], or when the
+//! * **Tense** when that vitality is below [`REST_BELOW`], or when the
 //!   beat belongs to an observation that ended a world by a reset or by its
 //!   model going down (the end's beat and the beats of the world born from
 //!   it).
@@ -109,9 +129,9 @@
 //! R17). The saga does the same for `QuestStarted`: its reason is the cause
 //! its beat stored, and a target that is the reason's entity takes the same
 //! alias. A target that is neither a hardware key nor the reason's entity is
-//! left out of the event in generated mode (phase 1 quests have none). The
-//! state's `quest` keeps the real reason in both modes, so the two modes plan
-//! and walk alike.
+//! left out of the event in generated mode (phase 1 quests have none). Each
+//! member's `quest` keeps the real reason in both modes, so the two modes
+//! plan and walk alike.
 //!
 //! # Labels
 //!
@@ -146,14 +166,15 @@
 //! | a world's chips and floors | [`crate::world::MAX_FLOORS`] (32), the first in key order | [`crate::world`] |
 //! | entities with trails | [`MAX_CHIPS`] (64): only kept chips get trails | here |
 //! | trails per chip | [`crate::stats::MAX_TRAILS_PER_ENTITY`] (128) names, plus [`crate::stats::RESERVED_TRAILS`] (4) for the vitality inputs | [`crate::stats`] |
-//! | ready models | [`MAX_READY_MODELS`] (64) | here |
-//! | a world's hooks | [`MAX_READY_MODELS`] sage hooks (they come from the ready list), plus explore and rest | here |
+//! | ready models | [`MAX_READY_MODELS`] (64), each with at most [`crate::world::MAX_FLOORS`] (32) of the chips it named, the first in key order | here |
+//! | party members | one per floor of the world, so at most [`crate::world::MAX_FLOORS`] (32) | here |
+//! | a member's hooks | [`MAX_READY_MODELS`] sage hooks (they come from the ready list), plus explore and rest | here |
 //! | undrained events | [`MAX_PENDING_EVENTS`] (4096); the oldest is dropped and counted in [`Saga::dropped_events`] | here |
 //! | chronicle lines | [`CAPACITY`] (500) | [`crate::chronicle`] |
 //! | generated names | [`crate::chronicle::ALIAS_LIMIT`] (256) | [`crate::chronicle`] |
 //! | seed pool | [`crate::seed::RING_LEN`] (64) values, 512 bytes | [`crate::seed`] |
 //! | one floor | [`crate::topology::MAX_COLS`] x [`crate::topology::MAX_ROWS`] (120 x 60) cells | [`crate::topology`] |
-//! | the hero's path | one floor's cells | [`crate::hero`] |
+//! | a member's path | one floor's cells | [`crate::hero`] |
 //!
 //! The scratch buffers (`obs`, `enc`, `world_events`) keep the capacity of
 //! the largest record or event seen so far.
@@ -168,14 +189,17 @@
 //!
 //! The entities the saga holds at once are at most 64 kept chips, 64 ready
 //! models and 32 world chips that need not be kept chips: 160, under the
-//! spec's 500 (spec 9).
+//! spec's 500 (spec 9). The chips a ready model named are kept with it (at
+//! most 32 per model) so that a later world can place its sage. A writer
+//! that names chips no backend reports can add up to 64 x 32 such keys,
+//! about 512 KB at 256 bytes each.
 //!
 //! **Cost of one record.** At most one world is born per record: an event
 //! births at most once, and a sweep's samples can start one training run,
 //! after which its tick finds the run fresh and the world newly active. A
 //! birth generates one maze per world chip, so it costs at most 32 mazes of
-//! at most 120 x 60 cells. The hero searches at most once per tick, and A*
-//! expands each cell at most once. Today's floors are 53 x 38 (Blackhole) and
+//! at most 120 x 60 cells. Each member searches at most once per tick (at
+//! most 32 searches), and A* expands each cell at most once. Today's floors are 53 x 38 (Blackhole) and
 //! 50 x 32 (generic), so the widest birth generates about 64,000 cells. The
 //! test-only work counter (`src/cost.rs`) checks this against a budget of a
 //! million work units per record. A unit (a maze cell, an A* expansion, a
@@ -204,10 +228,10 @@
 //! | `0x20` | one chronicle line, oldest first (only in [`Saga::digest`]) | floor option, text |
 //! | `0x30` | the end (only in [`Saga::digest`]) | current world seed, member count, then floor, x and y for each member in index order |
 //!
-//! Today the party has one member, the hero, so the end item's count is 1.
-//! Version 1 (0.16.x) had no version item, no floors on quest events, beats
-//! or lines, and the hero's floor, x and y in place of the count and
-//! triples.
+//! The end item's count is the party's size: 1 for a one-chip world and
+//! before the first world. Version 1 (0.16.x) had no version item, no
+//! floors on quest events, beats or lines, and the hero's floor, x and y in
+//! place of the count and triples.
 //!
 //! Field encodings:
 //!
@@ -219,7 +243,8 @@
 //! * an `Option`: one presence byte (0 absent, 1 present), then the value
 //!   when present. A floor option is two bytes when present (1, then the
 //!   floor) and one byte when absent (0). A world's beat (born or ended)
-//!   has no floor; a hero's or a quest's beat has the hero's floor.
+//!   has no floor; a member's beat (its birth or a quest) has the floor of
+//!   that member's hero.
 //! * a cause: entity key, signal string, ordinal.
 //! * an `f32` (none yet; phase 2 intensities): `to_bits()`, 4 bytes
 //!   little-endian.
@@ -253,22 +278,38 @@ use crate::rng::Pcg32;
 use crate::seed::{fnv1a64, fnv1a64_extend, SeedPool};
 use crate::stats::TrailBook;
 use crate::topology::{Arch, FloorSpec};
-use crate::world::{Lifecycle, World, MAX_CHIPS, NO_CHIP};
+use crate::world::{Lifecycle, World, MAX_CHIPS, MAX_FLOORS, NO_CHIP};
 
-/// Stream selector of the generator that names heroes and plans quests.
+/// Stream selector of member 0's plan generator, which names it and plans
+/// its quests. It is the hero's stream from before the party, so a one-chip
+/// world draws as it did.
 pub const PLAN_STREAM: u64 = 1;
+
+/// Member `i >= 1` draws from stream `PARTY_STREAM_BASE + i` (the party
+/// addendum, section 4.2). 16 leaves room below it for other streams.
+pub const PARTY_STREAM_BASE: u64 = 16;
+
+/// The stream selector of member `i`'s plan generator: [`PLAN_STREAM`] for
+/// member 0, [`PARTY_STREAM_BASE`] plus `i` for every other member.
+pub fn plan_stream(i: usize) -> u64 {
+    if i == 0 {
+        PLAN_STREAM
+    } else {
+        PARTY_STREAM_BASE + i as u64
+    }
+}
 
 /// Stream selector of the chronicle's own generator (ruling R16).
 pub const CHRONICLE_STREAM: u64 = 2;
 
-/// Ticks the hero waits after finishing a quest before it plans the next
+/// Ticks a member waits after finishing a quest before it plans the next
 /// one (3 s at 10 Hz).
 pub const DWELL_TICKS: u64 = 30;
 
 /// Ready models the saga keeps (ledger ruling R20). A `ModelReady` for a new
 /// model while this many are ready is not added to the list; its world is
-/// still born. Each world's sage hooks come from this list, so a world has at
-/// most this many sage hooks, plus one explore and one rest hook.
+/// still born. Each member's sage hooks come from this list, so a member has
+/// at most this many sage hooks, plus one explore and one rest hook.
 pub const MAX_READY_MODELS: usize = 64;
 
 /// Events kept until a host drains them (ledger ruling R20). When the buffer
@@ -328,20 +369,32 @@ pub struct SagaConfig {
     pub label: Label,
 }
 
-/// Everything a view draws.
-///
-/// Before the first world is born (at most five ticks, ledger ruling R11)
-/// `world` is a placeholder with id 0: one generic floor for the chip
-/// [`NO_CHIP`], seed 0, and a nameless hero resting at its entrance. Every
-/// real world has an id of 1 or more.
-#[derive(Debug, Clone)]
-pub struct SagaState {
-    pub label: Label,
-    pub world: World,
+/// One member of the party: the hero born on one floor, and its quest.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Member {
     pub hero: Hero,
     /// The hero's current quest. After an arrival it stays the finished
     /// quest until the hero plans the next one.
     pub quest: Quest,
+    /// The member's routine chronicle lines that were not written. Always 0
+    /// until the chronicle's shared budget exists (Task A.4 of the party
+    /// plan).
+    pub unwritten: u32,
+}
+
+/// Everything a view draws.
+///
+/// Before the first world is born (at most five ticks, ledger ruling R11)
+/// `world` is a placeholder with id 0: one generic floor for the chip
+/// [`NO_CHIP`], seed 0, and a party of one nameless hero resting at its
+/// entrance. Every real world has an id of 1 or more.
+#[derive(Debug, Clone)]
+pub struct SagaState {
+    pub label: Label,
+    pub world: World,
+    /// One member per floor of the world, in floor order: `party[i]` is the
+    /// hero born on floor `i`. Never empty.
+    pub party: Vec<Member>,
     pub chronicle: Chronicle,
     /// Ticks seen so far (pacemaker sweeps, see [`crate::observe`]).
     pub tick: u64,
@@ -353,6 +406,51 @@ impl SagaState {
     /// view shows a waiting state.
     pub fn has_world(&self) -> bool {
         self.world.id > 0
+    }
+
+    /// The lead member: member 0, the hero of floor 0. With one chip it is
+    /// the only hero.
+    pub fn lead(&self) -> &Member {
+        &self.party[0]
+    }
+
+    /// The members whose hero stands on `floor`, with their indices, in
+    /// index order. In the party stage that is member `floor` alone.
+    pub fn on_floor(&self, floor: u8) -> impl Iterator<Item = (usize, &Member)> {
+        self.party
+            .iter()
+            .enumerate()
+            .filter(move |(_, m)| m.hero.floor == floor)
+    }
+}
+
+/// What the core keeps for one member besides its public [`Member`]: index
+/// aligned with [`SagaState::party`].
+#[derive(Debug, Clone)]
+struct MemberCore {
+    /// The member's hooks in the current world.
+    hooks: Vec<Hook>,
+    /// Names the member and plans its quests. Reseeded at each birth on
+    /// [`plan_stream`] of the member's index.
+    plan_rng: Pcg32,
+    /// The tick at which the member plans its next quest after an arrival.
+    dwell_until: Option<u64>,
+}
+
+/// A ready model: the cause of its `ModelReady` and the chips it named.
+#[derive(Debug, Clone)]
+struct Ready {
+    cause: Cause,
+    /// The chips the model named, sorted, without repeats, at most
+    /// [`MAX_FLOORS`] of them (the first in key order). Empty when it named
+    /// none, which means its sage stands on every floor.
+    chips: Vec<EntityKey>,
+}
+
+impl Ready {
+    /// Whether this model's sage stands on the floor of `chip`.
+    fn stands_on(&self, chip: &EntityKey) -> bool {
+        self.chips.is_empty() || self.chips.binary_search(chip).is_ok()
     }
 }
 
@@ -379,16 +477,13 @@ pub struct Saga {
     /// One spec per chip in `chips`, rebuilt when `topo_dirty` is set.
     topo: Vec<FloorSpec>,
     topo_dirty: bool,
-    /// Ready models and the cause of their `ModelReady`.
-    ready: BTreeMap<EntityKey, Cause>,
-    /// The current world's hooks.
-    hooks: Vec<Hook>,
-    /// Names heroes and plans quests. Reseeded at each birth.
-    plan_rng: Pcg32,
-    /// The chronicle's own stream. Reseeded at each birth.
+    /// Ready models, the cause of their `ModelReady` and their chips.
+    ready: BTreeMap<EntityKey, Ready>,
+    /// One per member of the party, index aligned with `state.party`.
+    members: Vec<MemberCore>,
+    /// The chronicle's own stream, shared by every member. Reseeded at each
+    /// birth.
     story_rng: Pcg32,
-    /// The tick at which the hero plans its next quest after an arrival.
-    dwell_until: Option<u64>,
     /// Whether the first chronicle line has been written (and marked).
     wrote_first: bool,
     /// Events raised and not yet drained, oldest first, at most
@@ -406,6 +501,10 @@ pub struct Saga {
     obs: Vec<Observation>,
     world_events: Vec<SagaEvent>,
     state: SagaState,
+    /// Test only: the member whose sage is walled in at every birth (see
+    /// `Saga::with_walled_sage`).
+    #[cfg(test)]
+    walled_sage: Option<usize>,
 }
 
 /// What one observation's beats share: where they came from and how they
@@ -432,6 +531,7 @@ impl Saga {
             chips: vec![chip.clone()],
             floors: vec![floor],
             biome: Biome::Dungeon,
+            sage_chips: Vec::new(),
         };
         Saga {
             cfg,
@@ -443,10 +543,12 @@ impl Saga {
             topo: Vec::new(),
             topo_dirty: false,
             ready: BTreeMap::new(),
-            hooks: Vec::new(),
-            plan_rng: Pcg32::new(0, PLAN_STREAM),
+            members: vec![MemberCore {
+                hooks: Vec::new(),
+                plan_rng: Pcg32::new(0, PLAN_STREAM),
+                dwell_until: None,
+            }],
             story_rng: Pcg32::new(0, CHRONICLE_STREAM),
-            dwell_until: None,
             wrote_first: false,
             events: VecDeque::new(),
             dropped_events: 0,
@@ -459,20 +561,16 @@ impl Saga {
             state: SagaState {
                 label: cfg.label,
                 world: placeholder,
-                hero: Hero::new(String::new(), 0, pos, 0),
-                quest: Quest {
-                    verb: Verb::Rest,
-                    target: None,
-                    reason: Cause {
-                        entity: chip,
-                        signal: String::new(),
-                        ordinal: 0,
-                    },
-                    goal: pos,
-                },
+                party: vec![Member {
+                    hero: Hero::new(String::new(), 0, pos, 0),
+                    quest: rest_at(pos, chip),
+                    unwritten: 0,
+                }],
                 chronicle: Chronicle::new(),
                 tick: 0,
             },
+            #[cfg(test)]
+            walled_sage: None,
         }
     }
 
@@ -534,12 +632,13 @@ impl Saga {
             h = fnv1a64_extend(h, &buf);
         }
         buf.clear();
-        let (x, y) = self.state.hero.pos;
-        encode_end(
-            &mut buf,
-            self.state.world.seed,
-            &[(self.state.hero.floor, x, y)],
-        );
+        let members: Vec<(u8, u8, u8)> = self
+            .state
+            .party
+            .iter()
+            .map(|m| (m.hero.floor, m.hero.pos.0, m.hero.pos.1))
+            .collect();
+        encode_end(&mut buf, self.state.world.seed, &members);
         fnv1a64_extend(h, &buf)
     }
 
@@ -600,18 +699,24 @@ impl Saga {
         }
         self.world_events = wev;
 
-        // A hero walking to a sage that just went away plans again at once.
-        // When the model's own dungeon ended, the new world already planned.
+        // Every member walking to a sage that just went away plans again at
+        // once, in index order. When the model's own dungeon ended, the new
+        // world already planned.
         if let Observation::Event(Event::ModelGone { model }) = o {
-            let walking_to_it = self.state.quest.target.as_ref() == Some(model);
-            if !born && walking_to_it && self.state.world.id > 0 {
-                self.dwell_until = None;
-                self.start_quest(false);
+            if !born && self.state.world.id > 0 {
+                for i in 0..self.state.party.len() {
+                    if self.state.party[i].quest.target.as_ref() == Some(model) {
+                        self.members[i].dwell_until = None;
+                        self.start_quest(i, false);
+                    }
+                }
             }
         }
 
         if matches!(o, Observation::Tick) && !born && self.state.world.id > 0 {
-            self.hero_tick();
+            for i in 0..self.state.party.len() {
+                self.member_tick(i);
+            }
         }
     }
 
@@ -672,9 +777,9 @@ impl Saga {
     /// An event: the list of ready models.
     fn on_event(&mut self, e: &Event, ordinal: u64) {
         match e {
-            Event::ModelReady { model, .. } => {
-                // A model already listed takes the new cause; a new one is
-                // listed only below MAX_READY_MODELS.
+            Event::ModelReady { model, chips } => {
+                // A model already listed takes the new cause and chips; a
+                // new one is listed only below MAX_READY_MODELS.
                 if !self.ready.contains_key(model) && self.ready.len() >= MAX_READY_MODELS {
                     return;
                 }
@@ -683,13 +788,23 @@ impl Saga {
                     signal: "ModelReady".to_string(),
                     ordinal,
                 };
-                self.ready.insert(model.clone(), cause);
+                // A world has at most MAX_FLOORS floors, the first chips in
+                // key order, so the first MAX_FLOORS named chips are enough
+                // to place the sage in any world a real box makes.
+                let mut chips = chips.clone();
+                chips.sort();
+                chips.dedup();
+                chips.truncate(MAX_FLOORS);
+                self.ready.insert(model.clone(), Ready { cause, chips });
             }
             Event::ModelGone { model } => {
-                // The model's sage leaves every world, including one the
-                // model did not make (ruling R14 keeps such a world alive).
+                // The model's sage leaves every member of every world,
+                // including a world the model did not make (ruling R14
+                // keeps such a world alive).
                 self.ready.remove(model);
-                self.hooks.retain(|h| h.target.as_ref() != Some(model));
+                for core in &mut self.members {
+                    core.hooks.retain(|h| h.target.as_ref() != Some(model));
+                }
             }
             _ => {}
         }
@@ -767,24 +882,23 @@ impl Saga {
     /// The current world ended: its event and beat.
     fn on_world_ended(&mut self, world: u64, why: EndWhy, moment: &Moment) {
         self.emit(SagaEvent::WorldEnded { world, why });
-        let tone = self.tone(moment.collapse, false);
+        let tone = self.tone(moment.collapse, false, self.lowest_vitality());
         // A world's beat: no floor.
-        let ctx = BeatCtx {
-            floor: None,
-            ..self.ctx(
-                tone,
-                None,
-                NameRole::Service,
-                None,
-                Some(why),
-                &moment.cause,
-            )
-        };
+        let ctx = self.ctx(
+            None,
+            tone,
+            None,
+            NameRole::Service,
+            None,
+            Some(why),
+            &moment.cause,
+        );
         self.beat(BeatKind::WorldEnded, &ctx);
     }
 
-    /// A world was born: take it from the lifecycle, reseed, make the hero
-    /// and its first quest. See the module comment for the event order.
+    /// A world was born: take it from the lifecycle, reseed, make the party
+    /// and each member's first quest. See the module comment for the event
+    /// order.
     fn on_world_born(&mut self, moment: &Moment) {
         let Some(world) = self.life.world().cloned() else {
             return;
@@ -795,36 +909,59 @@ impl Saga {
         put_u64(&mut buf, world.seed);
         self.trace = fnv1a64_extend(self.trace, &buf);
         self.enc = buf;
-        self.plan_rng = Pcg32::new(world.seed, PLAN_STREAM);
         self.story_rng = Pcg32::new(world.seed, CHRONICLE_STREAM);
-        self.dwell_until = None;
 
-        // Hooks: the sages first, then explore and rest.
-        self.hooks = self
-            .ready
-            .iter()
-            .map(|(model, cause)| Hook {
-                verb: Verb::VisitSage,
-                target: Some(model.clone()),
-                reason: cause.clone(),
-            })
-            .collect();
-        for verb in [Verb::Explore, Verb::Rest] {
-            self.hooks.push(Hook {
-                verb,
-                target: None,
-                reason: moment.cause.clone(),
+        // The party: one member per floor, in floor order. A world has at
+        // least one floor and at most MAX_FLOORS, so the party is never
+        // empty and every index fits a byte.
+        self.state.party.clear();
+        self.members.clear();
+        let mut names: Vec<String> = Vec::with_capacity(world.floors.len());
+        for (i, floor) in world.floors.iter().enumerate() {
+            let chip = &world.chips[i];
+            let mut plan_rng = Pcg32::new(world.seed, plan_stream(i));
+            // Hooks: the sages standing on this floor first, then explore
+            // and rest.
+            let mut hooks: Vec<Hook> = self
+                .ready
+                .iter()
+                .filter(|(_, r)| r.stands_on(chip))
+                .map(|(model, r)| Hook {
+                    verb: Verb::VisitSage,
+                    target: Some(model.clone()),
+                    reason: r.cause.clone(),
+                })
+                .collect();
+            for verb in [Verb::Explore, Verb::Rest] {
+                hooks.push(Hook {
+                    verb,
+                    target: None,
+                    reason: moment.cause.clone(),
+                });
+            }
+            let name = Pack::builtin().hero_name_unique(&mut plan_rng, &names);
+            names.push(name.clone());
+            let hero = Hero::new(name, i as u8, floor.entrance, world.born_tick);
+            // A placeholder until the member plans its first quest below.
+            let quest = rest_at(floor.entrance, chip.clone());
+            self.state.party.push(Member {
+                hero,
+                quest,
+                unwritten: 0,
+            });
+            self.members.push(MemberCore {
+                hooks,
+                plan_rng,
+                dwell_until: None,
             });
         }
-
-        let name = Pack::builtin().hero_name(&mut self.plan_rng);
-        let entrance = world.floors.first().map_or((0, 0), |f| f.entrance);
-        self.state.hero = Hero::new(name.clone(), 0, entrance, world.born_tick);
         let (id, biome) = (world.id, world.biome);
         self.state.world = world;
+        #[cfg(test)]
+        self.wall_test_sage();
 
         let triumph = moment.ready_model.is_some();
-        let tone = self.tone(moment.collapse, triumph);
+        let tone = self.tone(moment.collapse, triumph, self.lowest_vitality());
         let model_name = moment.ready_model.as_ref().and_then(real_name);
         let role = if model_name.is_some() {
             NameRole::Model
@@ -834,31 +971,48 @@ impl Saga {
 
         self.emit(SagaEvent::WorldBorn { world: id, biome });
         // A world's beat: no floor.
-        let ctx = BeatCtx {
-            floor: None,
-            ..self.ctx(tone, model_name, role, None, None, &moment.cause)
-        };
+        let ctx = self.ctx(None, tone, model_name, role, None, None, &moment.cause);
         self.beat(BeatKind::WorldBorn, &ctx);
 
-        self.emit(SagaEvent::HeroBorn {
-            world: id,
-            name,
-            floor: self.state.hero.floor,
-        });
-        // The hero's beat, on its floor.
-        let ctx = self.ctx(tone, None, NameRole::Service, None, None, &moment.cause);
-        self.beat(BeatKind::HeroBorn, &ctx);
+        let alone = self.state.party.len() == 1;
+        for i in 0..self.state.party.len() {
+            let hero = &self.state.party[i].hero;
+            let (name, floor, vitality) = (hero.name.clone(), hero.floor, hero.vitality);
+            self.emit(SagaEvent::HeroBorn {
+                world: id,
+                name,
+                floor,
+            });
+            // A hero's beat, on its floor, only in a party of one. A larger
+            // party's birth gets one line of its own (Task A.4).
+            if alone {
+                let tone = self.tone(moment.collapse, triumph, vitality);
+                let ctx = self.ctx(
+                    Some(i),
+                    tone,
+                    None,
+                    NameRole::Service,
+                    None,
+                    None,
+                    &moment.cause,
+                );
+                self.beat(BeatKind::HeroBorn, &ctx);
+            }
+        }
 
-        self.start_quest(moment.collapse);
+        for i in 0..self.state.party.len() {
+            self.start_quest(i, moment.collapse);
+        }
     }
 
-    /// Plans the hero's next quest and raises `QuestStarted` and its beat.
-    fn start_quest(&mut self, collapse: bool) {
+    /// Plans member `i`'s next quest and raises `QuestStarted` and its beat.
+    fn start_quest(&mut self, i: usize, collapse: bool) {
+        let core = &mut self.members[i];
         let quest = plan(
             &self.state.world,
-            &self.state.hero,
-            &self.hooks,
-            &mut self.plan_rng,
+            &self.state.party[i].hero,
+            &core.hooks,
+            &mut core.plan_rng,
         );
         let name = match quest.verb {
             Verb::VisitSage => quest.target.as_ref().and_then(real_name),
@@ -869,8 +1023,16 @@ impl Saga {
         } else {
             NameRole::Service
         };
-        let tone = self.tone(collapse, false);
-        let ctx = self.ctx(tone, name, role, Some(quest.verb), None, &quest.reason);
+        let tone = self.tone(collapse, false, self.state.party[i].hero.vitality);
+        let ctx = self.ctx(
+            Some(i),
+            tone,
+            name,
+            role,
+            Some(quest.verb),
+            None,
+            &quest.reason,
+        );
         let stored = self.write_beat(BeatKind::QuestStarted, &ctx);
 
         // In generated mode the event takes the beat's cleaned cause (see
@@ -896,47 +1058,51 @@ impl Saga {
         };
         self.emit(SagaEvent::QuestStarted {
             world: self.state.world.id,
-            floor: self.state.hero.floor,
+            floor: self.state.party[i].hero.floor,
             verb: quest.verb,
             target,
             reason,
         });
         self.emit(stored);
-        self.state.quest = quest;
+        self.state.party[i].quest = quest;
     }
 
-    /// The hero's tick: vitality, one step, and what follows it.
-    fn hero_tick(&mut self) {
-        // Vitality first, so it is fresh while the hero dwells and when it
-        // plans after dwelling.
-        let hero_floor = self.state.hero.floor as usize;
-        if let Some(chip) = self.state.world.chips.get(hero_floor) {
-            self.state.hero.vitality = vitality(&self.trails, chip);
+    /// Member `i`'s tick: vitality, one step, and what follows it.
+    fn member_tick(&mut self, i: usize) {
+        // Vitality first, so it is fresh while the member dwells and when
+        // it plans after dwelling.
+        let floor_at = self.state.party[i].hero.floor as usize;
+        if let Some(chip) = self.state.world.chips.get(floor_at) {
+            self.state.party[i].hero.vitality = vitality(&self.trails, chip);
         }
-        if let Some(until) = self.dwell_until {
+        if let Some(until) = self.members[i].dwell_until {
             if self.state.tick < until {
                 return;
             }
-            self.dwell_until = None;
-            self.start_quest(false);
+            self.members[i].dwell_until = None;
+            self.start_quest(i, false);
             return;
         }
-        let Some(floor) = self.state.world.floors.get(hero_floor) else {
+        let state = &mut self.state;
+        let Some(floor) = state.world.floors.get(floor_at) else {
             return;
         };
-        let r = self.state.hero.step(floor, &self.state.quest);
+        let member = &mut state.party[i];
+        let r = member.hero.step(floor, &member.quest);
         if r.arrived {
-            let quest = self.state.quest.clone();
+            let quest = member.quest.clone();
+            let (vitality, on) = (member.hero.vitality, member.hero.floor);
             if quest.verb == Verb::VisitSage {
-                self.drop_hook(&quest);
+                self.drop_hook(i, &quest);
             }
             self.emit(SagaEvent::QuestDone {
                 world: self.state.world.id,
-                floor: self.state.hero.floor,
+                floor: on,
                 verb: quest.verb,
             });
-            let tone = self.tone(false, true);
+            let tone = self.tone(false, true, vitality);
             let ctx = self.ctx(
+                Some(i),
                 tone,
                 None,
                 NameRole::Service,
@@ -945,25 +1111,40 @@ impl Saga {
                 &quest.reason,
             );
             self.beat(BeatKind::QuestDone, &ctx);
-            self.dwell_until = Some(self.state.tick + DWELL_TICKS);
+            self.members[i].dwell_until = Some(self.state.tick + DWELL_TICKS);
         } else if r.no_path {
-            let quest = self.state.quest.clone();
+            let quest = member.quest.clone();
             if quest.verb != Verb::Explore {
-                self.drop_hook(&quest);
+                self.drop_hook(i, &quest);
             }
-            self.start_quest(false);
+            self.start_quest(i, false);
         }
     }
 
-    /// Removes the hook a quest came from.
-    fn drop_hook(&mut self, quest: &Quest) {
-        self.hooks
+    /// Removes the hook member `i`'s quest came from, for that member only.
+    fn drop_hook(&mut self, i: usize, quest: &Quest) {
+        self.members[i]
+            .hooks
             .retain(|h| !(h.verb == quest.verb && h.target == quest.target));
     }
 
-    /// The tone rule of the module comment.
-    fn tone(&self, collapse: bool, triumph: bool) -> Tone {
-        if collapse || self.state.hero.vitality < REST_BELOW {
+    /// The lowest vitality in the party: the vitality a world's beat uses.
+    /// A vitality that is not a number is skipped, so it never makes a
+    /// world's beat tense, the same as it never makes a member's beat tense
+    /// in [`Saga::tone`].
+    fn lowest_vitality(&self) -> f32 {
+        self.state
+            .party
+            .iter()
+            .map(|m| m.hero.vitality)
+            .fold(f32::INFINITY, f32::min)
+    }
+
+    /// The tone rule of the module comment, for a beat whose vitality is
+    /// `vitality` (a member's own, or the party's lowest for a world's
+    /// beat).
+    fn tone(&self, collapse: bool, triumph: bool, vitality: f32) -> Tone {
+        if collapse || vitality < REST_BELOW {
             Tone::Tense
         } else if triumph {
             Tone::Triumphant
@@ -972,11 +1153,14 @@ impl Saga {
         }
     }
 
-    /// A beat context in the current world, on the hero's floor. A world's
-    /// beat (born or ended) belongs to no floor and sets `floor` to `None`
-    /// itself.
+    /// A beat context in the current world. `who` is the member the beat is
+    /// about: the beat takes that member's floor and hero name. A world's
+    /// beat (born or ended) passes `None`: it belongs to no floor, and its
+    /// hero name is the lead member's.
+    #[allow(clippy::too_many_arguments)]
     fn ctx(
         &self,
+        who: Option<usize>,
         tone: Tone,
         name: Option<RealName>,
         role: NameRole,
@@ -984,18 +1168,19 @@ impl Saga {
         why: Option<EndWhy>,
         cause: &Cause,
     ) -> BeatCtx {
+        let hero = &self.state.party[who.unwrap_or(0)].hero;
         BeatCtx {
             world: self.state.world.id,
             biome: self.state.world.biome,
             tone,
             name,
             role,
-            hero: self.state.hero.name.clone(),
+            hero: hero.name.clone(),
             verb,
             why,
             tick: self.state.tick,
             cause: cause.clone(),
-            floor: Some(self.state.hero.floor),
+            floor: who.map(|_| hero.floor),
         }
     }
 
@@ -1043,6 +1228,61 @@ impl Saga {
             self.dropped_events += 1;
         }
         self.events.push_back(ev);
+    }
+}
+
+/// A rest where the hero stands, caused by `chip` with an empty signal: the
+/// placeholder quest of the placeholder world, and of each member between
+/// its birth and its first plan.
+fn rest_at(pos: (u8, u8), chip: EntityKey) -> Quest {
+    Quest {
+        verb: Verb::Rest,
+        target: None,
+        reason: Cause {
+            entity: chip,
+            signal: String::new(),
+            ordinal: 0,
+        },
+        goal: pos,
+    }
+}
+
+#[cfg(test)]
+impl Saga {
+    /// Test only: a saga in which member `member`, at every birth, gets one
+    /// more sage hook first (for the made-up model `model:demo-walled`), and
+    /// the exit of its floor, where every sage stands, becomes a wall. Its
+    /// first quest then has no path, so it replans at its first step. No
+    /// other member and no other floor changes.
+    pub(crate) fn with_walled_sage(cfg: SagaConfig, member: usize) -> Saga {
+        let mut saga = Saga::new(cfg);
+        saga.walled_sage = Some(member);
+        saga
+    }
+
+    /// Applies `with_walled_sage` to the world just born.
+    fn wall_test_sage(&mut self) {
+        let Some(i) = self.walled_sage else { return };
+        let (Some(core), Some(floor)) =
+            (self.members.get_mut(i), self.state.world.floors.get_mut(i))
+        else {
+            return;
+        };
+        core.hooks.insert(
+            0,
+            Hook {
+                verb: Verb::VisitSage,
+                target: Some(EntityKey::model("demo-walled")),
+                reason: Cause {
+                    entity: EntityKey::model("demo-walled"),
+                    signal: "ModelReady".to_string(),
+                    ordinal: 0,
+                },
+            },
+        );
+        let (x, y) = floor.exit;
+        let w = floor.w as usize;
+        floor.cells[y as usize * w + x as usize] = maze::Cell::Wall;
     }
 }
 

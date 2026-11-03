@@ -45,4 +45,4 @@ pub mod topology;
 pub mod world;
 
 pub use event::{Biome, EndWhy, SagaEvent};
-pub use saga::{Label, Saga, SagaConfig, SagaState};
+pub use saga::{Label, Member, Saga, SagaConfig, SagaState};

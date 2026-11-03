@@ -367,7 +367,59 @@ impl Pack {
         let title = self.lexicon.word(TITLE, rng).unwrap_or("?");
         format!("{name} {title}")
     }
+
+    /// A hero's name that no name in `taken` has (the party addendum,
+    /// section 3.2). `taken` holds the names of the members before this one,
+    /// in index order.
+    ///
+    /// The name is drawn with [`Pack::hero_name`]. While the draw is taken,
+    /// another is drawn, up to [`HERO_NAME_TRIES`] draws in all. If the last
+    /// draw is still taken, it keeps the name and adds a Roman numeral from
+    /// [`ROMAN`]: the second "Wren the Unthrottled" becomes "Wren the
+    /// Unthrottled II". The numeral is one more than the count of taken
+    /// names that are the drawn name, alone or with a numeral already. With
+    /// at most 32 members the numeral is at most XXXII; a longer list keeps
+    /// XXXII.
+    ///
+    /// A first draw that is free is kept after one draw, so the first member
+    /// (with nothing taken) is named exactly as [`Pack::hero_name`] names it.
+    pub fn hero_name_unique(&self, rng: &mut Pcg32, taken: &[String]) -> String {
+        let mut name = self.hero_name(rng);
+        for _ in 1..HERO_NAME_TRIES {
+            if !taken.contains(&name) {
+                return name;
+            }
+            name = self.hero_name(rng);
+        }
+        if !taken.contains(&name) {
+            return name;
+        }
+        // The drawn name alone, or followed by a space and a numeral.
+        let same = |t: &String| {
+            t == &name
+                || t.strip_prefix(name.as_str())
+                    .and_then(|rest| rest.strip_prefix(' '))
+                    .is_some_and(|numeral| ROMAN.contains(&numeral))
+        };
+        let count = taken.iter().filter(|t| same(t)).count();
+        // `count` is at least 1, so the numeral is at least II (ROMAN[0]).
+        let numeral = ROMAN[(count - 1).min(ROMAN.len() - 1)];
+        format!("{name} {numeral}")
+    }
 }
+
+/// Draws a member makes for a name that no lower member has, before it adds
+/// a numeral (the party addendum, section 3.2).
+pub const HERO_NAME_TRIES: usize = 8;
+
+/// The numerals a repeated hero name takes: II to XXXII, so `ROMAN[k - 2]`
+/// is the numeral for `k`. A party has at most 32 members, so a name can be
+/// repeated at most 32 times.
+pub const ROMAN: [&str; 31] = [
+    "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII", "XIV", "XV",
+    "XVI", "XVII", "XVIII", "XIX", "XX", "XXI", "XXII", "XXIII", "XXIV", "XXV", "XXVI", "XXVII",
+    "XXVIII", "XXIX", "XXX", "XXXI", "XXXII",
+];
 
 // ---------------------------------------------------------------------------
 // The builtin lexicon.

@@ -393,7 +393,7 @@ impl SagaMemory {
                 ..SagaMemory::default()
             };
         }
-        let pos = state.hero.pos;
+        let pos = state.lead().hero.pos;
         if self.last == Some(pos) {
             return;
         }
@@ -1031,7 +1031,7 @@ pub fn render_saga_off(area: (u16, u16), enabled: bool) -> Vec<Line<'static>> {
 /// floor.
 fn hero_floor_index(state: &SagaState) -> Option<usize> {
     let n = state.world.floors.len();
-    let i = state.hero.floor as usize;
+    let i = state.lead().hero.floor as usize;
     match n {
         0 => None,
         _ if i < n => Some(i),
@@ -1205,18 +1205,21 @@ fn map_rows(
     let glyphs = &Pack::builtin().glyphs;
     let base = look.p.base;
     let (fw, fh) = (floor.w as usize, floor.h as usize);
-    let (hx, hy) = (state.hero.pos.0 as usize, state.hero.pos.1 as usize);
+    let (hx, hy) = (
+        state.lead().hero.pos.0 as usize,
+        state.lead().hero.pos.1 as usize,
+    );
     let draw_cols = cols.saturating_sub(1);
     let (x0, pad) = window(fw, draw_cols, hx, true);
     let (y0, _) = window(fh, rows, hy, false);
-    let hero = if state.hero.vitality < REST_BELOW {
+    let hero = if state.lead().hero.vitality < REST_BELOW {
         look.hero_weak
     } else {
         look.hero_well
     };
-    let lit = light(floor, state.hero.pos);
+    let lit = light(floor, state.lead().hero.pos);
     let fits = memory.fits(state);
-    let sage_quest = state.quest.verb == Verb::VisitSage;
+    let sage_quest = state.lead().quest.verb == Verb::VisitSage;
     for (r, row) in out.iter_mut().enumerate() {
         let y = y0 + r;
         if y >= fh {
@@ -1228,9 +1231,9 @@ fn map_rows(
             let light = lit[y * fw + x] as u32;
             let seen = light > 0 || (fits && memory.seen(x, y));
             let near_hero = x.abs_diff(hx) <= 1 && y.abs_diff(hy) <= 1;
-            let (glyph, style) = if at == state.hero.pos {
+            let (glyph, style) = if at == state.lead().hero.pos {
                 (glyphs.hero, hero)
-            } else if at == state.quest.goal {
+            } else if at == state.lead().quest.goal {
                 // The goal shows through the dark.
                 if sage_quest {
                     (glyphs.npc, sage_style(frame))
@@ -1330,7 +1333,15 @@ fn chronicle_rows(
     let mut blocks: Vec<Vec<Row>> = Vec::new();
     let mut have = 0;
     for (age, beat) in newest_first(state, want).enumerate() {
-        let block = beat_rows(beat, &state.hero.name, age, flags, look, cols, text_w);
+        let block = beat_rows(
+            beat,
+            &state.lead().hero.name,
+            age,
+            flags,
+            look,
+            cols,
+            text_w,
+        );
         if !blocks.is_empty() && have + block.len() > want {
             break;
         }
@@ -1610,7 +1621,7 @@ fn status_row(state: &SagaState, memory: &SagaMemory, look: &Look, w: usize) -> 
 /// "(mock)" or "(replay)" mark ([`hud_row`]).
 fn status_after(mut row: Row, state: &SagaState, memory: &SagaMemory, look: &Look) -> Row {
     let p = &look.p;
-    let hero = &state.hero;
+    let hero = &state.lead().hero;
     let (v, bar_style) = vitality(state, look);
     let filled = ((v * VITALITY_CELLS as f32).round() as usize).min(VITALITY_CELLS);
     let sep = separator(look);
@@ -1648,7 +1659,7 @@ fn status_after(mut row: Row, state: &SagaState, memory: &SagaMemory, look: &Loo
 /// orange under it.
 fn vitality(state: &SagaState, look: &Look) -> (f32, Style) {
     let p = &look.p;
-    let raw = state.hero.vitality;
+    let raw = state.lead().hero.vitality;
     let v = if raw.is_finite() {
         raw.clamp(0.0, 1.0)
     } else {
@@ -1673,7 +1684,7 @@ fn separator(look: &Look) -> Style {
 /// with `(done)` once the hero stands on the goal. See "Names" in the
 /// module comment for where NAME comes from.
 fn quest_text(state: &SagaState) -> String {
-    let q = &state.quest;
+    let q = &state.lead().quest;
     let target = quest_target(state);
     let named = |what: &str, fallback: &str| match &target {
         Some(t) => format!("{what} {t}"),
@@ -1688,7 +1699,7 @@ fn quest_text(state: &SagaState) -> String {
         Verb::Cleanse => named("cleansing", "cleansing a vault"),
         Verb::Rebuild => named("rebuilding", "rebuilding a bridge"),
     };
-    if q.verb != Verb::Rest && state.hero.pos == q.goal {
+    if q.verb != Verb::Rest && state.lead().hero.pos == q.goal {
         text.push_str(" (done)");
     }
     text
@@ -1704,7 +1715,7 @@ fn quest_text(state: &SagaState) -> String {
 ///   generated mode.
 /// * Anything else, or no such beat in the chronicle: `None`.
 fn quest_target(state: &SagaState) -> Option<String> {
-    let q = &state.quest;
+    let q = &state.lead().quest;
     let target = q.target.as_ref()?;
     if target.chip_owner().is_some() {
         return Some(key_id(target.as_str()).to_string());
@@ -1868,7 +1879,7 @@ fn hud_row(state: &SagaState, memory: &SagaMemory, look: &Look, w: usize) -> Row
             .push(mark, fg(look.p.yellow).add_modifier(Modifier::BOLD));
     }
     let lead = mark.map_or(0, |m| 1 + cols(m));
-    let name = state.hero.name.as_str();
+    let name = state.lead().hero.name.as_str();
     let quest = quest_text(state);
     // " name  ▰▰▰▰▰▰▰▰▰▰  99%  • quest", as `status_after` draws it.
     let full = lead + 1 + cols(name) + 2 + VITALITY_CELLS + 5 + 4 + cols(&quest);

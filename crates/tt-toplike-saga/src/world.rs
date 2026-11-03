@@ -18,11 +18,16 @@
 //!   training start, below) arrived while the gate was closed. That birth
 //!   is queued and takes the plain dungeon's place at the gate tick. A later
 //!   queued birth replaces an earlier one, and a queued model's dungeon is
-//!   dropped if that model goes away before the gate opens.
+//!   dropped if that model goes away before the gate opens. A queued birth
+//!   covers the chips the topology lists at the gate tick.
 //! * **A model reaches `Ready`.** The current world ends
-//!   ([`EndWhy::Superseded`]) and a dungeon is born on the model's chips. A
-//!   repeated `Ready` for the model whose dungeon this already is changes
-//!   nothing.
+//!   ([`EndWhy::Superseded`]) and a dungeon is born on every chip, the same
+//!   set as every other birth, so no chip leaves the view when a model comes
+//!   up on part of the box (the party addendum, section 3.1). The world
+//!   remembers the model's chips in [`World::sage_chips`]: the floors its
+//!   sage stands on. A model that names no chips could be on any of them,
+//!   so its sage stands on every floor. A repeated `Ready` for the model
+//!   whose dungeon this already is changes nothing.
 //! * **That model goes away (`ModelGone`).** Its dungeon ends
 //!   ([`EndWhy::ModelDown`]) and a dungeon on every chip follows. A model
 //!   that did not make the current world can go away without ending it.
@@ -65,8 +70,8 @@
 //! seed from one pool. Each chip's floor is
 //! `maze::generate(spec, world_seed ^ fnv1a64(chip key bytes), 0.0)`, so two
 //! chips of one shape still get different floors (ledger ruling R12).
-//! Floors are listed in chip-key order, at most [`MAX_CHIPS`] of them: a
-//! world asked for on more chips keeps the first [`MAX_CHIPS`] keys. A chip
+//! Floors are listed in chip-key order, at most [`MAX_FLOORS`] of them: a
+//! world asked for on more chips keeps the first [`MAX_FLOORS`] keys. A chip
 //! that the topology does not list gets the generic spec. A world with no chips at all gets one generic
 //! floor for the placeholder chip [`NO_CHIP`], so later tasks always have a
 //! floor to put the hero on.
@@ -142,6 +147,13 @@ pub struct World {
     /// One floor per chip, in the order of `chips`.
     pub floors: Vec<Floor>,
     pub biome: Biome,
+    /// The chips of the model whose `Ready` made this world, in key order:
+    /// the floors its sage stands on. Every chip of the world when the
+    /// model named none. Empty for a world no model made. Only chips with
+    /// a floor here are listed: a chip the model names that the topology
+    /// does not list, or one past [`MAX_FLOORS`], is left out, so this holds
+    /// at most [`MAX_FLOORS`] keys.
+    pub sage_chips: Vec<EntityKey>,
 }
 
 /// Decides when worlds are born and end.
@@ -165,13 +177,18 @@ pub struct Lifecycle {
     pending: Option<Pending>,
 }
 
-/// A queued birth: the world a signal asked for before the seed gate opened.
+/// A world a signal asks for. Before the seed gate opens it is queued, and
+/// born at the gate tick. Its chips are not part of it: every birth covers
+/// the chips the topology lists at the moment of birth, so a model ready
+/// before its chips' first samples still gets a floor on each of them.
 #[derive(Debug, Clone)]
 struct Pending {
     biome: Biome,
-    chips: Vec<EntityKey>,
     /// The model whose `Ready` asked for it, if one did.
     model: Option<EntityKey>,
+    /// The chips that model named (empty when it named none). Unused when
+    /// no model asked.
+    model_chips: Vec<EntityKey>,
 }
 
 impl Lifecycle {
@@ -230,17 +247,12 @@ impl Lifecycle {
                 if self.world.is_some() && self.model.as_ref() == Some(model) {
                     return;
                 }
-                // An empty chip list says nothing about where the model
-                // runs, so its dungeon covers every chip.
-                let chips = if chips.is_empty() {
-                    all_chips(at.topo)
-                } else {
-                    chips.clone()
-                };
+                // The dungeon covers every chip; the model's own chips are
+                // where its sage stands (see `sage_chips`).
                 let want = Pending {
                     biome: Biome::Dungeon,
-                    chips,
                     model: Some(model.clone()),
+                    model_chips: chips.clone(),
                 };
                 self.supersede(want, at, out);
             }
@@ -253,7 +265,7 @@ impl Lifecycle {
                     }
                 } else if self.model.as_ref() == Some(model) {
                     self.end(EndWhy::ModelDown, out);
-                    self.birth(Biome::Dungeon, all_chips(at.topo), at, out);
+                    self.birth(Biome::Dungeon, all_chips(at.topo), None, at, out);
                 }
             }
             Event::Reset { chips } => {
@@ -263,7 +275,7 @@ impl Lifecycle {
                 };
                 if hit {
                     self.end(EndWhy::Reset, out);
-                    self.birth(Biome::Dungeon, all_chips(at.topo), at, out);
+                    self.birth(Biome::Dungeon, all_chips(at.topo), None, at, out);
                 }
             }
             _ => {}
@@ -283,8 +295,8 @@ impl Lifecycle {
         if starts {
             let want = Pending {
                 biome: Biome::Forge,
-                chips: all_chips(at.topo),
                 model: None,
+                model_chips: Vec::new(),
             };
             self.supersede(want, at, out);
         }
@@ -299,7 +311,8 @@ impl Lifecycle {
             return;
         }
         self.end(EndWhy::Superseded, out);
-        self.birth(want.biome, want.chips, at, out);
+        let sage = want.model.as_ref().map(|_| want.model_chips.as_slice());
+        self.birth(want.biome, all_chips(at.topo), sage, at, out);
         self.model = want.model;
     }
 
@@ -309,10 +322,11 @@ impl Lifecycle {
             if at.seeds.pushed() >= FULL_POOL || at.tick >= FIRST_WORLD_BY_TICK {
                 let want = self.pending.take().unwrap_or_else(|| Pending {
                     biome: Biome::Dungeon,
-                    chips: all_chips(at.topo),
                     model: None,
+                    model_chips: Vec::new(),
                 });
-                self.birth(want.biome, want.chips, at, out);
+                let sage = want.model.as_ref().map(|_| want.model_chips.as_slice());
+                self.birth(want.biome, all_chips(at.topo), sage, at, out);
                 self.model = want.model;
             }
             return;
@@ -323,7 +337,7 @@ impl Lifecycle {
                 self.training = None;
                 if world.biome == Biome::Forge {
                     self.end(EndWhy::RunEnded, out);
-                    self.birth(Biome::Dungeon, all_chips(at.topo), at, out);
+                    self.birth(Biome::Dungeon, all_chips(at.topo), None, at, out);
                     return;
                 }
             }
@@ -334,7 +348,7 @@ impl Lifecycle {
         let quiet_since = world.born_tick.max(self.last_activity);
         if at.tick.saturating_sub(quiet_since) >= self.season_ticks {
             self.end(EndWhy::Season, out);
-            self.birth(Biome::Dream, all_chips(at.topo), at, out);
+            self.birth(Biome::Dream, all_chips(at.topo), None, at, out);
         }
     }
 
@@ -346,8 +360,17 @@ impl Lifecycle {
         self.model = None;
     }
 
-    /// Births a world of `biome` on `chips` and makes it current.
-    fn birth(&mut self, biome: Biome, chips: Vec<EntityKey>, at: &Birth, out: &mut Vec<SagaEvent>) {
+    /// Births a world of `biome` on `chips` and makes it current. `sage` is
+    /// the chips a ready model named, for a world that model made (empty
+    /// when it named none), and `None` for any other world.
+    fn birth(
+        &mut self,
+        biome: Biome,
+        chips: Vec<EntityKey>,
+        sage: Option<&[EntityKey]>,
+        at: &Birth,
+        out: &mut Vec<SagaEvent>,
+    ) {
         let mut chips = chips;
         chips.sort();
         chips.dedup();
@@ -368,6 +391,17 @@ impl Lifecycle {
                 maze::generate(&spec, floor_seed(seed, chip), 0.0)
             })
             .collect::<Vec<_>>();
+        // The sage stands on the floors of the chips its model named, in
+        // the world's key order; on every floor when it named none.
+        let sage_chips = match sage {
+            None => Vec::new(),
+            Some([]) => chips.clone(),
+            Some(named) => chips
+                .iter()
+                .filter(|c| named.contains(c))
+                .cloned()
+                .collect(),
+        };
         let id = self.next_id;
         self.next_id += 1;
         self.world = Some(World {
@@ -377,6 +411,7 @@ impl Lifecycle {
             chips,
             floors,
             biome,
+            sage_chips,
         });
         self.model = None;
         out.push(SagaEvent::WorldBorn { world: id, biome });

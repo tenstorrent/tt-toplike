@@ -105,13 +105,31 @@ fn memory_stays_bounded() {
 
         // Ready models and hooks: 201 models are ready and none goes away.
         assert_eq!(saga.ready.len(), RULED_READY, "{at}: ready models kept");
-        let sages = saga
-            .hooks
-            .iter()
-            .filter(|h| h.verb == Verb::VisitSage)
-            .count();
-        assert!(sages <= RULED_READY, "{at}: {sages} sage hooks");
-        assert!(saga.hooks.len() <= RULED_READY + 2, "{at}: hooks");
+        // Members: one per floor, at most 32 (the party addendum, 3.7).
+        assert!(
+            saga.members.len() <= RULED_FLOORS,
+            "{at}: {} members",
+            saga.members.len()
+        );
+        assert_eq!(saga.members.len(), saga.state.party.len(), "{at}");
+        assert_eq!(saga.members.len(), saga.state.world.floors.len(), "{at}");
+        for core in &saga.members {
+            let sages = core
+                .hooks
+                .iter()
+                .filter(|h| h.verb == Verb::VisitSage)
+                .count();
+            assert!(sages <= RULED_READY, "{at}: {sages} sage hooks");
+            assert!(core.hooks.len() <= RULED_READY + 2, "{at}: hooks");
+        }
+        // A ready model keeps at most 32 of the chips it named.
+        for r in saga.ready.values() {
+            assert!(
+                r.chips.len() <= RULED_FLOORS,
+                "{at}: {} chips",
+                r.chips.len()
+            );
+        }
 
         // Events: far more than 4096 were raised and none was drained.
         assert!(
@@ -171,12 +189,15 @@ fn memory_stays_bounded() {
         for c in saga.chips.keys() {
             note("chip key", c.as_str().len());
         }
-        for (m, cause) in &saga.ready {
+        for (m, r) in &saga.ready {
             note("model key", m.as_str().len());
-            note("cause entity", cause.entity.as_str().len());
-            note("cause signal", cause.signal.len());
+            note("cause entity", r.cause.entity.as_str().len());
+            note("cause signal", r.cause.signal.len());
+            for c in &r.chips {
+                note("ready chip", c.as_str().len());
+            }
         }
-        for h in &saga.hooks {
+        for h in saga.members.iter().flat_map(|m| &m.hooks) {
             note(
                 "hook target",
                 h.target.as_ref().map_or(0, |t| t.as_str().len()),
@@ -191,9 +212,10 @@ fn memory_stays_bounded() {
         for c in &w.chips {
             note("world chip", c.as_str().len());
         }
-        let q = &saga.state.quest;
-        note("quest reason", q.reason.entity.as_str().len());
-        note("quest signal", q.reason.signal.len());
+        for m in &saga.state.party {
+            note("quest reason", m.quest.reason.entity.as_str().len());
+            note("quest signal", m.quest.reason.signal.len());
+        }
         assert!(
             longest <= RULED_ITEM_BYTES,
             "{at}: a {longest}-byte trail key or name is stored"
@@ -205,7 +227,12 @@ fn memory_stays_bounded() {
         held.extend(saga.chips.keys());
         held.extend(saga.ready.keys());
         held.extend(w.chips.iter());
-        held.extend(saga.hooks.iter().filter_map(|h| h.target.as_ref()));
+        held.extend(
+            saga.members
+                .iter()
+                .flat_map(|m| &m.hooks)
+                .filter_map(|h| h.target.as_ref()),
+        );
         assert!(
             held.len() + trailed <= SPEC_ENTITIES,
             "{at}: {} entities held, {trailed} trailed",
@@ -232,11 +259,11 @@ fn a_step_stays_under_a_million_work_units() {
     // The structural worst case of one record, from the constants: at most
     // one world is born per record (see "Bounds" in the module comment of
     // saga.rs), with at most MAX_FLOORS floors of at most MAX_COLS x MAX_ROWS
-    // cells; the hero searches once, expanding each cell at most once. Trail
-    // pushes and events are counted below; they depend on the record's own
-    // size.
+    // cells; each of at most MAX_FLOORS members searches once, expanding
+    // each cell of its floor at most once. Trail pushes and events are
+    // counted below; they depend on the record's own size.
     let cells = u64::from(MAX_COLS) * u64::from(MAX_ROWS);
-    let structural = MAX_FLOORS as u64 * cells + cells;
+    let structural = MAX_FLOORS as u64 * cells * 2;
     assert!(
         structural < BUDGET,
         "the caps allow {structural} units in one record"

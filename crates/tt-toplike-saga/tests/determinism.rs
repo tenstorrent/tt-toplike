@@ -244,14 +244,21 @@ fn one_temperature_bit_changes_the_first_world() {
 /// events, beats and lines move every fixture that births a world. The
 /// stories themselves did not change (`tests/party.rs` pins the solo story
 /// print and trace, and they held).
+///
+/// `quiet`, `busy` and `party4` were re-pinned again for the party (Task A.3
+/// of the party plan): a world on more than one chip now has one member per
+/// floor, each with its own quests, events and position in the end item,
+/// and a model's dungeon now spans every chip (in `busy`, `demo-scribe`'s
+/// dungeon, ready on chip A, gained chip B's floor). `bringup` births no world and `solo` has
+/// one chip, so neither moved.
 #[test]
 fn a_snapshot_of_the_digests_matches() {
     let golden: [(&str, u64, u64); 5] = [
-        ("quiet.jsonl", 0x72af063987e6e20f, 0x72af063987e6e20f),
+        ("quiet.jsonl", 0x57bb527c7d770f78, 0x57bb527c7d770f78),
         ("bringup.jsonl", 0x88bb8d2b104511c3, 0x88bb8d2b104511c3),
-        ("busy.jsonl", 0xdcf06ed096288f90, 0xb1487e977ac6bc22),
+        ("busy.jsonl", 0x27b23f19be60e618, 0xf12a947d3b84637c),
         ("solo.jsonl", 0xe9ed5f1dae160dfa, 0x5a73462b53067a2a),
-        ("party4.jsonl", 0x219ccb84610ebdec, 0x8a36b896111d0fa7),
+        ("party4.jsonl", 0x15d5369d05d95a20, 0x7ae86aff392d98cc),
     ];
     let mut actual = Vec::new();
     for (name, _, _) in golden {
@@ -288,8 +295,12 @@ fn a_busy_log_never_panics_and_always_has_a_world() {
             if state.tick >= 5 {
                 assert!(state.world.id >= 1, "no world at tick {}", state.tick);
                 assert!(!state.world.floors.is_empty());
-                let floor = &state.world.floors[state.hero.floor as usize];
-                assert!(floor.cell(state.hero.pos.0, state.hero.pos.1).walkable());
+                // Every member stands on a walkable cell of its own floor.
+                assert_eq!(state.party.len(), state.world.floors.len());
+                for m in &state.party {
+                    let floor = &state.world.floors[m.hero.floor as usize];
+                    assert!(floor.cell(m.hero.pos.0, m.hero.pos.1).walkable());
+                }
             }
             worlds = worlds.max(state.world.id);
         }

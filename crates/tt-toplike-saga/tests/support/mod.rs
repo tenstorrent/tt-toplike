@@ -54,7 +54,8 @@ pub fn read_fixture(name: &str) -> Vec<Record> {
 
 /// The same records with every `seq`, `t_mono_ns` and `t_wall_ms` replaced,
 /// as a replay host does when it republishes a log: its own sequence counter
-/// from 90,001, monotonic time from its own start in steps of 3.3 ms, and a
+/// from 90,001 in steps of 3 (a host that shares its counter with other
+/// writers leaves holes), monotonic time from its own start in steps of 3.3 ms, and a
 /// wall clock a year later that ticks at a different rate. Contents and order
 /// stay as they were.
 pub fn renumber(records: &[Record]) -> Vec<Record> {
@@ -64,7 +65,7 @@ pub fn renumber(records: &[Record]) -> Vec<Record> {
         .map(|(i, r)| {
             let i = i as u64;
             Record {
-                seq: 90_001 + i,
+                seq: 90_001 + i * 3,
                 t_mono_ns: 1_000 + i * 3_333_333,
                 t_wall_ms: 1_821_000_000_000 + i * 7,
                 ..r.clone()
@@ -108,7 +109,7 @@ pub fn story_print(saga: &tt_toplike_saga::Saga) -> u64 {
 /// A hash of where the lead hero stood after every tick. It feeds every
 /// record to a fresh saga (real names, mock label, 200-tick season) and,
 /// each time the tick counter moves, folds the hero's floor, x and y into
-/// the hash. It reads only public state; Task A.3 changes the one accessor
+/// the hash. It reads only public state. Task A.3 changed a single accessor
 /// line below (`state.hero` to `state.party[0].hero`) and nothing else.
 pub fn story_trace(records: &[Record]) -> u64 {
     use tt_toplike_saga::chronicle::NameMode;
@@ -125,7 +126,7 @@ pub fn story_trace(records: &[Record]) -> u64 {
         let state = saga.state();
         if state.tick != seen_tick {
             seen_tick = state.tick;
-            let hero = &state.hero;
+            let hero = &state.party[0].hero;
             fnv(&mut h, &[hero.floor, hero.pos.0, hero.pos.1]);
         }
     }

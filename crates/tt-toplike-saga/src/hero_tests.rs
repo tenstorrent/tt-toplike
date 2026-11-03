@@ -469,6 +469,7 @@ fn world_of(floor: Floor) -> World {
         chips: vec![chip()],
         floors: vec![floor],
         biome: Biome::Dungeon,
+        sage_chips: Vec::new(),
     }
 }
 
@@ -552,6 +553,7 @@ fn plan_visits_the_sage_then_explores_or_rests() {
         chips: vec![chip()],
         floors: vec![floor.clone()],
         biome: Biome::Dungeon,
+        sage_chips: Vec::new(),
     };
     let sage = Hook {
         verb: Verb::VisitSage,

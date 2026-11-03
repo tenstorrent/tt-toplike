@@ -493,3 +493,43 @@ fn a_sage_beat_names_the_sage() {
         }
     }
 }
+
+#[test]
+fn beat_text_is_the_same_on_every_floor() {
+    // The floor is a field outside the text (the party addendum, section
+    // 3.5). Every kind, tone, verb and role, in both name modes, written
+    // with floor None, Some(0) and Some(2) from one generator state, gives
+    // the same text, the same cause and the same generator state after.
+    let pack = Pack::builtin();
+    let model = RealName::new("demo-sage");
+    for names in [NameMode::Real, NameMode::Generated] {
+        for seed in 0..4 {
+            let run = |floor: Option<u8>| {
+                let mut rng = Pcg32::from_seed(seed);
+                let mut chron = Chronicle::new();
+                let mut out = Vec::new();
+                let mut tick = 0;
+                for kind in BeatKind::ALL {
+                    for tone in Tone::ALL {
+                        for verb in [Verb::VisitSage, Verb::Explore, Verb::Rest] {
+                            for role in [NameRole::Model, NameRole::Process, NameRole::Service] {
+                                tick += 1;
+                                let mut c = ctx(model.clone(), tone, tick);
+                                c.verb = Some(verb);
+                                c.role = role;
+                                c.floor = floor;
+                                let beat = chron.push_beat(kind, &c, pack, names, &mut rng);
+                                assert_eq!(beat.floor, floor);
+                                out.push((beat.text.clone(), beat.cause.clone()));
+                            }
+                        }
+                    }
+                }
+                (out, rng)
+            };
+            let none = run(None);
+            assert_eq!(none, run(Some(0)), "{names:?} seed {seed}: floor 0");
+            assert_eq!(none, run(Some(2)), "{names:?} seed {seed}: floor 2");
+        }
+    }
+}

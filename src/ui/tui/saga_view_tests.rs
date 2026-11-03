@@ -327,7 +327,7 @@ fn no_row_ends_in_a_right_side_border() {
         (floor.w - 2, floor.h - 2),
     ] {
         let mut s = busy.clone();
-        s.hero.pos = pos;
+        s.party[0].hero.pos = pos;
         corners.push(s);
     }
     tc(|| {
@@ -467,7 +467,7 @@ fn the_quest_goal_is_marked() {
         for r in busy() {
             saga.feed(r);
             let s = saga.state();
-            if !s.has_world() || s.quest.goal == s.hero.pos {
+            if !s.has_world() || s.party[0].quest.goal == s.party[0].hero.pos {
                 continue;
             }
             // A memory that saw only this state: the goal is drawn even
@@ -480,7 +480,7 @@ fn the_quest_goal_is_marked() {
                     .any(|sp| sp.style == want)
             };
             let marked = has_style(goal_style(0));
-            match s.quest.verb {
+            match s.party[0].quest.verb {
                 Verb::VisitSage if !sage => {
                     let all = text(&lines).join("\n");
                     assert!(all.contains(Pack::builtin().glyphs.npc), "{all}");
@@ -520,18 +520,18 @@ fn an_out_of_range_floor_is_the_first_floor_in_title_and_map() {
     let memory = SagaMemory::new();
     let first_title = tc(|| {
         let mut s = state.clone();
-        s.hero.floor = 0;
+        s.party[0].hero.floor = 0;
         title_row(&s, &look, 200, false).line()
     });
     let first_map = tc(|| {
         let mut s = state.clone();
-        s.hero.floor = 0;
+        s.party[0].hero.floor = 0;
         map_rows(&s, &memory, &look, 140, 30, 0)
             .into_iter()
             .map(Row::line)
             .collect::<Vec<_>>()
     });
-    state.hero.floor = u8::try_from(n + 3).unwrap_or(u8::MAX);
+    state.party[0].hero.floor = u8::try_from(n + 3).unwrap_or(u8::MAX);
     assert_eq!(hero_floor_index(&state), Some(0));
     let title = tc(|| title_row(&state, &look, 200, false).line());
     let all = text(std::slice::from_ref(&title)).join("");
@@ -555,7 +555,7 @@ fn the_status_line_names_the_hero_and_the_quest() {
     let state = busy_state();
     let lines = text(&tc(|| draw(&state, PLAIN, (140, 39), 0)));
     let last = lines.last().expect("a frame");
-    assert!(last.contains(&state.hero.name), "{last}");
+    assert!(last.contains(&state.party[0].hero.name), "{last}");
     assert!(
         last.contains('▰') || last.contains('▱'),
         "a vitality bar: {last}"
@@ -946,7 +946,7 @@ fn fog_hides_the_unseen_and_dims_the_remembered() {
         let (saga, memory) = saga_and_memory(busy().len());
         let state = saga.state();
         let (cells, floor) = whole_floor_cells(state, &memory);
-        let lit = light(&floor, state.hero.pos);
+        let lit = light(&floor, state.party[0].hero.pos);
         let g = &Pack::builtin().glyphs;
         let (mut unseen, mut remembered, mut visible) = (0, Vec::new(), Vec::new());
         assert_eq!(cells.len(), floor.h as usize, "one row per floor row");
@@ -954,13 +954,16 @@ fn fog_hides_the_unseen_and_dims_the_remembered() {
             assert_eq!(row.len(), floor.w as usize, "one glyph per cell");
             for (x, &(ch, style)) in row.iter().enumerate() {
                 let at = (x as u8, y as u8);
-                if at == state.hero.pos || at == state.quest.goal || at == floor.exit {
+                if at == state.party[0].hero.pos
+                    || at == state.party[0].quest.goal
+                    || at == floor.exit
+                {
                     continue;
                 }
                 let i = y * floor.w as usize + x;
                 let plain_floor = floor.cells[i] == Cell::Floor
                     && memory.trail_age(at).is_none()
-                    && x.abs_diff(state.hero.pos.0 as usize) > 1;
+                    && x.abs_diff(state.party[0].hero.pos.0 as usize) > 1;
                 if lit[i] == 0 && !memory.seen(x, y) {
                     assert_eq!(ch, ' ', "unseen ({x}, {y}) is blank");
                     unseen += 1;
@@ -1006,7 +1009,7 @@ fn the_explored_set_resets_on_a_new_world_and_floor() {
         world = s.world.id;
         births += 1;
         let floor = hero_floor(s).unwrap();
-        let lit = light(floor, s.hero.pos);
+        let lit = light(floor, s.party[0].hero.pos);
         for (i, &l) in lit.iter().enumerate() {
             let (x, y) = (i % floor.w as usize, i / floor.w as usize);
             assert_eq!(
@@ -1022,10 +1025,10 @@ fn the_explored_set_resets_on_a_new_world_and_floor() {
     let mut s = saga.state().clone();
     assert!(s.world.floors.len() >= 2);
     let before: usize = memory.seen.iter().filter(|&&b| b).count();
-    s.hero.floor = if s.hero.floor == 0 { 1 } else { 0 };
+    s.party[0].hero.floor = if s.party[0].hero.floor == 0 { 1 } else { 0 };
     memory.observe(&s);
     let after: usize = memory.seen.iter().filter(|&&b| b).count();
-    let lit = light(hero_floor(&s).unwrap(), s.hero.pos);
+    let lit = light(hero_floor(&s).unwrap(), s.party[0].hero.pos);
     assert_eq!(after, lit.iter().filter(|&&l| l > 0).count());
     assert!(
         before > after,
@@ -1086,9 +1089,9 @@ fn the_map_keeps_its_last_column_blank() {
     let state = busy_state();
     let floor = hero_floor(&state).unwrap().clone();
     let look = tc(|| Look::for_state(&state, &SagaMemory::new()));
-    for pos in [(1, 1), (floor.w - 2, floor.h - 2), state.hero.pos] {
+    for pos in [(1, 1), (floor.w - 2, floor.h - 2), state.party[0].hero.pos] {
         let mut s = state.clone();
-        s.hero.pos = pos;
+        s.party[0].hero.pos = pos;
         let mut memory = SagaMemory::new();
         memory.observe(&s);
         memory.see_everything();
@@ -1263,15 +1266,23 @@ fn golden_frames() -> Vec<u64> {
 /// biome colours, the title band, the tone marks and bold names in the
 /// chronicle, and the `▰▱` status row with the mapped share and the tick.
 /// All eight frames moved.
+///
+/// Re-pinned in Task A.3 of the party plan (the party in the core). The
+/// busy log has two chips, so every world now has a second member, the hero
+/// of chip B's floor. Its quest beats join the chronicle these frames show,
+/// and it shares the chronicle's generator, so the lead's later lines choose
+/// other templates. A model's dungeon also spans both chips now. The view
+/// still draws only the lead's floor (the party view is Task A.7). All eight
+/// frames moved. The solo frames below did not.
 const GOLDEN: [u64; 8] = [
-    11633304791087981713,
-    16818141526951645005,
-    7759479612425788981,
-    8394333423314471994,
-    7550816615464738859,
-    2677119523348627770,
-    327908510661126192,
-    4876264370409480708,
+    7777802160480240132,
+    11192886936226315285,
+    6408111355053286409,
+    8864821999538925488,
+    2263614868807788187,
+    6677668656645925998,
+    7884385801550798112,
+    1677261263598188733,
 ];
 
 /// Prints the hashes for [`GOLDEN`]. Run with
@@ -1379,7 +1390,7 @@ fn panel(state: &SagaState, stopped: bool, area: (u16, u16)) -> Vec<Line<'static
 #[test]
 fn the_panel_draws_the_hud_over_the_map_and_a_chronicle_when_it_has_room() {
     let state = busy_state();
-    let hero = state.hero.name.clone();
+    let hero = state.party[0].hero.name.clone();
     tc(|| {
         for (w, h, chronicle) in [
             (20, 6, false),
@@ -1538,10 +1549,13 @@ fn the_panel_map_and_hud_are_the_views_own() {
 #[test]
 fn a_narrow_hud_keeps_the_hero_the_vitality_and_the_quest() {
     let state = busy_state();
-    let name = state.hero.name.clone();
+    let name = state.party[0].hero.name.clone();
     let first = name.split(' ').next().unwrap().to_string();
     let quest = quest_text(&state);
-    let pct = format!("{:>3.0}%", state.hero.vitality.clamp(0.0, 1.0) * 100.0);
+    let pct = format!(
+        "{:>3.0}%",
+        state.party[0].hero.vitality.clamp(0.0, 1.0) * 100.0
+    );
     let hud = |w: u16| text(&tc(|| panel(&state, false, (w, 11))))[0].clone();
     // " (mock)" is 7 columns; " name 100% • quest" adds the rest.
     let roomy = (7 + 1 + name.chars().count() + 5 + 3 + quest.chars().count()) as u16;
@@ -1616,10 +1630,15 @@ fn golden_panel_frames() -> Vec<u64> {
 /// status row does not fit to the end of its quest: 70x16 at the half cut
 /// (its quest names the sage) and 20x6 at both cuts. 70x16 at the end of
 /// the log did not move.
+///
+/// Re-pinned in Task A.3 of the party plan, for the reason given at
+/// [`GOLDEN`]: chip B's member writes quest beats into the chronicle, and
+/// shares its generator. The two 70x16 frames, which show the chronicle,
+/// moved. The two 20x6 frames show only the lead's status row and did not.
 const GOLDEN_PANEL: [u64; 4] = [
-    12214383344375690488,
+    16106432338813788831,
     14813228560897824468,
-    1019373424927296806,
+    11419400611681437161,
     413437031925912577,
 ];
 

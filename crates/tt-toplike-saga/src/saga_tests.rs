@@ -219,7 +219,7 @@ fn a_birth_raises_world_hero_and_quest_events_in_order() {
     // The hero's name comes from the pack, drawn first from the plan stream.
     let state = saga.state();
     let expected = Pack::builtin().hero_name(&mut Pcg32::new(state.world.seed, PLAN_STREAM));
-    assert_eq!(state.hero.name, expected);
+    assert_eq!(state.party[0].hero.name, expected);
     assert!(
         matches!(&events[2], SagaEvent::HeroBorn { name, world: 1, floor: 0 } if *name == expected)
     );
@@ -244,7 +244,7 @@ fn the_hero_walks_and_finishes_quests() {
     let mut saga = Saga::new(config(NameMode::Real, Label::Live));
     run_ticks(&mut saga, 5);
     saga.drain_events();
-    let start = saga.state().hero.pos;
+    let start = saga.state().party[0].hero.pos;
     run_ticks(&mut saga, 400);
     let events = saga.drain_events();
     let done = events
@@ -258,7 +258,7 @@ fn the_hero_walks_and_finishes_quests() {
     assert!(done >= 2, "only {done} quests done in 400 ticks");
     // After each arrival the hero dwells, then plans the next quest.
     assert!(started >= done.saturating_sub(1).max(1));
-    assert_ne!(saga.state().hero.pos, start);
+    assert_ne!(saga.state().party[0].hero.pos, start);
     // A done quest's beat is triumphant on a healthy chip.
     let tones: Vec<Tone> = events
         .windows(2)
@@ -280,7 +280,7 @@ fn a_no_path_quest_drops_its_hook_and_plans_again() {
         chips: vec![chip_a()],
     }));
     run_ticks(&mut saga, 5);
-    assert_eq!(saga.state.quest.verb, Verb::VisitSage);
+    assert_eq!(saga.state.party[0].quest.verb, Verb::VisitSage);
     // Wall the sage in: its exit becomes a wall cell in the hero's world.
     let floor = &mut saga.state.world.floors[0];
     let exit = floor.exit;
@@ -300,8 +300,11 @@ fn a_no_path_quest_drops_its_hook_and_plans_again() {
         )),
         "no new quest after no_path: {events:?}"
     );
-    assert_eq!(saga.state.quest.verb, Verb::Explore);
-    assert!(saga.hooks.iter().all(|h| h.verb != Verb::VisitSage));
+    assert_eq!(saga.state.party[0].quest.verb, Verb::Explore);
+    assert!(saga.members[0]
+        .hooks
+        .iter()
+        .all(|h| h.verb != Verb::VisitSage));
     // Later plans never pick the dropped sage again.
     run_ticks(&mut saga, 300);
     let events = saga.drain_events();
@@ -377,15 +380,12 @@ fn a_reset_ends_the_world_on_a_tense_beat() {
 }
 
 /// Everything about the walk and the world that the name mode must not
-/// change, taken after each record.
+/// change, taken after each record: the world, every member (hero and
+/// quest) and the chronicle's length.
 #[derive(Debug, PartialEq)]
 struct Walked {
     world: World,
-    pos: (u8, u8),
-    floor: u8,
-    vitality: f32,
-    name: String,
-    quest: Quest,
+    party: Vec<Member>,
     lines: usize,
 }
 
@@ -438,11 +438,7 @@ fn the_name_mode_changes_only_the_chronicle() {
     let mut generated = Saga::new(config(NameMode::Generated, Label::Live));
     let walked = |s: &Saga| Walked {
         world: s.state.world.clone(),
-        pos: s.state.hero.pos,
-        floor: s.state.hero.floor,
-        vitality: s.state.hero.vitality,
-        name: s.state.hero.name.clone(),
-        quest: s.state.quest.clone(),
+        party: s.state.party.clone(),
         lines: s.state.chronicle.len(),
     };
     let mut real_events = Vec::new();
@@ -451,8 +447,10 @@ fn the_name_mode_changes_only_the_chronicle() {
         real.feed(&r);
         generated.feed(&r);
         assert_eq!(walked(&real), walked(&generated));
-        // The plan stream itself never sees a chronicle draw.
-        assert_eq!(real.plan_rng, generated.plan_rng);
+        // No member's plan stream ever sees a chronicle draw.
+        let rngs =
+            |s: &Saga| -> Vec<Pcg32> { s.members.iter().map(|m| m.plan_rng.clone()).collect() };
+        assert_eq!(rngs(&real), rngs(&generated));
         real_events.extend(real.drain_events());
         generated_events.extend(generated.drain_events());
     }
@@ -512,8 +510,8 @@ fn a_model_that_goes_away_takes_its_sage_hook_with_it() {
     // A reset births a dungeon that was not made by the model, so the model
     // going away does not end it.
     saga.feed(&event(Event::Reset { chips: vec![] }));
-    assert_eq!(saga.state.quest.verb, Verb::VisitSage);
-    assert_eq!(saga.state.quest.target.as_ref(), Some(&sage));
+    assert_eq!(saga.state.party[0].quest.verb, Verb::VisitSage);
+    assert_eq!(saga.state.party[0].quest.target.as_ref(), Some(&sage));
     let world = saga.state.world.id;
     run_ticks(&mut saga, 3);
     saga.drain_events();
@@ -553,7 +551,10 @@ fn a_model_that_goes_away_takes_its_sage_hook_with_it() {
     assert!(events
         .iter()
         .any(|e| matches!(e, SagaEvent::QuestDone { .. })));
-    assert!(saga.hooks.iter().all(|h| h.target.as_ref() != Some(&sage)));
+    assert!(saga.members[0]
+        .hooks
+        .iter()
+        .all(|h| h.target.as_ref() != Some(&sage)));
 }
 
 /// One event of each variant, with a `Beat` for each floor option. The match
@@ -709,10 +710,11 @@ fn an_empty_saga_digest_has_the_version_item() {
     // A saga that has seen nothing hashes the version item, then the end
     // item: the placeholder's seed 0, one member, and its floor and cell.
     let saga = Saga::new(config(NameMode::Real, Label::Live));
-    let (x, y) = saga.state.hero.pos;
+    let hero = &saga.state.party[0].hero;
+    let (x, y) = hero.pos;
     let mut hand = vec![0x00, 0x02, 0x30];
     hand.extend_from_slice(&[0; 8]);
-    hand.extend_from_slice(&[1, saga.state.hero.floor, x, y]);
+    hand.extend_from_slice(&[1, hero.floor, x, y]);
     assert_eq!(saga.digest(), crate::seed::fnv1a64(&hand));
 }
 
@@ -816,6 +818,7 @@ fn the_digest_encoding_matches_a_hand_written_byte_string() {
         saga.emit(ev);
     }
     let mut ctx = saga.ctx(
+        Some(0),
         Tone::Calm,
         None,
         NameRole::Service,
@@ -833,10 +836,11 @@ fn the_digest_encoding_matches_a_hand_written_byte_string() {
     hand.extend_from_slice(&[0x20, 1, 1]);
     hand.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
     hand.extend_from_slice(text.as_bytes());
-    let (x, y) = saga.state.hero.pos;
+    let hero = &saga.state.party[0].hero;
+    let (x, y) = hero.pos;
     hand.push(0x30);
     hand.extend_from_slice(&[0; 8]);
-    hand.extend_from_slice(&[1, saga.state.hero.floor, x, y]);
+    hand.extend_from_slice(&[1, hero.floor, x, y]);
     assert_eq!(saga.digest(), crate::seed::fnv1a64(&hand));
 }
 
@@ -855,48 +859,59 @@ fn floor_after(ev: &SagaEvent) -> Option<u8> {
 
 #[test]
 fn quest_and_beat_events_carry_the_floor() {
-    // A two-chip world. The hero is moved to floor 1's entrance, so a floor
-    // copied from the hero differs from the 0 a hard-coded floor would give.
-    let mut saga = Saga::new(config(NameMode::Real, Label::Live));
-    saga.feed(&sample(&chip_b(), ASIC_TEMPERATURE, Value::F64(46.0)));
-    run_ticks(&mut saga, 5);
+    // A two-chip world has two members, one on each floor. Every quest
+    // event and quest beat carries the floor of the member it is about, and
+    // its text names that member. A floor or a name taken from the lead
+    // member gives 0 or the lead's name on floor 1's lines.
+    let mut saga = saga_on(&[chip_b()]);
     assert_eq!(saga.state.world.floors.len(), 2);
-    saga.state.hero.floor = 1;
-    saga.state.hero.pos = saga.state.world.floors[1].entrance;
-    saga.drain_events();
-    saga.dwell_until = None;
-    saga.start_quest(false);
+    let names: Vec<String> = saga
+        .state
+        .party
+        .iter()
+        .map(|m| m.hero.name.clone())
+        .collect();
+    assert_ne!(names[0], names[1]);
+    let mut events = saga.drain_events();
     run_ticks(&mut saga, 400);
-    let events = saga.drain_events();
+    events.extend(saga.drain_events());
 
-    let (mut started, mut done) = (0, 0);
+    let (mut started, mut done) = ([0; 2], [0; 2]);
     for e in &events {
         match e {
-            SagaEvent::QuestStarted { floor, .. } => {
-                assert_eq!(*floor, 1, "{e:?}");
-                started += 1;
-            }
-            SagaEvent::QuestDone { floor, .. } => {
-                assert_eq!(*floor, 1, "{e:?}");
-                done += 1;
-            }
+            SagaEvent::QuestStarted { floor, .. } => started[*floor as usize] += 1,
+            SagaEvent::QuestDone { floor, .. } => done[*floor as usize] += 1,
             _ => {}
         }
     }
-    assert!(started >= 2 && done >= 1, "{started} started, {done} done");
-    // Each quest's beat comes right after its event and carries the floor.
+    for f in 0..2 {
+        assert!(
+            started[f] >= 2 && done[f] >= 1,
+            "floor {f}: {} started, {} done",
+            started[f],
+            done[f]
+        );
+    }
+    // Each quest's beat comes right after its event and carries its floor.
+    // A beat that names a hero names the member of its floor.
+    let mut named = [0; 2];
     for w in events.windows(2) {
-        if let SagaEvent::Beat { floor, .. } = &w[1] {
+        if let SagaEvent::Beat { floor, text, .. } = &w[1] {
             assert_eq!(*floor, floor_after(&w[0]), "{:?} then {:?}", w[0], w[1]);
-            assert_eq!(*floor, Some(1));
+            let Some(f) = *floor else { continue };
+            let (own, other) = (&names[f as usize], &names[1 - f as usize]);
+            assert!(!text.contains(other.as_str()), "floor {f}: {text}");
+            named[f as usize] += text.contains(own.as_str()) as usize;
         }
     }
-    // The stored lines carry it too.
+    assert!(named[0] >= 1 && named[1] >= 1, "named {named:?}");
+    // The stored lines carry the floors too.
     let n = events
         .iter()
         .filter(|e| matches!(e, SagaEvent::Beat { .. }))
         .count();
-    assert!(saga.state.chronicle.lines(n).all(|b| b.floor == Some(1)));
+    let floors: Vec<Option<u8>> = saga.state.chronicle.lines(n).map(|b| b.floor).collect();
+    assert!(floors.contains(&Some(0)) && floors.contains(&Some(1)));
 }
 
 #[test]
@@ -917,7 +932,7 @@ fn world_beats_have_no_floor() {
                 match want {
                     None => world += 1,
                     Some(f) => {
-                        assert_eq!(f, 0, "the hero never leaves floor 0 here");
+                        assert!(f < 2, "the script has two chips: floor {f}");
                         hero += 1;
                     }
                 }
@@ -948,4 +963,156 @@ fn has_world_is_false_until_the_first_world_is_born() {
         saga.state().has_world(),
         "the first world is born by tick 5"
     );
+}
+
+// ---- The party ------------------------------------------------------------
+
+#[allow(dead_code)]
+#[path = "../tests/support/party.rs"]
+mod party_gen;
+
+/// A third chip, sorting after chip B.
+fn chip_c() -> EntityKey {
+    EntityKey::chip("0000:03:00.0")
+}
+
+/// A saga whose kept chips are A and `others`, in a world born by tick 5.
+/// Each other chip is seen through one temperature sample.
+fn saga_on(others: &[EntityKey]) -> Saga {
+    let mut saga = Saga::new(config(NameMode::Real, Label::Live));
+    for c in others {
+        saga.feed(&sample(c, ASIC_TEMPERATURE, Value::F64(46.0)));
+    }
+    run_ticks(&mut saga, 5);
+    assert_eq!(saga.state.party.len(), others.len() + 1);
+    saga
+}
+
+/// What a member's walk is, after one record: everything another member's
+/// draws could change.
+fn walk_of(saga: &Saga, i: usize) -> (Member, Pcg32, Option<u64>, Vec<Hook>) {
+    (
+        saga.state.party[i].clone(),
+        saga.members[i].plan_rng.clone(),
+        saga.members[i].dwell_until,
+        saga.members[i].hooks.clone(),
+    )
+}
+
+#[test]
+fn a_member_that_replans_leaves_the_others_unchanged() {
+    // The party addendum, section 4.2: each member has its own plan
+    // generator, so one member's extra plan (here a no-path replan, at every
+    // birth) never changes another member's walk.
+    let records = party_gen::records(4, 600);
+    let mut plain = Saga::new(config(NameMode::Real, Label::Mock));
+    let mut walled = Saga::with_walled_sage(config(NameMode::Real, Label::Mock), 2);
+    let (mut worlds, mut member_2_differs) = (0, false);
+    for r in &records {
+        plain.feed(r);
+        walled.feed(r);
+        let (a, b) = (plain.state(), walled.state());
+        assert_eq!(a.world.id, b.world.id);
+        if a.world.id != worlds {
+            worlds = a.world.id;
+        }
+        if !a.has_world() {
+            continue;
+        }
+        assert_eq!(a.party.len(), 4);
+        for i in [0, 1, 3] {
+            assert_eq!(
+                walk_of(&plain, i),
+                walk_of(&walled, i),
+                "member {i} at tick {}",
+                a.tick
+            );
+        }
+        member_2_differs |= walk_of(&plain, 2) != walk_of(&walled, 2);
+    }
+    // The log births several worlds, and the injection did change member 2.
+    assert!(worlds >= 3, "{worlds} worlds");
+    assert!(member_2_differs, "the walled sage never changed member 2");
+}
+
+#[test]
+fn a_sage_hook_is_dropped_only_for_the_member_who_visited() {
+    let sage = EntityKey::model("demo-sage");
+    let mut saga = saga_on(&[chip_b()]);
+    // A model that names no chips: its sage stands on both floors, and its
+    // world gives both members a sage quest.
+    saga.feed(&event(Event::ModelReady {
+        model: sage.clone(),
+        chips: vec![],
+    }));
+    for i in 0..2 {
+        assert_eq!(saga.state.party[i].quest.verb, Verb::VisitSage, "{i}");
+    }
+    // Member 0 stands at its sage; member 1 is still at its gate.
+    let exit = saga.state.world.floors[0].exit;
+    saga.state.party[0].hero.pos = exit;
+    saga.drain_events();
+    run_ticks(&mut saga, 1);
+    let events = saga.drain_events();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            SagaEvent::QuestDone {
+                floor: 0,
+                verb: Verb::VisitSage,
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    let has_sage = |i: usize, saga: &Saga| {
+        saga.members[i]
+            .hooks
+            .iter()
+            .any(|h| h.target.as_ref() == Some(&sage))
+    };
+    assert!(!has_sage(0, &saga), "member 0 visited its sage");
+    assert!(has_sage(1, &saga), "member 1 lost a sage it never visited");
+    assert_eq!(saga.state.party[1].quest.verb, Verb::VisitSage);
+}
+
+#[test]
+fn model_gone_replans_every_member_walking_to_it() {
+    let sage = EntityKey::model("demo-sage");
+    let mut saga = saga_on(&[chip_b(), chip_c()]);
+    // The sage stands on floors 0 and 2. A reset then births a dungeon the
+    // model did not make, so the model going away does not end it.
+    saga.feed(&event(Event::ModelReady {
+        model: sage.clone(),
+        chips: vec![chip_a(), chip_c()],
+    }));
+    saga.feed(&event(Event::Reset { chips: vec![] }));
+    let verbs: Vec<Verb> = saga.state.party.iter().map(|m| m.quest.verb).collect();
+    assert_eq!(verbs, [Verb::VisitSage, Verb::Explore, Verb::VisitSage]);
+    run_ticks(&mut saga, 3);
+    let world = saga.state.world.id;
+    let member_1 = walk_of(&saga, 1);
+    saga.drain_events();
+
+    saga.feed(&event(Event::ModelGone {
+        model: sage.clone(),
+    }));
+    let events = saga.drain_events();
+    assert_eq!(saga.state.world.id, world);
+    // Members 0 and 2 plan again at once, in index order; member 1 walks on.
+    let started: Vec<(u8, Verb)> = events
+        .iter()
+        .filter_map(|e| match e {
+            SagaEvent::QuestStarted { floor, verb, .. } => Some((*floor, *verb)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started, [(0, Verb::Explore), (2, Verb::Explore)]);
+    assert_eq!(walk_of(&saga, 1), member_1);
+    for (i, core) in saga.members.iter().enumerate() {
+        assert!(
+            core.hooks.iter().all(|h| h.target.as_ref() != Some(&sage)),
+            "member {i} kept the gone model's hook"
+        );
+    }
 }

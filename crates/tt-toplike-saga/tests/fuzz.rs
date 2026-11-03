@@ -82,23 +82,35 @@ fn check_state(saga: &Saga, seed: u64, i: usize, last_tick: u64) {
     assert!(!w.floors.is_empty(), "{at}: a world with no floor");
     assert!(w.chips.len() <= MAX_FLOORS, "{at}: {} chips", w.chips.len());
     assert_eq!(s.has_world(), w.id > 0, "{at}: has_world disagrees with id");
-    let floor = w
-        .floors
-        .get(s.hero.floor as usize)
-        .unwrap_or_else(|| panic!("{at}: hero on floor {} of {}", s.hero.floor, w.floors.len()));
-    let (x, y) = s.hero.pos;
-    assert!(
-        x < floor.w && y < floor.h,
-        "{at}: hero at {x},{y} on a {}x{} floor",
-        floor.w,
-        floor.h
+    // One member per floor, each on its own floor.
+    assert_eq!(
+        s.party.len(),
+        w.floors.len(),
+        "{at}: party and floors differ"
     );
-    // The hero stands on a walkable cell, or on the entrance gate it was born
-    // on. A ruin or a door is walkable; a wall never is.
-    assert!(
-        floor.cell(x, y) != Cell::Wall,
-        "{at}: hero inside a wall at {x},{y}"
-    );
+    for (i, m) in s.party.iter().enumerate() {
+        let hero = &m.hero;
+        let floor = w.floors.get(hero.floor as usize).unwrap_or_else(|| {
+            panic!(
+                "{at}: member {i} on floor {} of {}",
+                hero.floor,
+                w.floors.len()
+            )
+        });
+        let (x, y) = hero.pos;
+        assert!(
+            x < floor.w && y < floor.h,
+            "{at}: member {i} at {x},{y} on a {}x{} floor",
+            floor.w,
+            floor.h
+        );
+        // The hero stands on a walkable cell, or on the entrance gate it
+        // was born on. A ruin or a door is walkable; a wall never is.
+        assert!(
+            floor.cell(x, y) != Cell::Wall,
+            "{at}: member {i} inside a wall at {x},{y}"
+        );
+    }
 }
 
 /// Feeds `records` to a fresh saga, checking the state after each record and

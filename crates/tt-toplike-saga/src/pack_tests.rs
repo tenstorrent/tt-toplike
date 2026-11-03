@@ -357,3 +357,81 @@ fn composed_names_take_both_shapes() {
         "{adjective_noun} {noun_of_noun}"
     );
 }
+
+/// A pack whose lexicon makes two hero names: one first name and two
+/// titles. Every other part is the builtin pack's.
+fn two_name_pack() -> Pack {
+    let mut pack = Pack::builtin().clone();
+    pack.lexicon = Lexicon::new(&[(HERO_NAME, &["Wren"]), (TITLE, &["the Bold", "the Quiet"])]);
+    pack
+}
+
+#[test]
+fn a_two_name_lexicon_forces_the_numeral() {
+    // The party addendum, section 3.2: a member draws again while its name
+    // is taken, up to HERO_NAME_TRIES draws, then adds a Roman numeral one
+    // more than the count of lower members with that name.
+    let pack = two_name_pack();
+    let mut taken: Vec<String> = Vec::new();
+    for i in 0..32u64 {
+        let mut rng = Pcg32::new(7, 16 + i);
+        let name = pack.hero_name_unique(&mut rng, &taken);
+        assert!(!taken.contains(&name), "member {i} repeats {name}");
+        taken.push(name);
+    }
+    // Two plain names, then numerals from II upwards for each of them, and
+    // never past XVI with 32 members and two names.
+    let plain = taken
+        .iter()
+        .filter(|n| !n.contains(" the Bold ") && !n.contains(" the Quiet "))
+        .count();
+    assert!(plain <= 2, "{taken:?}");
+    for base in ["Wren the Bold", "Wren the Quiet"] {
+        let count = taken
+            .iter()
+            .filter(|n| n.as_str() == base || n.starts_with(&format!("{base} ")))
+            .count();
+        // Every numeral from II to the count is used once.
+        for k in 2..=count {
+            let want = format!("{base} {}", ROMAN[k - 2]);
+            assert!(taken.contains(&want), "{want} missing from {taken:?}");
+        }
+    }
+
+    // With both names taken, the eighth draw keeps its name and adds II;
+    // the draws used are exactly HERO_NAME_TRIES names.
+    let both = vec!["Wren the Bold".to_string(), "Wren the Quiet".to_string()];
+    let mut rng = Pcg32::new(3, 1);
+    let mut twin = rng.clone();
+    let name = pack.hero_name_unique(&mut rng, &both);
+    let mut last = String::new();
+    for _ in 0..HERO_NAME_TRIES {
+        last = pack.hero_name(&mut twin);
+    }
+    assert_eq!(name, format!("{last} II"));
+    assert_eq!(rng, twin, "the numeral rule draws nothing more");
+    // A name already numbered counts: the next one is III.
+    let mut three = both.clone();
+    three.push(format!("{last} II"));
+    let mut rng = Pcg32::new(3, 1);
+    assert_eq!(
+        pack.hero_name_unique(&mut rng, &three),
+        format!("{last} III")
+    );
+
+    // A free first draw is kept as it is, after one draw.
+    let mut rng = Pcg32::new(3, 1);
+    let mut twin = rng.clone();
+    let first = pack.hero_name_unique(&mut rng, &[]);
+    assert_eq!(first, pack.hero_name(&mut twin));
+    assert_eq!(rng, twin);
+}
+
+#[test]
+fn the_roman_numerals_run_from_two_to_thirty_two() {
+    assert_eq!(ROMAN.len(), 31);
+    assert_eq!(
+        [ROMAN[0], ROMAN[2], ROMAN[7], ROMAN[8], ROMAN[12], ROMAN[17], ROMAN[30]],
+        ["II", "IV", "IX", "X", "XIV", "XIX", "XXXII"]
+    );
+}

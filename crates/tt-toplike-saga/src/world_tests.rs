@@ -197,14 +197,16 @@ fn an_early_model_ready_waits_for_the_seed_gate() {
     for _ in 0..4 {
         assert_eq!(run.tick(), vec![]);
     }
-    // Tick 5 opens the gate and births the queued dungeon on the model's
-    // chips, seeded from the gate tick's ordinal.
+    // Tick 5 opens the gate and births the queued dungeon on every chip,
+    // with the sage on the model's chip, seeded from the gate tick's
+    // ordinal.
     assert_eq!(run.tick(), vec![born(1, Biome::Dungeon)]);
     let w = run.world();
     assert_eq!(w.born_tick, 5);
-    assert_eq!(w.chips, vec![chip(C2)]);
+    assert_eq!(w.chips, vec![chip(C1), chip(C2), chip(C3)]);
+    assert_eq!(w.sage_chips, vec![chip(C2)]);
     assert_eq!(w.seed, run.seeds.draw(run.ordinal));
-    assert_eq!(w.floors[0], expected_floor(C2, w.seed));
+    assert_eq!(w.floors[1], expected_floor(C2, w.seed));
     // The dungeon belongs to the model: its going away ends it.
     let out = run.event(Event::ModelGone {
         model: EntityKey::model("llama"),
@@ -259,9 +261,14 @@ fn a_queued_model_that_goes_away_is_not_born() {
 }
 
 #[test]
-fn a_model_ready_event_births_a_dungeon_on_its_chips() {
+fn a_model_dungeon_spans_every_chip_with_the_sage_on_its_own() {
+    // The party addendum, section 3.1: a model's dungeon has a floor for
+    // every kept chip, so no chip leaves the view when a model comes up on
+    // part of the box. The sage stands only on the model's own chips.
     let mut run = Run::new(12_000);
     let first = run.start();
+    // A world no model made has no sage chips.
+    assert!(run.world().sage_chips.is_empty());
     // Chips listed out of order, one of them outside the topology.
     let unknown = "0000:09:00.0";
     let out = run.event(Event::ModelReady {
@@ -278,17 +285,14 @@ fn a_model_ready_event_births_a_dungeon_on_its_chips() {
     let w = run.world().clone();
     assert_eq!(w.id, first + 1);
     assert_eq!(w.seed, run.seeds.draw(run.ordinal));
-    assert_eq!(w.chips, vec![chip(C1), chip(C3), chip(unknown)]);
-    // Known chips use their spec; a chip the topology lacks gets the
-    // generic floor. Each floor's seed mixes in its chip key.
-    assert_eq!(w.floors[0], expected_floor(C1, w.seed));
-    assert_eq!(w.floors[1], expected_floor(C3, w.seed));
-    let generic = FloorSpec::generic(&chip(unknown));
-    let key = chip(unknown);
-    assert_eq!(
-        w.floors[2],
-        maze::generate(&generic, w.seed ^ fnv1a64(key.as_str().as_bytes()), 0.0)
-    );
+    // Every kept chip has a floor, in key order; the chip the topology does
+    // not list has none.
+    assert_eq!(w.chips, vec![chip(C1), chip(C2), chip(C3)]);
+    for (i, id) in [C1, C2, C3].iter().enumerate() {
+        assert_eq!(w.floors[i], expected_floor(id, w.seed), "{id}");
+    }
+    // The sage stands on the model's chips that have a floor, in key order.
+    assert_eq!(w.sage_chips, vec![chip(C1), chip(C3)]);
     // The same model reporting ready again does not rebuild its world.
     let again = run.event(Event::ModelReady {
         model: EntityKey::model("llama"),
@@ -296,6 +300,23 @@ fn a_model_ready_event_births_a_dungeon_on_its_chips() {
     });
     assert_eq!(again, vec![]);
     assert_eq!(run.world().id, first + 1);
+    assert_eq!(run.world().sage_chips, vec![chip(C1), chip(C3)]);
+
+    // A model that names no chips could be on any of them: its sage stands
+    // on every floor.
+    run.event(Event::ModelReady {
+        model: EntityKey::model("anywhere"),
+        chips: vec![],
+    });
+    assert_eq!(run.world().chips, vec![chip(C1), chip(C2), chip(C3)]);
+    assert_eq!(run.world().sage_chips, run.world().chips);
+    // A model's going away ends its dungeon, and the world that follows has
+    // no sage chips.
+    run.event(Event::ModelGone {
+        model: EntityKey::model("anywhere"),
+    });
+    assert_eq!(run.world().chips.len(), 3);
+    assert!(run.world().sage_chips.is_empty());
 }
 
 #[test]
@@ -349,7 +370,9 @@ fn a_reset_ends_the_world_and_a_new_one_follows() {
     assert_eq!(w.born_tick, run.tick);
     assert_ne!(w.seed, old_seed);
     assert_eq!(w.floors.len(), 3);
-    // A reset of a chip outside the world leaves it alone.
+    // A reset of a chip outside the world leaves it alone. A model's
+    // dungeon spans every chip the topology lists, so only a chip the
+    // topology does not list is outside it.
     run.event(Event::ModelReady {
         model: EntityKey::model("llama"),
         chips: vec![chip(C1)],
@@ -357,7 +380,7 @@ fn a_reset_ends_the_world_and_a_new_one_follows() {
     let id = run.world().id;
     assert_eq!(
         run.event(Event::Reset {
-            chips: vec![chip(C3)],
+            chips: vec![chip("0000:09:00.0")],
         }),
         vec![]
     );

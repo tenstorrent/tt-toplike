@@ -889,7 +889,7 @@ fn a_live_tui_its_replay_and_the_digest_tell_one_story() {
     assert_eq!(live.state.world.seed, told.state().world.seed);
     assert_eq!(live.state.world.id, told.state().world.id);
     assert_eq!(live.state.tick, told.state().tick);
-    assert_eq!(live.state.hero.pos, told.state().hero.pos);
+    assert_eq!(live.state.party[0].hero.pos, told.state().party[0].hero.pos);
     assert!(told.state().world.id > 1, "the story ended worlds");
     let want = super::super::digest::digest_log(live_dir.path()).unwrap();
     assert_eq!(want.digest, told.digest());

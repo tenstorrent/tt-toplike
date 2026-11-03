@@ -2188,11 +2188,12 @@ moved it, and each diff is explained by that change:
 | `fix(saga): the seed ring keeps each value's whole 64-bit pattern` | I1 | `quiet.jsonl` and `busy.jsonl` (both modes) and all 8 view frames: every world seed changed. `bringup.jsonl` births no world and did not move. |
 | the I2, I3 and I4 commits | pacemaker, first record, season tag | nothing: the fixtures sweep only chips and never lose the pacemaker, the core tests feed records directly, and the fixtures carry no season tag. |
 | `feat(saga): digest version 2, with a floor on every beat and quest event` (party Task A.2, Nov 3 2026) | the digest encoding: a version item first, a floor on `QuestStarted`, `QuestDone`, `Beat` and each chronicle line, and a member count in the end item | every row, both modes: `quiet`, `bringup`, `busy`, `solo` and `party4`. `bringup` births no world, so only the version item and the end item's count move it. The story print and trace of `solo.jsonl` and all 8 view frames did not move. |
+| `feat(saga): a party, one hero per floor, each with its own hooks and generator` (party Task A.3, Nov 3 2026) | one member per floor, each with its own hooks, plan generator and quests; a model's dungeon spans every chip, with its sage on the model's chips | `quiet` (3 chips), `busy` (2 chips) and `party4` (4 chips), both modes: the extra members' quests, events and end-item triples, and in `busy` `demo-scribe`'s dungeon gained chip B's floor. The 8 busy view frames and the two 70x16 panel frames: chip B's member writes quest beats into the chronicle they show, and shares the chronicle's generator. `bringup` (no world) and `solo` (one chip) did not move; the solo story print, trace and frames and the two 20x6 panel frames did not move. |
 
-Pinned now (digest version 2): `quiet.jsonl` 0x72af063987e6e20f (both modes), `bringup.jsonl`
-0x88bb8d2b104511c3 (both), `busy.jsonl` 0xdcf06ed096288f90 (real) and 0xb1487e977ac6bc22
-(generated), `solo.jsonl` 0xe9ed5f1dae160dfa and 0x5a73462b53067a2a, `party4.jsonl`
-0x219ccb84610ebdec and 0x8a36b896111d0fa7.
+Pinned now (digest version 2, with the party): `quiet.jsonl` 0x57bb527c7d770f78 (both modes),
+`bringup.jsonl` 0x88bb8d2b104511c3 (both), `busy.jsonl` 0x27b23f19be60e618 (real) and
+0xf12a947d3b84637c (generated), `solo.jsonl` 0xe9ed5f1dae160dfa and 0x5a73462b53067a2a,
+`party4.jsonl` 0x15d5369d05d95a20 and 0x7ae86aff392d98cc.
 
 ### Checking the contract with the binary
 
