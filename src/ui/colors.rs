@@ -30,9 +30,12 @@ use ratatui::style::Color;
 
 /// Check if terminal supports true color (RGB)
 ///
-/// Returns false if:
-/// - In tmux (often has RGB rendering issues, especially via macOS Terminal.app)
-/// - COLORTERM is not set to truecolor/24bit
+/// `COLORTERM=truecolor` (or `24bit`) is the opt-in, and it applies inside
+/// tmux too: tmux passes the variable through from the outer terminal, and
+/// `set -as terminal-features ',*:RGB'` in `tmux.conf` lets it pass the
+/// colours. Without the opt-in, every terminal gets 256 colours, tmux
+/// included: macOS Terminal.app over SSH draws truecolor through tmux with
+/// artifacts, and it does not set `COLORTERM`.
 pub fn supports_true_color() -> bool {
     // A test can pin the answer for its own thread (`with_truecolor`), so a test
     // that pins output does not depend on the COLORTERM of the machine.
@@ -40,19 +43,14 @@ pub fn supports_true_color() -> bool {
     if let Some(forced) = FORCED_TRUECOLOR.with(std::cell::Cell::get) {
         return forced;
     }
-    // Disable RGB in tmux - use 256-color mode instead
-    // This fixes rendering issues with Terminal.app on macOS via SSH
-    let in_tmux = std::env::var("TMUX").is_ok()
-        || std::env::var("TERM").unwrap_or_default().contains("screen");
+    truecolor_from(std::env::var("COLORTERM").ok().as_deref())
+}
 
-    if in_tmux {
-        return false;
-    }
-
-    // Check COLORTERM for true color support
-    std::env::var("COLORTERM")
-        .map(|v| v == "truecolor" || v == "24bit")
-        .unwrap_or(false)
+/// The truecolor rule, given `COLORTERM`. Tmux needs no case of its own: the
+/// variable is the opt-in, so a tmux without it gets 256 colours by the same
+/// test as any other terminal that does not claim truecolor.
+fn truecolor_from(colorterm: Option<&str>) -> bool {
+    matches!(colorterm, Some("truecolor" | "24bit"))
 }
 
 #[cfg(test)]
@@ -495,6 +493,48 @@ pub fn temp_to_hue(temp_c: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule is `COLORTERM` alone: tmux is not a case of its own, so a
+    /// tmux with the opt-in gets RGB and a tmux without it gets 256 colours.
+    #[test]
+    fn truecolor_follows_colorterm_alone() {
+        assert!(truecolor_from(Some("truecolor")));
+        assert!(truecolor_from(Some("24bit")));
+        assert!(!truecolor_from(None));
+        assert!(!truecolor_from(Some("")));
+        assert!(!truecolor_from(Some("256color")));
+        assert!(!truecolor_from(Some("TRUECOLOR")));
+    }
+
+    /// The wiring, not only the rule: with `$TMUX` set and `COLORTERM` as the
+    /// opt-in, the public function answers yes. Run in a child so the
+    /// environment change cannot reach other tests.
+    #[test]
+    fn supports_true_color_reads_colorterm_inside_tmux() {
+        if std::env::var_os("TT_TOPLIKE_COLORS_CHILD").is_some() {
+            assert!(supports_true_color(), "tmux + COLORTERM=truecolor");
+            return;
+        }
+        let exe = std::env::current_exe().unwrap();
+        let run = |colorterm: Option<&str>| {
+            let mut c = std::process::Command::new(&exe);
+            c.args([
+                "--exact",
+                "ui::colors::tests::supports_true_color_reads_colorterm_inside_tmux",
+                "--nocapture",
+            ])
+            .env("TT_TOPLIKE_COLORS_CHILD", "1")
+            .env("TMUX", "/tmp/tmux-1000/default,1,0")
+            .env("TERM", "screen-256color")
+            .env_remove("COLORTERM");
+            if let Some(v) = colorterm {
+                c.env("COLORTERM", v);
+            }
+            c.output().unwrap().status.success()
+        };
+        assert!(run(Some("truecolor")), "opt-in applies inside tmux");
+        assert!(!run(None), "no opt-in: tmux stays at 256 colours");
+    }
 
     #[test]
     fn test_temp_color() {

@@ -1,3 +1,13 @@
+tt-toplike (0.16.2) noble; urgency=medium
+
+  * tmux no longer forces 256 colours. COLORTERM=truecolor (or 24bit) turns
+    on full colour inside tmux as it does outside it. Without that variable
+    every terminal, tmux included, still gets 256 colours, so macOS
+    Terminal.app over SSH keeps its safe behaviour. For full colour in tmux,
+    add: set -as terminal-features ',*:RGB'
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 12:00:00 -0800
+
 tt-toplike (0.16.1) noble; urgency=medium
 
   * Saga has a new look; the story and its digests are unchanged. Walls are

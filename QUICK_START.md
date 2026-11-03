@@ -1,6 +1,6 @@
 # tt-toplike Quick Start
 
-**Version**: 0.16.1
+**Version**: 0.16.2
 **Last Updated**: November 3, 2026
 
 ---
@@ -251,7 +251,15 @@ tt-toplike --mock --mock-devices 2   # or fully simulated, to verify the binary 
 
 ### tmux / SSH terminal colors
 tt-toplike uses `Color::Reset` backgrounds throughout — no grey boxes.
-For best results, ensure your terminal emulator supports 24-bit color.
+It draws in 24-bit color when `COLORTERM` is `truecolor` or `24bit`, inside tmux too, and in 256
+colors otherwise. For full color in tmux, use a terminal that supports it and add this to
+`~/.tmux.conf`:
+
+```
+set -as terminal-features ',*:RGB'
+```
+
+macOS Terminal.app does not set `COLORTERM`, so it stays on 256 colors.
 
 ### Board labels look wrong
 If you have independent PCIe cards (p150a, n150) and see "Board 0 → [Dev0, Dev1]"

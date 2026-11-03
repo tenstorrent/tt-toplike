@@ -17,6 +17,12 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.16.2
+- tmux no longer forces 256 colours. `COLORTERM=truecolor` (or `24bit`) now turns on full colour
+  inside tmux too, as it does outside it. Without that variable every terminal, tmux included, still
+  gets 256 colours, so macOS Terminal.app over SSH keeps its safe behaviour. For full colour in tmux,
+  add `set -as terminal-features ',*:RGB'` to `~/.tmux.conf`.
+
 ### 0.16.1
 - Saga has a new look. Walls are drawn as lines: thin inside a floor, double on its outer shell, with
   solid rock left blank, so rooms and corridors stand out. The hero carries a light: the map shows what
