@@ -379,6 +379,7 @@ mod tests {
             bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
+            saga_digest: false,
             entity: None,
             signal: None,
         };

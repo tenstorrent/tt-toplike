@@ -57,6 +57,19 @@ fn main() {
     // piped. Exit 1 when the log cannot be read or the output fails, other
     // than a closed pipe.
     if let Some(path) = &cli.bus_inspect {
+        // --saga-digest: the saga the log tells, as one number, in place of
+        // the summary. Same output and exit rules as the summary.
+        if cli.saga_digest {
+            let stdout = std::io::stdout();
+            let mut out = std::io::BufWriter::new(stdout.lock());
+            let code =
+                tt_toplike::saga::digest::digest_command(path, &mut out, &mut std::io::stderr());
+            drop(out);
+            if code != 0 {
+                std::process::exit(code);
+            }
+            return;
+        }
         let filter = tt_toplike_bus::inspect::Filter {
             entity: cli.entity.clone(),
             signal: cli.signal.clone(),

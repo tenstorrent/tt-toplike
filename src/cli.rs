@@ -394,6 +394,22 @@ pub struct Cli {
     #[arg(long, requires = "mock")]
     pub mock_workloads: bool,
 
+    /// With `--bus-inspect`: print the Saga digest of the log in place of
+    /// the summary, then exit.
+    ///
+    /// Feeds every record to a fresh saga (replay label, real names, the
+    /// default 20-minute season) and prints `saga digest: 0x<16 hex digits>`
+    /// with the worlds born and beats written. The same records in the same
+    /// order give the same digest, whatever their sequence numbers and
+    /// times, so a log and a replay of it print the same line. See
+    /// docs/saga.md.
+    #[arg(
+        long,
+        requires = "bus_inspect",
+        conflicts_with_all = ["entity", "signal"]
+    )]
+    pub saga_digest: bool,
+
     /// With `--bus-inspect`: show only this entity, for example `chip:0000:01:00.0`.
     #[arg(long, value_name = "KEY", requires = "bus_inspect")]
     pub entity: Option<String>,
@@ -868,6 +884,7 @@ impl Cli {
             bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
+            saga_digest: false,
             entity: None,
             signal: None,
         }
@@ -1003,7 +1020,7 @@ impl Cli {
             if let Some(name) = other {
                 return Err(format!(
                     "--bus-inspect prints a summary and exits, so it cannot be combined \
-                     with {name}. Only --entity and --signal go with it"
+                     with {name}. Only --entity, --signal and --saga-digest go with it"
                 ));
             }
         }
@@ -1161,6 +1178,7 @@ mod tests {
             bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
+            saga_digest: false,
             entity: None,
             signal: None,
         };
@@ -1213,6 +1231,7 @@ mod tests {
             bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
+            saga_digest: false,
             entity: None,
             signal: None,
         };
@@ -1260,6 +1279,7 @@ mod tests {
             bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
+            saga_digest: false,
             entity: None,
             signal: None,
         };
@@ -1307,6 +1327,7 @@ mod tests {
             bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
+            saga_digest: false,
             entity: None,
             signal: None,
         };
@@ -1358,6 +1379,7 @@ mod tests {
             bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
+            saga_digest: false,
             entity: None,
             signal: None,
         };
@@ -1402,6 +1424,7 @@ mod tests {
             bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
+            saga_digest: false,
             entity: None,
             signal: None,
         };
@@ -1449,6 +1472,7 @@ mod tests {
             bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
+            saga_digest: false,
             entity: None,
             signal: None,
         };
@@ -1505,6 +1529,7 @@ mod tests {
             bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
+            saga_digest: false,
             entity: None,
             signal: None,
         };
@@ -1549,6 +1574,7 @@ mod tests {
             bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
+            saga_digest: false,
             entity: None,
             signal: None,
         };
@@ -1595,6 +1621,7 @@ mod tests {
             bus_attach: None,
             bus_retain: None,
             mock_workloads: false,
+            saga_digest: false,
             entity: None,
             signal: None,
         }
@@ -1933,6 +1960,37 @@ mod tests {
         let cli = parse(&["--bus-inspect", "x", "--replay", "y"]).unwrap();
         let e = cli.validate().unwrap_err();
         assert!(e.contains("--bus-inspect") && e.contains("--replay"), "{e}");
+    }
+
+    /// `--saga-digest` goes with `--bus-inspect` only, so it is refused with
+    /// the same live-mode flags `--bus-inspect` refuses. It replaces the
+    /// summary, so the summary's filters do not go with it.
+    #[test]
+    fn saga_digest_needs_bus_inspect_and_no_filters() {
+        let cli = parse(&["--bus-inspect", "/tmp/rec", "--saga-digest"]).unwrap();
+        assert!(cli.saga_digest);
+        assert!(cli.validate().is_ok());
+        assert!(!parse(&["--bus-inspect", "x"]).unwrap().saga_digest);
+
+        assert!(parse(&["--saga-digest"]).is_err(), "--saga-digest alone");
+        for filter in [&["--entity", "chip:x"][..], &["--signal", "s"]] {
+            let mut args = vec!["--bus-inspect", "x", "--saga-digest"];
+            args.extend_from_slice(filter);
+            assert!(parse(&args).is_err(), "{filter:?}");
+        }
+        for live in [
+            &["--replay", "y"][..],
+            &["--record", "y"],
+            &["--remote", "10.0.0.5:8000"],
+            &["--print"],
+            &["--bench"],
+        ] {
+            let mut args = vec!["--bus-inspect", "x", "--saga-digest"];
+            args.extend_from_slice(live);
+            let refused = parse(&args).map_or(true, |c| c.validate().is_err());
+            assert!(refused, "{live:?}");
+        }
+        assert!(parse(&["--bus-inspect", "x", "--saga-digest", "--headless"]).is_err());
     }
 
     // ---- headless and bus host flags (Task 10a) -----------------------------

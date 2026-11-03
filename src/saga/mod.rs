@@ -11,8 +11,11 @@
 //!   publishes its state for the view ([`SagaDriver`]).
 //! * [`start_for_tui`] starts the TUI's driver at start-up (ledger ruling
 //!   R24), and [`start`] holds the decision it makes.
+//! * [`digest`] is `--bus-inspect DIR --saga-digest`: the saga a recorded
+//!   log tells, as one number, to check the determinism contract.
 
 pub mod config;
+pub mod digest;
 pub mod driver;
 
 pub use config::saga_config;
