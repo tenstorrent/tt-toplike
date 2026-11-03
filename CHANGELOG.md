@@ -17,6 +17,18 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.15.5
+- The backdrop applies only to the views that carry one of their own: the Inference view (scene), the
+  Training view (sky) and the Wafer Waffler (clouds). Each still takes any of the three kinds or off. Every
+  other view, the arcade among them, carries no backdrop: `w` and `/backdrop` there say "no backdrop on
+  this view" and change nothing.
+- The arcade draws nothing behind its panels, and its `c` key is gone. `now-serving` no longer turns on
+  clouds; its Wafer Waffler panel draws its own clouds as before.
+- `[arcade] cloudfield`, a layout's `backdrop` or `cloudfield`, `/arcade cloudfield`, a `[backdrop.views]`
+  entry for a view that takes none, and a `[backdrop] default` other than off are read and ignored, with a
+  note on the status line and in `--check-config`. None of them is an error.
+- `--check-config` prints `arcade starts with NAME: N rows`.
+
 ### 0.15.4
 - Shared backdrop: any view can draw a signal-driven background (`scene`, `sky` or `clouds`) behind its
   content. `w` cycles the current view's backdrop, `/backdrop` sets it, `[backdrop]` in `config.toml` sets

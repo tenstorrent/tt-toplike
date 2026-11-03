@@ -1,3 +1,21 @@
+tt-toplike (0.15.5) noble; urgency=medium
+
+  * The backdrop applies only to the views that carry one of their own:
+    the Inference view (scene), the Training view (sky) and the Wafer
+    Waffler (clouds). Each still takes any of the three kinds or off. Every
+    other view, the arcade among them, carries no backdrop; w and /backdrop
+    there say "no backdrop on this view" and change nothing.
+  * The arcade draws nothing behind its panels, and its c key is gone.
+    now-serving no longer turns on clouds; its Wafer Waffler panel draws
+    its own clouds as before.
+  * [arcade] cloudfield, a layout's backdrop or cloudfield, /arcade
+    cloudfield, a [backdrop.views] entry for a view that takes none, and a
+    [backdrop] default other than off are read and ignored with a note.
+    None of them is an error.
+  * --check-config prints "arcade starts with NAME: N rows".
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 23:00:00 -0800
+
 tt-toplike (0.15.4) noble; urgency=medium
 
   * A shared backdrop. Any view can draw a signal-driven background behind

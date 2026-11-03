@@ -1485,6 +1485,11 @@ the point (and still fun!)", plus renaming Die 3D to a fun name the user liked, 
   speed and density drivers, docs/bus.md's "the other views read what they read before", README's
   "the arcade hero duel reads the local monitor".
 
+### Version history: 0.15.5 (Nov 2 2026)
+
+0.15.5 limits the shared backdrop to the Inference view, the Training view and the Wafer Waffler
+(`backdrop::accepts`); the arcade carries none.
+
 ### The backdrop only where a view carries one (Nov 2 2026, branch `preview`)
 
 Prompt: "disable the cloud layer behind the arcade mode. only apply it to modules that already
