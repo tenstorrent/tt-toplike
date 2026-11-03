@@ -468,11 +468,13 @@ holds something other than a socket is refused and never deleted.
 
 ```
 -> {"op":"snapshot"}
-<- {"seq":1124,"instance":962515043239013896,"kind":"Live","host":"box/d2813cb6e53f8ec0","backend":"hybrid","mode":"live","world":{...}}
+<- {"seq":1124,"instance":962515043239013896,"kind":"Live","host":"box/d2813cb6e53f8ec0","backend":"hybrid","mode":"live","tags":{"backend":"hybrid","mode":"live","saga.season_ticks":"12000","tt-toplike-bus":"0.1.0"},"world":{...}}
 ```
 
 The reply is one line. `seq` is the sequence number the world is current to. The world holds
 every record up to `seq` and none after it. The `world` object is the summary described below.
+`tags` carries every header tag of the server's bus. A host that runs the saga, or serves TUIs
+that do, records its season there as `saga.season_ticks`. Older servers send no `tags`.
 
 ### raw
 

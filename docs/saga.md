@@ -107,7 +107,8 @@ worlds born: 1, beats written: 6, records: 6813 (skipped 0 bad lines), holes: 0
 ```
 
 That output is from a 12-second `--headless --mock` recording. The digest uses the replay label,
-real names and the default 20-minute season, so the reader's own config does not change it.
+real names and the season the log's header records (see "Config"), so the reader's own config does
+not change it.
 Record a run, replay it into a second recording with `--replay`, and the two recordings print the
 same digest. A live saga labels its first line "(mock)" or not at all, and the digest's saga
 labels it "(replay)", so a live saga's own digest differs from this one on the same records. Exit
@@ -149,9 +150,15 @@ season_minutes = 30
 ```
 
 The story runs from start-up whether or not the view is on screen, so it has no gaps. Minutes become
-sweeps with `--interval` on a TUI that hosts its own bus. A TUI attached to a headless host assumes
-10 sweeps a second. `tt-toplike --check-config` prints the saga's settings and every problem in the
-section.
+ticks with `--interval` (one tick per backend update), and the host that opens the bus writes the
+result into the bus header as the tag `saga.season_ticks`. A headless host reads `[saga]` for this
+too. Every saga that reads the bus takes its season from that tag: the TUI's own, a TUI attached to
+a headless host, a `--replay` of the recording (a replay host copies the recorded tag), and
+`--saga-digest`. So a recording made with `season_minutes = 5` or `--interval 200` tells the same
+story when it is replayed or digested on a box with other settings. A log recorded before the tag
+existed uses the default, 20 minutes at 10 updates a second; an attached TUI whose host is too old
+to send the tag uses its own config at 10 updates a second. `tt-toplike --check-config` prints the
+saga's settings and every problem in the section.
 
 ## Privacy
 
@@ -169,8 +176,8 @@ section.
 * No person has run Saga on real Tenstorrent hardware yet. It has run on the mock backend and on
   recorded fixtures.
 * Generated-name aliasing was checked on the busy fixture only.
-* A TUI attached to a headless host counts 10 sweeps a second for the season, whatever the host's
-  interval.
+* A log directory reused by sessions with different seasons keeps the first segment's tag, so
+  `--saga-digest` and `--replay` of the whole directory use the oldest session's season.
 * Monsters, treasure, fights, the hero's death and descendants, and the `saga.*` bus events come in
   phase 2.
 * The hero cannot be steered yet (phase 3).

@@ -612,3 +612,203 @@ fn the_driver_thread_runs_at_lowered_priority() {
     assert_eq!(d.thread_nice(), Some(want));
     d.stop();
 }
+
+/// A season that differs from the default: 1 minute at a 300 ms interval,
+/// 200 ticks. The busy fixture has quiet stretches longer than that, so
+/// worlds end by season under it and not under the default 12,000.
+fn short_season_tags() -> std::collections::BTreeMap<String, String> {
+    let s = crate::config::SagaSettings {
+        season_minutes: 1,
+        ..Default::default()
+    };
+    let mut tags = std::collections::BTreeMap::new();
+    tags.insert("backend".to_string(), "mock".to_string());
+    tags.insert("mode".to_string(), "mock".to_string());
+    super::super::config::write_season_tag(&mut tags, &s, 300);
+    assert_eq!(tags[crate::config::SAGA_SEASON_TAG], "200");
+    tags
+}
+
+/// The caller's config: the default 12,000-tick season, as a TUI whose
+/// own `[saga]` section is empty passes.
+fn default_cfg() -> SagaConfig {
+    SagaConfig {
+        season_ticks: super::super::config::default_season_ticks(),
+        ..cfg()
+    }
+}
+
+/// Waits for a replay host to finish playing. The wait is bounded by
+/// [`WAIT`]; nothing is asserted about how long it took.
+fn wait_replayed(host: &crate::bus::host::BusHost) -> u64 {
+    let step = Duration::from_millis(20);
+    for _ in 0..(WAIT.as_millis() / step.as_millis()) {
+        if let Some(r) = host.replay_result() {
+            return r.expect("the replay plays");
+        }
+        std::thread::sleep(step);
+    }
+    panic!("the replay never finished");
+}
+
+/// The season is in the log: a live saga, a replay of its recording and
+/// `--saga-digest` of either recording all use the season the live host
+/// wrote into its header, whatever the reader's own config says (final
+/// review finding I4).
+#[test]
+fn live_replay_and_digest_agree_on_a_recorded_season() {
+    use crate::bus::host::BusHost;
+    let records = busy_records();
+    let short = SagaConfig {
+        season_ticks: 200,
+        ..cfg()
+    };
+    // The short season must change the story, or this test proves nothing.
+    let feed = |c: SagaConfig| {
+        let mut saga = Saga::new(c);
+        for r in &records {
+            saga.feed(r);
+        }
+        saga.digest()
+    };
+    assert_ne!(feed(short), feed(default_cfg()));
+
+    // Live: a host that wrote the short season, and a driver handed the
+    // default config.
+    let live_dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(0);
+    let bus = Bus::open(BusConfig {
+        dir: Some(live_dir.path().to_path_buf()),
+        clock: clock.clone(),
+        header_tags: short_season_tags(),
+        ..BusConfig::default()
+    })
+    .unwrap();
+    publish_all(&bus, &records);
+    let head = bus.head();
+    let d = SagaDriver::spawn(bus.clone(), default_cfg()).unwrap();
+    assert!(wait_published(&d, &clock, |p| p.through == head));
+    let mock_short = SagaConfig {
+        label: Label::Mock,
+        ..short
+    };
+    assert_eq!(d.published().digest, reference_digest(&bus, mock_short));
+    d.stop();
+    assert!(bus.flush(WAIT));
+    drop(bus);
+
+    // The digest of the live recording.
+    let want = super::super::digest::digest_log(live_dir.path()).unwrap();
+    let replay_short = SagaConfig {
+        label: Label::Replay,
+        ..short
+    };
+    assert_eq!(want.digest, feed(replay_short));
+
+    // A replay of it, recorded again, with a driver handed the default.
+    let replay_dir = tempfile::tempdir().unwrap();
+    let clock = ManualClock::new(0);
+    let host = BusHost::replay(
+        live_dir.path(),
+        1.0e9,
+        BusConfig {
+            dir: Some(replay_dir.path().to_path_buf()),
+            clock: clock.clone(),
+            ..BusConfig::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(wait_replayed(&host), records.len() as u64);
+    let head = host.bus().head();
+    let d = SagaDriver::spawn(host.bus().clone(), default_cfg()).unwrap();
+    assert!(wait_published(&d, &clock, |p| p.through == head));
+    assert_eq!(d.published().digest, want.digest, "replay and digest");
+    d.stop();
+    assert!(host.bus().flush(WAIT));
+    drop(host);
+    let again = super::super::digest::digest_log(replay_dir.path()).unwrap();
+    assert_eq!(
+        again.digest, want.digest,
+        "the replay's recording keeps the season"
+    );
+}
+
+/// A log recorded before the tag existed tells the default season to every
+/// reader: `--saga-digest`, and a replay of it whatever the replaying TUI's
+/// own config says.
+#[test]
+fn a_log_without_the_tag_uses_the_default_season() {
+    use crate::bus::host::BusHost;
+    let records = busy_records();
+    let old_dir = tempfile::tempdir().unwrap();
+    let bus = Bus::open(BusConfig {
+        dir: Some(old_dir.path().to_path_buf()),
+        ..BusConfig::default()
+    })
+    .unwrap();
+    publish_all(&bus, &records);
+    drop(bus);
+    let want = super::super::digest::digest_log(old_dir.path()).unwrap();
+    let mut saga = Saga::new(SagaConfig {
+        label: Label::Replay,
+        ..default_cfg()
+    });
+    for r in &records {
+        saga.feed(r);
+    }
+    assert_eq!(want.digest, saga.digest());
+
+    // The replaying TUI's own config asks for 200 ticks and its bus config
+    // carries its own tag; the recorded log has none, so the replay uses
+    // the default.
+    let clock = ManualClock::new(0);
+    let host = BusHost::replay(
+        old_dir.path(),
+        1.0e9,
+        BusConfig {
+            clock: clock.clone(),
+            header_tags: short_season_tags(),
+            ..BusConfig::default()
+        },
+    )
+    .unwrap();
+    wait_replayed(&host);
+    let head = host.bus().head();
+    let d = SagaDriver::spawn(host.bus().clone(), cfg()).unwrap();
+    assert!(wait_published(&d, &clock, |p| p.through == head));
+    assert_eq!(d.published().digest, want.digest);
+    d.stop();
+}
+
+/// An attached driver takes the season from the host's snapshot tags.
+#[cfg(unix)]
+#[test]
+fn a_remote_driver_takes_the_season_from_the_snapshot() {
+    use tt_toplike_bus::{SocketClient, SocketServer};
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let bus = Bus::open_with_world(BusConfig {
+        header_tags: short_season_tags(),
+        ..BusConfig::default()
+    })
+    .unwrap();
+    let server = SocketServer::spawn(bus.clone(), &sock).unwrap();
+    let client = SocketClient::connect(&sock).unwrap();
+    let d = SagaDriver::spawn_remote(client, &sock, default_cfg()).unwrap();
+    assert!(d.wait_for(WAIT, |p| p.feeds == 1));
+    let records = busy_records();
+    publish_all(&bus, &records);
+    let head = bus.head();
+    assert!(d.wait_for(WAIT, |p| p.through == head));
+    let want = reference_digest(
+        &bus,
+        SagaConfig {
+            season_ticks: 200,
+            label: Label::Mock,
+            ..cfg()
+        },
+    );
+    assert_eq!(d.published().digest, want);
+    d.stop();
+    drop(server);
+}

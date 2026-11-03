@@ -910,8 +910,29 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // `start_bus_after_panic_hook`). Both before raw mode, so a bus that
     // cannot start (a log directory another process holds, `--bus-attach`
     // to a dead socket) reports on a normal terminal.
-    let bus_opts =
+    // The config file is read here, once, before raw mode: reading it
+    // after `enable_raw_mode` would leave a blank raw-mode screen if the
+    // read ever stalled. `config::read_config_file` reads only a regular
+    // file of at most 256 KiB. Every problem goes to the log and the first
+    // to the status line (see `cmd_message` in `run_app`), and a bad
+    // `[arcade]` keeps the default layout. Pinned by
+    // `config_read_tests::the_config_is_read_before_raw_mode`. It is read
+    // before the bus opens, because the bus header records the saga's
+    // season (below).
+    let mut loaded_config = crate::config::load_config();
+    // `--arcade-layout NAME` wins over `[arcade] layout`.
+    crate::config::choose_layout(&mut loaded_config, cli.arcade_layout.as_deref());
+    let mut bus_opts =
         crate::bus::tui_bus::TuiBusOptions::from_cli(cli, backend_type, &backend.backend_info());
+    // The bus header records the season this TUI's saga uses, in ticks, so
+    // a replay of its recording and `--saga-digest` use the same one (final
+    // review finding I4). A `--replay` host replaces it with the recorded
+    // log's.
+    crate::saga::config::write_season_tag(
+        &mut bus_opts.bus.header_tags,
+        &loaded_config.saga,
+        cli.interval,
+    );
     splash::set_step(splash::Step::StartingBus);
     let mut tui_bus = match start_bus_after_panic_hook(&bus_opts, backend.as_ref()) {
         Ok(b) => b,
@@ -921,17 +942,7 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         }
     };
 
-    // The config file is read here, once, before raw mode: reading it
-    // after `enable_raw_mode` would leave a blank raw-mode screen if the
-    // read ever stalled. `config::read_config_file` reads only a regular
-    // file of at most 256 KiB. Every problem goes to the log and the first
-    // to the status line (see `cmd_message` in `run_app`), and a bad
-    // `[arcade]` keeps the default layout. Pinned by
-    // `config_read_tests::the_config_is_read_before_raw_mode`.
     crate::startup_log::phase("bus started");
-    let mut loaded_config = crate::config::load_config();
-    // `--arcade-layout NAME` wins over `[arcade] layout`.
-    crate::config::choose_layout(&mut loaded_config, cli.arcade_layout.as_deref());
     // The saga's driver runs from start-up, on or off screen, unless
     // `[saga] enabled = false` (ledger ruling R24; see `crate::saga`).
     let saga = crate::saga::start_for_tui(&loaded_config, &tui_bus, cli.interval);
@@ -14558,6 +14569,43 @@ mod bus_wiring_tests {
         // The served bus is a mock run, so the attached label says so.
         assert_eq!(hint, format!("bus: {} (mock)", sock.display()));
         assert!(bar(&b, Some(&hint)).contains(&hint));
+    }
+}
+
+#[cfg(test)]
+mod season_tag_tests {
+    /// The TUI writes the saga's season into its bus header before it opens
+    /// the bus, and the headless host does too (final review finding I4).
+    /// `run_tui` needs a terminal, so the wiring is pinned by its source,
+    /// as `config_read_tests` pins the config read; the tag itself is
+    /// tested in `crate::saga::config` and end to end in the driver tests.
+    #[test]
+    fn both_hosts_record_the_season_before_the_bus_opens() {
+        let src = include_str!("mod.rs");
+        let run_tui = src.find("\npub fn run_tui(").expect("run_tui");
+        let run_app = src.find("\nfn run_app(").expect("run_app");
+        let body = &src[run_tui..run_app];
+        let tag = body
+            .find("write_season_tag(\n        &mut bus_opts.bus.header_tags,")
+            .expect("run_tui writes the season tag into its bus options");
+        let open = body
+            .find("start_bus_after_panic_hook(&bus_opts")
+            .expect("run_tui opens its bus");
+        assert!(tag < open, "the tag is written before the bus opens");
+
+        let bin = include_str!("../../bin/tui.rs");
+        let main = bin
+            .find("\nfn run_headless_main(")
+            .expect("run_headless_main");
+        let body = &bin[main..];
+        let tag = body
+            .find("write_season_tag(")
+            .expect("the headless host writes the season tag");
+        // Both the replay and the live host take their bus config after it.
+        for user in ["let bus = bus_for(false);", "let bus = bus_for(synthetic);"] {
+            let at = body.find(user).expect(user);
+            assert!(tag < at, "{user} comes after the tag is written");
+        }
     }
 }
 

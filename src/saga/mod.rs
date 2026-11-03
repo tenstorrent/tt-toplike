@@ -36,10 +36,11 @@ pub enum SagaSource {
 /// Starts a driver for `source` with the `[saga]` settings `s`, or none
 /// when `[saga] enabled = false` (no thread is started then).
 ///
-/// `interval_ms` is the time between backend sweeps for a local bus; an
-/// attached driver counts 10 ticks a second, because a host's snapshot does
-/// not say its interval. A driver that cannot start is logged and `None`:
-/// the TUI runs without a saga.
+/// `interval_ms` is the time between backend sweeps for a local bus. The
+/// season it gives is only a fallback: a driver takes the season its bus
+/// header records (see [`config::season_for_header`]). An attached driver
+/// whose host is too old to send the tag counts 10 ticks a second. A driver
+/// that cannot start is logged and `None`: the TUI runs without a saga.
 pub fn start(s: &SagaSettings, source: SagaSource, interval_ms: u64) -> Option<SagaDriver> {
     if !s.enabled {
         return None;

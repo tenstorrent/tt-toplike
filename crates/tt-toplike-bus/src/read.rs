@@ -311,6 +311,7 @@ mod tests {
             host: "h".into(),
             backend: "b".into(),
             mode: "replay".into(),
+            tags: Default::default(),
             world: WorldSummary::from_world(&world, now),
         })
         .unwrap();

@@ -63,11 +63,15 @@
 //! (ruling R7). A full state (32 floors, 500 beats) took about 6 us to clone
 //! and its digest about 27 us, in release mode on the development box.
 //!
-//! # Labels
+//! # Labels and seasons
 //!
 //! The saga's label (spec 3.9) comes from the bus header and replaces the
-//! one in the caller's config: see [`label_for`]. A local driver reads it
-//! once from [`Bus::header`]; a remote driver reads it from each snapshot.
+//! one in the caller's config: see [`label_for`]. So does the season, when
+//! the header records one (`saga.season_ticks`, see
+//! [`super::config::season_for_header`]), so a live saga, its replay and
+//! `--saga-digest` of its log end worlds at the same tick. A local driver
+//! reads both once from [`Bus::header`]; a remote driver reads them from
+//! each snapshot.
 //!
 //! # Events
 //!
@@ -106,6 +110,8 @@ use tt_toplike_bus::{
     Bus, Event, HeaderKind, ModelPhase, ModelView, Payload, ReadError, Record, Sample, WorldSummary,
 };
 use tt_toplike_saga::{Label, Saga, SagaConfig, SagaState};
+
+use super::config::season_for_header;
 
 /// Records read from a local bus per [`Bus::read_from`] call.
 pub const BATCH: usize = 512;
@@ -342,11 +348,15 @@ impl std::fmt::Debug for SagaDriver {
 
 impl SagaDriver {
     /// Feed a saga from `bus`, starting at this bus instance's first record
-    /// ([`Bus::first_seq`]), on a new thread. The label comes from the bus header ([`label_for`]) and
-    /// replaces `cfg.label`. Fails only when the thread cannot be started.
+    /// ([`Bus::first_seq`]), on a new thread. The label comes from the bus
+    /// header ([`label_for`]) and replaces `cfg.label`; so does the season
+    /// when the header records one (see [`season_for_header`]). Fails only
+    /// when the thread cannot be started.
     pub fn spawn(bus: Bus, cfg: SagaConfig) -> std::io::Result<SagaDriver> {
+        let h = bus.header();
         let cfg = SagaConfig {
             label: bus_label(&bus),
+            season_ticks: season_for_header(h.kind, &h.tool_versions, cfg.season_ticks),
             ..cfg
         };
         let shared = Arc::new(Shared::new(Feeder::initial(cfg, 1)));
@@ -579,7 +589,7 @@ pub fn snapshot_records(world: &WorldSummary) -> Vec<Record> {
 /// The remote driver (Unix sockets only).
 #[cfg(unix)]
 mod remote {
-    use super::{label_for, snapshot_records, Feeder, Shared};
+    use super::{label_for, season_for_header, snapshot_records, Feeder, Shared};
     use std::path::Path;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -657,6 +667,7 @@ mod remote {
             feeds += 1;
             let cfg = SagaConfig {
                 label: label_for(snap.kind, &snap.backend, &snap.mode),
+                season_ticks: season_for_header(snap.kind, &snap.tags, cfg.season_ticks),
                 ..cfg
             };
             let mut f = Feeder::new(cfg, feeds);

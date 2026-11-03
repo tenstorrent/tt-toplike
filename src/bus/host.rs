@@ -163,9 +163,10 @@ impl BusHost {
     /// Play the recorded log at `path` (a segment file or a directory) into
     /// a new bus, `speed` times faster than recorded, on a background
     /// thread. The bus's header kind is `Replay`; `cfg.header_kind` is
-    /// overridden; the header's `mode` is `replay` and its `backend` the
-    /// recorded log's (or `unknown`). Fails at once when the speed is not above zero, the log
-    /// cannot be opened, or the bus cannot be opened.
+    /// overridden; the header's `mode` is `replay`, its `backend` the
+    /// recorded log's (or `unknown`), and its `saga.season_ticks` the
+    /// recorded log's (or none). Fails at once when the speed is not above
+    /// zero, the log cannot be opened, or the bus cannot be opened.
     pub fn replay(path: &Path, speed: f64, cfg: BusConfig) -> io::Result<BusHost> {
         tt_toplike_bus::replay::check_speed(speed)?;
         let mut log = Replay::open(path)?;
@@ -177,6 +178,18 @@ impl BusHost {
             .unwrap_or_else(|| "unknown".to_string());
         cfg.header_tags.insert("mode".into(), "replay".into());
         cfg.header_tags.entry("backend".into()).or_insert(recorded);
+        // The saga season the recording host used, never the replaying
+        // one's: a replay must end worlds where the live run did (final
+        // review finding I4). A log without the tag gets none, and its
+        // readers use the default season (`crate::saga::config`).
+        cfg.header_tags.remove(crate::config::SAGA_SEASON_TAG);
+        if let Some(season) = log
+            .header()
+            .and_then(|h| h.tool_versions.get(crate::config::SAGA_SEASON_TAG))
+        {
+            cfg.header_tags
+                .insert(crate::config::SAGA_SEASON_TAG.into(), season.clone());
+        }
         let bus = Bus::open_with_world(Replay::configure(cfg))?;
         let mut host = BusHost::empty(bus, GozerSource::fed());
         host.live = false;

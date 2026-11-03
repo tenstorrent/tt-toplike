@@ -41,7 +41,7 @@ fn write_log(records: &[Record]) -> tempfile::TempDir {
 /// What a saga with the command's config tells when fed `records` directly:
 /// the digest, worlds born and beats written.
 fn told(records: &[Record]) -> (u64, u64, u64) {
-    let mut saga = Saga::new(digest_config());
+    let mut saga = Saga::new(digest_config(None));
     let (mut worlds, mut beats) = (0, 0);
     for r in records {
         saga.feed(r);
@@ -56,14 +56,33 @@ fn told(records: &[Record]) -> (u64, u64, u64) {
     (saga.digest(), worlds, beats)
 }
 
-/// The config is fixed: the replay label, real names and the default
-/// 20-minute season at 10 Hz. A reader's own config file cannot move it.
+/// The config depends on the log alone: the replay label, real names, and
+/// the season the header records, or the default 20 minutes at 10 Hz for a
+/// log without one. A reader's own config file cannot move it.
 #[test]
-fn the_config_is_replay_real_names_and_the_default_season() {
-    let c = digest_config();
+fn the_config_is_replay_real_names_and_the_recorded_season() {
+    let c = digest_config(None);
     assert_eq!(c.label, Label::Replay);
     assert_eq!(c.names, NameMode::Real);
     assert_eq!(c.season_ticks, 12_000);
+    let header = |tags: &[(&str, &str)]| tt_toplike_bus::Header {
+        schema: 1,
+        kind: tt_toplike_bus::HeaderKind::Live,
+        tool_versions: tags
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+    };
+    let c = digest_config(Some(&header(&[("saga.season_ticks", "600")])));
+    assert_eq!((c.label, c.season_ticks), (Label::Replay, 600));
+    // No tag, or a tag that is not a whole number above zero: the default.
+    for bad in [
+        &[][..],
+        &[("saga.season_ticks", "0")],
+        &[("saga.season_ticks", "x")],
+    ] {
+        assert_eq!(digest_config(Some(&header(bad))).season_ticks, 12_000);
+    }
 }
 
 /// A log the bus wrote afresh (new sequence numbers and times) gives the

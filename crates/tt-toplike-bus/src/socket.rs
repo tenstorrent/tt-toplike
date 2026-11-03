@@ -30,7 +30,8 @@
 //!   `{"seq":N,"instance":I,"kind":K,"host":H,"backend":B,"mode":M,"world":{...}}`,
 //!   where `K` is the bus's header kind (`Live` or `Replay`), `H` the
 //!   machine's identity ([`crate::ident`]) and `B`, `M` the header's
-//!   `backend` and `mode` tags. The `subscribed` line carries `host`,
+//!   `backend` and `mode` tags. A `tags` object carries every header tag
+//!   (the two above, the bus version, and any a host adds). The `subscribed` line carries `host`,
 //!   `backend` and `mode` too. Older servers send none of them.
 //!   `world` is a [`WorldSummary`]; its fields are documented in
 //!   [`crate::summary`]. `seq` and `world` are taken under one lock, so the
@@ -881,6 +882,7 @@ fn snapshot_line(bus: &Bus) -> Option<String> {
         host: crate::ident::host_identity().to_string(),
         backend: tag("backend"),
         mode: tag("mode"),
+        tags: header.tool_versions.clone(),
         world: WorldSummary::from_world(&snap.world, bus.now_mono_ns()),
     };
     Some(serde_json::to_string(&reply).expect("snapshot encodes"))

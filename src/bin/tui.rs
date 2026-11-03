@@ -438,6 +438,20 @@ fn run_headless_main(cli: &Cli, config: BackendConfig) {
         format!("bus log: {log}; bus socket: {sock}")
     };
     let interval = std::time::Duration::from_millis(cli.interval);
+    // A headless host runs no saga, but the TUIs attached to it and
+    // `--saga-digest` of its log do: its bus header records the season this
+    // box's `[saga]` settings and `--interval` give, in ticks (final review
+    // finding I4). A `--replay` host replaces it with the recorded log's.
+    let saga_settings = tt_toplike::config::load_config().saga;
+    let bus_for = |synthetic: bool| {
+        let mut bus = bus_for(synthetic);
+        tt_toplike::saga::config::write_season_tag(
+            &mut bus.header_tags,
+            &saga_settings,
+            cli.interval,
+        );
+        bus
+    };
 
     // --replay: play a recorded log and serve it. No backend.
     if let Some(path) = &cli.replay {

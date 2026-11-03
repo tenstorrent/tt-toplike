@@ -145,6 +145,12 @@ pub struct RemoteSnapshot {
     /// Empty when absent.
     #[serde(default)]
     pub mode: String,
+    /// Every header tag of the server bus ([`crate::BusConfig::header_tags`]
+    /// plus the `tt-toplike-bus` version), so a client can read a tag the
+    /// fields above do not name (the saga's season length, for one).
+    /// Empty from older servers.
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
     pub world: WorldSummary,
 }
 
@@ -557,6 +563,7 @@ mod tests {
             host: "box/0011223344556677".into(),
             backend: "mock".into(),
             mode: "replay".into(),
+            tags: [("saga.season_ticks".to_string(), "200".to_string())].into(),
             world: WorldSummary::from_world(&snap.world, bus.now_mono_ns()),
         };
         let line = serde_json::to_string(&s).unwrap();
@@ -566,6 +573,16 @@ mod tests {
         assert!(line.contains("\"host\":\"box/0011223344556677\""), "{line}");
         assert!(line.contains("\"mode\":\"replay\""), "{line}");
         assert!(line.contains("\"backend\":\"mock\""), "{line}");
+        assert!(
+            line.contains("\"tags\":{\"saga.season_ticks\":\"200\"}"),
+            "{line}"
+        );
+        // An older server sends no tags: the map is empty.
+        let older = line.replace(",\"tags\":{\"saga.season_ticks\":\"200\"}", "");
+        assert!(serde_json::from_str::<RemoteSnapshot>(&older)
+            .unwrap()
+            .tags
+            .is_empty());
     }
 
     /// A snapshot line from a server that sends no `kind` is read as live.

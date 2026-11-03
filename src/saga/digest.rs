@@ -21,9 +21,11 @@
 //!   ran live under another label wrote another first line, so its digest
 //!   differs from this one even on the same records;
 //! * names are real ([`NameMode::Real`]);
-//! * the season is the `[saga]` default, 20 minutes, at the default
-//!   10 Hz sweep ([`super::config::season_ticks`] with no interval: the
-//!   log's header does not record one).
+//! * the season is the one the log's header records (the tag
+//!   `saga.season_ticks`, which the host that recorded it wrote from its
+//!   own `[saga]` settings and `--interval`). A log recorded before the tag
+//!   existed uses the default, 20 minutes at 10 Hz
+//!   ([`super::config::default_season_ticks`]).
 //!
 //! # Output and exit status
 //!
@@ -41,10 +43,9 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use tt_toplike_bus::replay::Replay;
+use tt_toplike_bus::Header;
 use tt_toplike_saga::chronicle::NameMode;
 use tt_toplike_saga::{Label, Saga, SagaConfig, SagaEvent};
-
-use crate::config::SagaSettings;
 
 /// What the saga told about one log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,12 +64,15 @@ pub struct Digest {
     pub holes: usize,
 }
 
-/// The saga config the command uses. See "The saga it runs" in the module
-/// comment.
-pub fn digest_config() -> SagaConfig {
-    let settings = SagaSettings::default();
+/// The saga config the command uses for a log whose first header is
+/// `header` (`None` when it has no valid one). See "The saga it runs" in
+/// the module comment.
+pub fn digest_config(header: Option<&Header>) -> SagaConfig {
+    let season_ticks = header
+        .and_then(|h| super::config::season_from_tags(&h.tool_versions))
+        .unwrap_or_else(super::config::default_season_ticks);
     SagaConfig {
-        season_ticks: super::config::season_ticks(settings.season_minutes, None),
+        season_ticks,
         names: NameMode::Real,
         label: Label::Replay,
     }
@@ -79,7 +83,7 @@ pub fn digest_config() -> SagaConfig {
 /// lines and holes are counted and skipped, as a replay skips them.
 pub fn digest_log(path: &Path) -> io::Result<Digest> {
     let mut replay = Replay::open(path)?;
-    let mut saga = Saga::new(digest_config());
+    let mut saga = Saga::new(digest_config(replay.header()));
     let (mut worlds_born, mut beats_written, mut records) = (0u64, 0u64, 0u64);
     for rec in replay.records() {
         saga.feed(&rec);

@@ -1016,6 +1016,7 @@ fn snap_line(seq: u64, instance: u64, sig: &str) -> String {
         host: String::new(),
         backend: String::new(),
         mode: String::new(),
+        tags: Default::default(),
         world: w,
     })
     .unwrap()

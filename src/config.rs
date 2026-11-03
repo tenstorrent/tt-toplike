@@ -198,6 +198,11 @@ pub const SAGA_SEASON_MIN: u32 = 1;
 pub const SAGA_SEASON_MAX: u32 = 1440;
 /// The season when the file sets none (spec 3.5: 12,000 ticks at 10 Hz).
 pub const SAGA_SEASON_DEFAULT: u32 = 20;
+/// The bus header tag that records a saga season in ticks (final review
+/// finding I4). A host writes it when it opens its bus, a replay host
+/// carries the recorded log's value forward, and every saga reader takes
+/// its season from it. See `crate::saga::config`.
+pub const SAGA_SEASON_TAG: &str = "saga.season_ticks";
 
 /// The `[saga]` section. The root crate turns it into the saga core's own
 /// config with `crate::saga::saga_config`, which converts the minutes into
