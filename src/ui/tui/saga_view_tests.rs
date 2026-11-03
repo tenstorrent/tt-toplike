@@ -514,6 +514,47 @@ fn generated_mode_shows_no_real_name() {
     );
 }
 
+// ---- The chronicle -----------------------------------------------------------
+
+/// The pane shows whole beats: the first row under the header with text is
+/// a beat's first row (it starts with its tick), so no cut-off tail of an
+/// older beat sits at the top. Checked at every hundredth state of the busy
+/// log, with "why" off and on, at two sizes.
+#[test]
+fn the_chronicle_shows_whole_beats() {
+    tc(|| {
+        let mut saga = Saga::new(config(NameMode::Real, Label::Mock));
+        for (i, r) in busy().iter().enumerate() {
+            saga.feed(r);
+            if i % 100 != 0 || !saga.state().has_world() {
+                continue;
+            }
+            for why in [false, true] {
+                let flags = SagaFlags {
+                    stopped: false,
+                    why,
+                };
+                for size in [(80, 23), (140, 39)] {
+                    let t = text(&render_saga(saga.state(), flags, size, 0));
+                    let head = t.iter().position(|l| l.contains("CHRONICLE")).unwrap();
+                    // In the side layout the pane starts after the map pane.
+                    let col = t[head].find("╔").unwrap();
+                    let first = t[head + 1..t.len() - 1]
+                        .iter()
+                        .map(|l| l.get(col..).unwrap_or("").trim_start_matches("║ "))
+                        .find(|s| !s.trim().is_empty() && *s != "║");
+                    if let Some(first) = first {
+                        assert!(
+                            first.starts_with('t'),
+                            "record {i} {size:?} why {why}: the pane starts with {first:?}"
+                        );
+                    }
+                }
+            }
+        }
+    });
+}
+
 // ---- Why ---------------------------------------------------------------------
 
 /// "why" puts each beat's cause under it: the entity, the signal and the
@@ -683,12 +724,12 @@ fn golden_frames() -> Vec<u64> {
 const GOLDEN: [u64; 8] = [
     17747875752450834049,
     8173874115476919137,
-    913023669645221950,
+    9729913553127627753,
     3579161061891527866,
     15336144298665871893,
     4379483890101020010,
-    5932435393196221949,
-    5108894460676612602,
+    10166685013815897719,
+    14900404724890073878,
 ];
 
 /// Prints the hashes for [`GOLDEN`]. Run with

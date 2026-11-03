@@ -23,7 +23,7 @@
 //!   draws the sage's `&` there. A floor larger than the pane (floors are
 //!   at most 120 x 60 cells) scrolls to keep the hero in view; a smaller one
 //!   is centred across the pane and drawn from the top.
-//! * **Chronicle.** The newest beats, newest at the bottom, each in its
+//! * **Chronicle.** The newest whole beats, newest at the bottom, each in its
 //!   tone's colour (teal calm, orange tense, yellow triumphant) after its
 //!   tick in a dim colour. With "why" on (`y`, spec 5) each beat is
 //!   followed by its cause: the entity, the signal and the record's
@@ -711,11 +711,17 @@ fn chronicle_rows(
     // Text width after the bar.
     let text_w = cols.saturating_sub(BAR.chars().count());
     let want = rows - 1;
-    // Newest first: each beat's rows, until the pane is full.
+    // Newest first: each beat's rows, while the whole beat fits, so the
+    // pane never starts with the tail of a cut-off beat. The newest beat is
+    // always shown; when it alone is taller than the pane it loses its
+    // first rows.
     let mut blocks: Vec<Vec<Row>> = Vec::new();
     let mut have = 0;
     for beat in newest_first(state, want) {
         let block = beat_rows(beat, flags, look, cols, text_w);
+        if !blocks.is_empty() && have + block.len() > want {
+            break;
+        }
         have += block.len();
         blocks.push(block);
         if have >= want {
@@ -723,7 +729,6 @@ fn chronicle_rows(
         }
     }
     let mut body: Vec<Row> = blocks.into_iter().rev().flatten().collect();
-    // The oldest beat shown may lose its first rows.
     let cut = body.len().saturating_sub(want);
     body.drain(..cut);
     if body.is_empty() && want > 0 {
