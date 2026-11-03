@@ -1,6 +1,6 @@
 # tt-toplike Quick Start
 
-**Version**: 0.15.5
+**Version**: 0.16.0
 **Last Updated**: November 2, 2026
 
 ---
@@ -105,6 +105,14 @@ tt-toplike --mode training    # or press t in any mode (aliases: train, tt-train
 - `Esc` backs out to where you came from. Deliberately excluded from the `v` cycle, like `i`
 - `--mode training` launches straight into it, for scripts, kiosks and systemd units — it takes no target either way, since the view finds the run itself
 
+### Saga (`S`)
+```bash
+tt-toplike --mode saga    # or press S in any mode
+```
+- A hero quests through a dungeon built from the box's own signals. Each chip is a floor, and a new world begins when a model becomes ready, a chip resets, a model goes away, a training run starts or the box has been quiet for a season
+- The chronicle tells what happens. `y` shows each line's cause: entity, signal and place in the stream
+- `S` or `Esc` leaves. Not in the `v` cycle or the rotation. `[saga]` in `config.toml` sets `enabled`, `names` and `season_minutes`. See [docs/saga.md](docs/saga.md)
+
 ### Rotate every view (`--rotate` / `R`)
 ```bash
 tt-toplike --rotate                     # start rotating immediately
@@ -204,6 +212,7 @@ tt-toplike --host --mode arcade             # your real CPU/RAM in arcade mode (
 | `v` | Cycle visualization modes: Insights → Flow → Starfield → Castle → Arcade → Defrag → Inference → Insights |
 | `i` | Open the Inference Server Monitor from any view; `i` while in it jumps to Insights, `Esc` backs out to where you came from. Also at the tail of the `v` cycle |
 | `t` | Open the Training view from any view — auto-attaches to a running tt-train process with no further input; `Esc` backs out. Excluded from the `v` cycle, like `i` |
+| `S` | Open Saga from any view; `S` or `Esc` leaves, `y` shows each chronicle line's cause |
 | `l` | Toggle legend overlay for the current view |
 | `b` | Cycle backend live: Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them |
 | `r` | Force refresh |

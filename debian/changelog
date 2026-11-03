@@ -1,3 +1,22 @@
+tt-toplike (0.16.0) noble; urgency=medium
+
+  * Saga, phase 1: a view where a hero quests through a dungeon built from
+    the machine's own signals. S opens it from any view and --mode saga
+    starts in it; S or Esc leaves. Each chip is a floor, and a Blackhole
+    floor follows the chip's tile grid. A model becoming ready, a reset, a
+    model going away, a training run or a quiet season ends a world, and
+    the next one has a new maze. The chronicle tells what happens, and y
+    shows each line's cause. See docs/saga.md.
+  * The same recorded log always tells the same saga. --bus-inspect DIR
+    --saga-digest prints its digest, so a recording and a replay of it can
+    be compared.
+  * [saga] in config.toml: enabled, names ("real" or "generated") and
+    season_minutes.
+  * Monsters, treasure, fights and the saga.* bus events come in phase 2.
+    Saga has not been run on real hardware by a person yet.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 20:11:18 -0800
+
 tt-toplike (0.15.5) noble; urgency=medium
 
   * The backdrop applies only to the views that carry one of their own:

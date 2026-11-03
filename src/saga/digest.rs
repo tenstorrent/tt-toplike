@@ -28,8 +28,8 @@
 //! # Output and exit status
 //!
 //! ```text
-//! saga digest: 0x1f0e2d3c4b5a6978
-//! worlds born: 7, beats written: 54, records: 3611 (skipped 0 bad lines), holes: 0
+//! saga digest: 0x1ec90317adb4fa0a
+//! worlds born: 1, beats written: 6, records: 6813 (skipped 0 bad lines), holes: 0
 //! ```
 //!
 //! The exit status follows `--bus-inspect`

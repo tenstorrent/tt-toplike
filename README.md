@@ -248,6 +248,7 @@ replayed later. Every sample says whether it is `measured`, `derived`, `estimate
 tt-toplike-tui --headless                        # no screen: record to ~/.local/state/tt-toplike/bus and serve the socket
 tt-toplike-tui --record /var/tmp/run1            # normal TUI that also records the bus to a directory
 tt-toplike-tui --bus-inspect /var/tmp/run1       # summary of a recording; add --entity KEY / --signal NAME
+tt-toplike-tui --bus-inspect /var/tmp/run1 --saga-digest   # the Saga digest of a recording (docs/saga.md)
 tt-toplike-tui --headless --replay /var/tmp/run1 --speed 4 --bus-socket /tmp/tt-toplike-$UID/replay.sock
 tt-toplike-tui --bus-attach /tmp/tt-toplike-$UID/replay.sock    # a TUI that reads that host's bus
 ```
@@ -265,6 +266,19 @@ tt-toplike-tui --bus-attach /tmp/tt-toplike-$UID/replay.sock    # a TUI that rea
   release), and the order of DRAM rows within a side is not documented. An attached TUI's `i`
   view still has gaps: models show dashes for the TTFT breakdowns and prefix hit rate, and the rotation keeps dwelling on a lost host's last
   rows. The list is in `docs/bus.md` section 13.
+
+## Saga: a quest drawn from the machine's signals (`S`)
+
+Press `S` in any view, or start with `tt-toplike --mode saga`. A hero quests through a dungeon
+built from this box's own signals: each chip is a floor, a Blackhole floor follows the chip's
+tile grid, and the seed comes from the low bits of the readings. A model becoming ready, a reset,
+a model going away, a training run or a quiet season ends a world, and the next one has a new
+maze. A chronicle tells what happens, and `y` shows the signal behind each line.
+
+The same recorded log always tells the same saga. `tt-toplike-tui --bus-inspect DIR
+--saga-digest` prints a digest you can compare between a recording and a replay of it. This is
+phase 1: monsters, treasure and fights come later. Full details, the `[saga]` config and the
+limits: [docs/saga.md](docs/saga.md).
 
 ---
 
@@ -411,6 +425,7 @@ tt-toplike --mode starfield   # Starfield — Tensix cores as stars
 tt-toplike --mode flow        # Memory Flow — NoC DDR channel streams
 tt-toplike --mode hivemind    # HivemindSweeper — read-only activity sniffer (or press ~)
 tt-toplike --mode waffler     # Wafer Waffler — isometric Blackhole boards (or press 3)
+tt-toplike --mode saga        # Saga — a hero's quest built from the machine's signals (or press S)
 tt-toplike                    # then press d  — Defrag (no --mode flag; use keypress)
 
 # Filter to specific devices
@@ -432,6 +447,7 @@ tt-toplike --devices 0,2
 | `i` | Open the Inference Server Monitor from **any** view; `i` while in it jumps to Insights (a quick back-and-forth), `Esc` backs out to where you came from. Also sits at the tail of the `v` cycle. |
 | `t` | Open the Training view from **any** view — auto-attaches to a running tt-train process with no further input; `Esc` backs out to where you came from. Deliberately excluded from the `v` cycle, like `i`. Scriptable as `--mode training`. |
 | `3` | Open the Wafer Waffler from **any** view: an isometric picture of each Blackhole board. `3` or `Esc` leaves. Not in the `v` cycle. Also `--mode waffler`, `/mode waffler` or `/waffler` (`die3d` works in each). Inside it: `[` `]` previous/next board and Space cuts the camera. Every other setting is a slash command: `/board`, `/scene`, `/cut`, `/autocut`, `/transition`, `/cells` (with `/blocks` and `/braille` as shortcuts), `/bg`, `/labels`, `/clouds`, `/history`. `/theme` sets the colours. `/help` lists them. |
+| `S` | Open Saga from **any** view: a hero's quest through a dungeon built from the machine's signals, with a chronicle. `S` or `Esc` leaves. `y` shows each chronicle line's cause. Not in the `v` cycle or the rotation. Also `--mode saga`, `/mode saga` or `/saga`. See [docs/saga.md](docs/saga.md). |
 | `R` | Toggle the unattended rotation. It cycles every view except Grid (the same chip portraits as Insights in another layout), including the key-only ones (`i`, `~`, `t`, `3`) that `v` skips. 30s each, 45s on arcade. Training and the inference monitor are visited only while a training run exists or a model server is starting or running. The Wafer Waffler is visited only on a box with a Blackhole chip. Also `--rotate` at launch. |
 | `b` | Cycle backend (live switching): Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them. |
 | `/` | Command bar — type `/mode defrag`, `/fps 30`, `/theme grayskull`, `/quit`, etc. |

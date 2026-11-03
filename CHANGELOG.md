@@ -17,6 +17,18 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.16.0
+- Saga, phase 1: a view where a hero quests through a dungeon built from the machine's own signals.
+  Press `S` in any view, or start with `--mode saga`; `S` or `Esc` leaves. Each chip is a floor, and a
+  Blackhole floor follows the chip's tile grid. A model becoming ready, a reset, a model going away, a
+  training run or a quiet season ends a world, and the next one has a new maze. The chronicle tells what
+  happens, and `y` shows each line's cause. See `docs/saga.md`.
+- The same recorded log always tells the same saga. `--bus-inspect DIR --saga-digest` prints its digest,
+  so a recording and a replay of it can be compared.
+- `[saga]` in `config.toml`: `enabled`, `names = "real" | "generated"` and `season_minutes`.
+- Monsters, treasure, fights and the `saga.*` bus events come in phase 2. Saga has not been run on real
+  hardware by a person yet.
+
 ### 0.15.5
 - The backdrop applies only to the views that carry one of their own: the Inference view (scene), the
   Training view (sky) and the Wafer Waffler (clouds). Each still takes any of the three kinds or off. Every

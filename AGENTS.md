@@ -1485,6 +1485,11 @@ the point (and still fun!)", plus renaming Die 3D to a fun name the user liked, 
   speed and density drivers, docs/bus.md's "the other views read what they read before", README's
   "the arcade hero duel reads the local monitor".
 
+### Version history: 0.16.0 (Nov 2 2026)
+
+0.16.0 adds Saga, phase 1: the `tt-toplike-saga` crate, its driver thread, the view (`S`) and
+`--bus-inspect DIR --saga-digest`. See "Saga" at the end of this file and `docs/saga.md`.
+
 ### Version history: 0.15.5 (Nov 2 2026)
 
 0.15.5 limits the shared backdrop to the Inference view, the Training view and the Wafer Waffler
@@ -2032,3 +2037,78 @@ review, and most tasks needed one to three fix rounds.
   that disabled all redaction after it.
 * A redaction leak class found in a review round is fixed in that round, even when it is
   outside the review's scope.
+
+## Saga (Nov 2 2026, branch `saga`, 0.16.0)
+
+Prompt (Taylor): a view where the machine's activity becomes a story, "worlds are created and
+destroyed and created again. mazes always coming out new. monsters. NPCs. treasure.
+storytelling! but all kind of derived from tt-toplike's signal set." Spec:
+`docs/superpowers/specs/2026-11-02-saga-design.md`. Plan: `docs/superpowers/plans/2026-11-02-saga.md`.
+User documentation: `docs/saga.md`. Built subagent-driven, one review per task, with a ledger of
+rulings (R1 to R25) that amended the plan.
+
+### What exists (phase 1)
+
+* `crates/tt-toplike-saga/` (library, 0.1.0): the pure core. `Saga::feed(&Record)` in order,
+  `Saga::state()`, `Saga::drain_events()`, `Saga::digest()`. Modules: `observe` (records to
+  observations, the pacemaker tick), `seed`, `stats`, `topology`, `maze`, `world` (lifecycle),
+  `hero`, `quest`, `chronicle`, `pack` (lexicon, glyphs, palette), `event`, `saga` (front door).
+* `src/saga/`: `config.rs` (`[saga]` to `SagaConfig`), `driver.rs` (the background thread, local
+  or attached), `digest.rs` (`--saga-digest`). `src/ui/tui/saga_view.rs`: the view.
+* Phase 2 (monsters, treasure, combat, death, `saga.*` bus events, the headless host running the
+  core), phase 3 (steering, rotation stop, arcade panel) and phase 4 (packs, narrator) are not
+  built.
+
+### Determinism rules the core keeps
+
+* The same ordered stream of record contents gives the same saga. Only a record's source and
+  payload are read. Sequence numbers and timestamps never reach the core.
+* Time is counted in sweeps (pacemaker ticks). A season is a number of sweeps.
+* `crates/tt-toplike-saga/clippy.toml` bans `Instant::now`, `SystemTime::now`, `env::var`,
+  `HashMap` and `HashSet` in the library; `tests/fences.rs` checks the fences and the dependency
+  list. Use `BTreeMap`/`BTreeSet`, integer arithmetic, and the crate's `Pcg32`.
+* The digest is an explicit byte encoding through FNV-1a (R19), never a derived `Debug` string.
+
+### Rulings worth keeping
+
+* R1: the pure crate first, then the root-crate tasks on the merged branch.
+* R2: each task adds its own `pub mod` line.
+* R3: `Pcg32` matches reference PCG32; known answers for (42, 54) pin it.
+* R4: `SagaEvent` lives in `event.rs`; phases add variants.
+* R5: a `RealName` is one token: no whitespace, no control characters, no leading `-`, no `=`, at most 32 characters.
+* R6: committed fixtures carry no real process names; `busy.jsonl` comes from a generator.
+* R7: the driver publishes at most 10 snapshots a second; the chronicle shares its lines (`Arc`).
+* R8: `saga_config` is a free function (orphan rule).
+* R9: no production code that exists only for a test.
+* R10: the Blackhole floor constants are cross-checked against Die 3D in the root crate.
+* R11 and R13: no world is born before the seed pool has 64 samples or tick 5; early births wait.
+* R12: each floor's seed mixes in the chip key.
+* R14: `ModelGone` ends only that model's dungeon; a reset ends a world only on its chips (or no chips named).
+* R15: the core pushes `saga.heartbeat_alive` and the temperature baseline; the hero replans on no path.
+* R16: the chronicle has its own generator stream, so `names` cannot change mazes or walks.
+* R17: in generated mode published causes are aliased and do not exist in the log.
+* R18: the mock heartbeat counts up, so mock sagas are not stalled.
+* R19: the digest's byte encoding is explicit.
+* R20 to R22: caps on chips (64), floors (32), trails, ready models, hooks, pending events, and 256 bytes per key or name.
+* R23: Grid, Training and the hivemind still keep their own copy of the away rule.
+* R24: the driver starts at TUI start-up unless `[saga] enabled = false`.
+* R25: the driver publishes `stopped`, runs at lowered priority, and the batch-cost doc states the measurement.
+
+### Re-pinning the digest goldens
+
+`crates/tt-toplike-saga/tests/determinism.rs`, `a_snapshot_of_the_digests_matches`, pins one digest
+per fixture (`quiet.jsonl`, `bringup.jsonl`, `busy.jsonl`) for each name mode. A change to the
+seed rule, the maze, the walk, quest planning, the grammar, the lexicon or the event order changes
+them. Re-pin only on purpose: run `cargo test -p tt-toplike-saga --test determinism`, copy the
+values the failure prints, and name the rule that changed in the commit message. An unexplained
+change means the same log now tells another story, which breaks replay. The view's golden frames
+in `src/ui/tui/saga_view_tests.rs` hash the drawing and follow the same rule. After changing
+`tests/support/busy.rs`, regenerate the fixture with the ignored test `write_busy_fixture`.
+
+### Checking the contract with the binary
+
+Record a `--headless --mock` run (without `--mock-workloads`), print `--bus-inspect DIR
+--saga-digest`, replay the recording into a second directory with `--replay`, and print the
+digest of that one. The two digests must match. For 0.16.0, a 12-second mock recording (6,813
+records, 360 sweeps) printed `saga digest: 0x1ec90317adb4fa0a` (1 world, 6 beats) twice, and its
+replay at `--speed 50` into a second directory, with new times, printed the same line.

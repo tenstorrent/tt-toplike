@@ -2821,4 +2821,41 @@ panels = [{ view = "starfield" }]
         }
         assert!(with_layouts >= 1, "a user-layout example is there");
     }
+
+    /// Every TOML example in docs/saga.md parses with the real loader, has
+    /// no problem, and sets what it shows: a doc example that the loader
+    /// ignored or refused would mislead the reader.
+    #[test]
+    fn the_saga_docs_examples_load_and_take_effect() {
+        let doc = include_str!("../docs/saga.md");
+        let mut blocks = Vec::new();
+        let mut cur: Option<String> = None;
+        for line in doc.lines() {
+            match (&mut cur, line.trim_start()) {
+                (None, "```toml") => cur = Some(String::new()),
+                (Some(_), "```") => blocks.push(cur.take().unwrap()),
+                (Some(b), _) => {
+                    b.push_str(line);
+                    b.push('\n');
+                }
+                _ => {}
+            }
+        }
+        assert!(!blocks.is_empty(), "the doc has its [saga] example");
+        for b in &blocks {
+            let l = load(&[("doc.toml", b)]);
+            assert!(l.problems.is_empty(), "{b}\n{:?}", l.problems);
+            assert!(b.contains("[saga]"), "{b}");
+            assert_ne!(
+                l.saga,
+                SagaSettings::default(),
+                "the example changes something:\n{b}"
+            );
+        }
+        // The example in the doc's config section, value by value.
+        let l = load(&[("doc.toml", &blocks[0])]);
+        assert!(l.saga.enabled);
+        assert_eq!(l.saga.names, SagaNames::Generated);
+        assert_eq!(l.saga.season_minutes, 30);
+    }
 }

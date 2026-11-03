@@ -995,6 +995,22 @@ reads it makes no pulse, and neither does a step that landed while the view was 
 The rule and its constants are the Wafer Waffler's. With an empty world the view draws the frames it drew
 before the bus; a test pins them by hash.
 
+### Saga on the bus
+
+Saga (`S`, [docs/saga.md](saga.md)) reads the record stream itself. It does not read the world.
+A driver thread (`src/saga/driver.rs`) feeds every record, in order, to the saga core
+(`crates/tt-toplike-saga`): from `Bus::read_from` on a TUI that hosts its bus, and from the
+socket's `subscribe` on an attached TUI, which starts from the host's snapshot. The core reads
+only each record's source and payload, so the same records give the same saga whatever their
+sequence numbers and times. `--bus-inspect DIR --saga-digest` prints that saga's digest for a
+recorded log.
+
+Saga publishes nothing to the bus in this release. Phase 2 adds `saga.*` events (a world born or
+ended, a hero born or dead, a quest, a beat) as one new additive event variant, with source
+`saga`, and the bus crate moves to 0.2.0. The core already skips records from source `saga`, so
+a recording that carries them will not tell its story twice. `ViewChanged` names the view
+`saga`.
+
 ---
 
 ## 9. Privacy
@@ -1367,7 +1383,7 @@ Until the sidecar exists, the Wafer Waffler tile glow stays an estimate and says
   `ModelReady`, `Reset` and `Spark`.
 * Item 7d on tensixinet's roadmap asks for the name of the view on screen. `ViewChanged`
   carries it. The names are `insights`, `grid`, `starfield`, `castle`, `flow`, `arcade`,
-  `defrag`, `inference`, `hivemind`, `training` and `die3d`. A TUI that is attached to a
+  `defrag`, `inference`, `hivemind`, `training`, `die3d` and `saga`. A TUI that is attached to a
   headless host does not publish `ViewChanged`, so that name is available from a TUI that
   hosts its own bus (started with `--bus-socket`).
 * Check `prov` on every value. Anything `estimated` is a guess, and a `--mock` run tags all of
