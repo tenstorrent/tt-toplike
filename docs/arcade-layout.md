@@ -41,7 +41,7 @@ device. `tt-toplike --check-config --arcade-layout NAME` checks a start-up choic
 
 The keys work only while the arcade is on screen. After a switch the status line shows
 `layout: <name> (<i>/<n>) — <description>`, for example
-`layout: now-serving (2/8) — inference over Wafer Waffler and defrag`. The line is at most 78
+`layout: now-serving (2/8) — inference over Wafer Waffler and saga`. The line is at most 78
 characters, so it fits an 80-column terminal; a longer user description is cut with `…`.
 `/arcade layout list` names every layout on as many lines as it needs. The message goes away
 after about 4 seconds, and when you leave the arcade.
@@ -111,31 +111,34 @@ At 80x24: everything; the starfield is 80x7, so the lanes show. At 60x20: everyt
 ### `now-serving`
 
 The user's words for it: "now serving: top: 3 wide inference server, big bottom: left: 3d cube,
-right: defrag", with no starfield ("this is not the default"). The top row is the inference
-server alone, across the whole width. The bottom row is the bigger one (heights 3 and 4), with
-the Wafer Waffler on the left and defrag on the right at equal widths. The Wafer Waffler panel
-draws its own clouds, as the Wafer Waffler view does; nothing is drawn behind the arcade.
+right: defrag", with no starfield ("this is not the default"). In 0.16.4 Saga took defrag's
+place: "add the Saga to 'now serving' arcade view instead of defrag". The top row is the
+inference server alone, across the whole width. The bottom row is the bigger one (heights 3 and
+4), with the Wafer Waffler on the left and Saga on the right at equal widths. The Wafer Waffler
+panel draws its own clouds, as the Wafer Waffler view does; nothing is drawn behind the arcade.
 
 ```text
 ║ ≈ inference
 ║ · · · · · · · · · · · · · · · · · ·
 ║ · · · · · · · · · · · · · · · · · ·
-╠ ◆ Wafer Waffler    │ ▓ defrag
+╠ ◆ Wafer Waffler    │ Ψ saga
 ║ · · · · · · · · ·  │ · · · · · · · ·
 ║ · · · · · · · · ·  │ · · · · · · · ·
 ║ · · · · · · · · ·  │ · · · · · · · ·
 ╚═════════════════════════════════════
 ```
 
-At 80x24: everything (inference 80x8, Wafer Waffler 40x11, defrag 39x11). The inference panel
-needs 24x8, so it stays at any terminal of at least 24 columns and about 23 rows. At 60x20 the
-top row is 6 rows high: the inference panel is taken out and named on its rule (`◌ INFERENCE
-needs 24x8`), and its rows go to the Wafer Waffler and defrag. Heights 1 and 2 would make the
-bottom row twice as big, but the top row would then be 6 rows at 80x24 and the inference panel
-would be taken out there too.
+At 80x24: everything (inference 80x8, Wafer Waffler 40x11, Saga 39x11). At 140x40 the Saga
+panel is 69x20 and has a chronicle strip under its map. The inference panel needs 24x8, so it
+stays at any terminal of at least 24 columns and about 23 rows. At 60x20 the top row is 6 rows
+high: the inference panel is taken out and named on its rule (`◌ INFERENCE needs 24x8`), and its
+rows go to the Wafer Waffler (30x15) and Saga (29x15). Heights 1 and 2 would make the bottom row
+twice as big, but the top row would then be 6 rows at 80x24 and the inference panel would be
+taken out there too.
 
 With nothing running, the inference panel shows its one-line note, ` no inference server`. On
-an idle box this layout is the note over the Wafer Waffler beside defrag.
+an idle box this layout is the note over the Wafer Waffler beside Saga. Saga runs from start-up,
+so its panel shows the hero's map once the first world is born, a few seconds in.
 
 It has no starfield, so it draws no activity lanes and no sparks.
 
@@ -196,7 +199,7 @@ their rows. With nothing running both panels are a one-line note over blank rows
 
 ### `deck`
 
-All seven views: the starfield; castle, defrag and the Wafer Waffler; flow, training and
+Every view but Saga: the starfield; castle, defrag and the Wafer Waffler; flow, training and
 inference. It needs a large terminal to show them all; at 80x24 it shows five.
 
 ```text
@@ -344,6 +347,7 @@ This example is `arcade_layout::example_rows()`; the bench draws it as `arcade-p
 | `die3d` | the Wafer Waffler view of each Blackhole board, with its bus overlay (`waffler` is accepted as another name) | 16 x 6 |
 | `training` | the Training view; `no training run` when there is none | 20 x 10 |
 | `inference` | the `i` view's serving snake; `no inference server` when none is up or coming up | 24 x 8 |
+| `saga` | the Saga view's map and HUD, with a chronicle strip from 60 x 12; a note before the first world | 20 x 6 |
 
 Every panel draws the same view as its own mode, at the panel's size:
 
@@ -356,6 +360,17 @@ Every panel draws the same view as its own mode, at the panel's size:
   attached host shows in it.
 * The inference panel draws the rows the `i` view draws, including an attached host's rows
   (`inference_bus::attached_rows`). Its backdrop is the `i` view's own.
+* The Saga panel draws the story the `S` view draws, with the same map renderer, so the fog, the
+  hero's glow and trail and the colours are the view's own, and it shares the view's memory of
+  what the hero has seen. Its first row is a HUD: the `(mock)` or `(replay)` mark, the hero's
+  name, the vitality bar, the quest, how much of the floor is mapped and the tick. The map is
+  under it; a floor larger than the panel scrolls to keep the hero in the middle. From 60 x 12 a
+  chronicle strip of the newest lines takes the bottom third, and from 100 columns it sits right
+  of the map. `y` does nothing in the arcade; press `S` for the full view. The notes: `saga
+  waiting for the first world`, `saga is off: set [saga] enabled = true in config.toml`, `saga
+  is not running; the log says why`, and `the story stopped before its first world`. A driver
+  that stopped after a world shows the full view's stopped banner over its last map. See
+  `docs/saga.md`, "The arcade panel".
 
 ## How the space is shared
 
@@ -401,7 +416,7 @@ are drawn around the hero.
 
 The arcade carries no backdrop: nothing is drawn in the blank cells behind its panels. The
 shared backdrop (`docs/backdrop.md`) applies to the Inference view, the Training view and the
-Wafer Waffler only. A Wafer Waffler panel inside a layout draws its own clouds, as that view
+Wafer Waffler only. The Saga panel takes none, as the Saga view takes none. A Wafer Waffler panel inside a layout draws its own clouds, as that view
 does.
 
 The old settings are still read and do nothing, with a note on the status line and in
@@ -435,7 +450,7 @@ read, makes the TUI ignore the whole file.
 | an unknown key in `[arcade]` | ``unknown key `arcade.clouds` (expected cloudfield, row, layout or layouts)`` |
 | an unknown key in a row | ``unknown key `heigth` in row 1 (expected height or panels)`` |
 | an unknown key in a panel | ``unknown key `wide` in row 1 panel 1 (expected view or width)`` |
-| an unknown view | ``unknown view `castel` (expected one of starfield, castle, flow, defrag, die3d, training, inference)`` |
+| an unknown view | ``unknown view `castel` (expected one of starfield, castle, flow, defrag, die3d, training, inference, saga)`` |
 | a zero, negative or too large weight | `row 1 height must be a whole number from 1 to 1000, got 0` |
 | a weight that is not a whole number | `row 1 panel 2 width must be a whole number from 1 to 1000` |
 | an empty row | `row 2 is empty: give it at least one panel` |

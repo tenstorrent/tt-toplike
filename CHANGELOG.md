@@ -17,6 +17,14 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.16.4
+- Saga is an arcade panel. The `now-serving` layout shows it in place of defrag: the inference
+  server over the Wafer Waffler and Saga. The panel draws the Saga view's map with the same fog,
+  glow, trail and colours, under a one-row HUD (hero, vitality, quest), and adds a chronicle strip
+  from 60x12. Any `[[arcade.layouts]]` table can use it as `view = "saga"`; it needs 20x6. Before
+  the first world, or with `[saga] enabled = false`, it says so on one line. The `deck` layout's
+  description now says "every view but saga".
+
 ### 0.16.3
 - Saga's `y` ("why") line is now a sentence. It used to print the raw cause
   (`model:mock-llama · ModelReady · #379`); it now reads `why: this goes back to the model

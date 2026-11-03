@@ -1383,8 +1383,8 @@ fn every_panel_size_fits_and_no_row_ends_in_a_right_edge_glyph() {
 
 /// The notes: before the first world, with `[saga] enabled = false`, with a
 /// driver that did not start, and a stopped driver with no world. Each is
-/// one line at a width that holds it; the off note wraps rather than lose
-/// the way to turn Saga on.
+/// one line at a width that holds it. The off note wraps, so the way to
+/// turn Saga on is never cut.
 #[test]
 fn the_panel_notes_say_why_there_is_no_map() {
     let memory = SagaMemory::new();

@@ -1,3 +1,14 @@
+tt-toplike (0.16.4) noble; urgency=medium
+
+  * Saga is an arcade panel (view = "saga", at least 20x6). The now-serving
+    layout shows it in place of defrag: the inference server over the Wafer
+    Waffler and Saga. The panel draws the Saga view's map, fog and trail
+    under a one-row HUD (hero, vitality, quest), with a chronicle strip from
+    60x12. Before the first world, or with [saga] enabled = false, it says
+    so on one line. The full Saga view did not change.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 16:00:00 -0800
+
 tt-toplike (0.16.3) noble; urgency=medium
 
   * Saga's why line (the y key) is a sentence instead of the raw cause: "this

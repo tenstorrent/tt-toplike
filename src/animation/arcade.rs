@@ -357,8 +357,9 @@ impl ArcadeVisualization {
         // The Die 3D panel, if the new layout has one, draws its overlay at
         // the last bus time until the next `set_bus` feeds it.
         next.die3d_bus_now = self.die3d_bus_now.filter(|_| next.die3d.is_some());
-        // The Saga panel draws what it was last fed, so a switch draws the
-        // map at once instead of the waiting note.
+        // The Saga panel keeps what it was last fed, so the frame after a
+        // switch shows the map. A new panel shows the waiting note until
+        // its first feed.
         if let (Some(old), Some(new)) = (self.saga, next.saga.as_mut()) {
             *new = old;
         }

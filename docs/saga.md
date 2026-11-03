@@ -179,6 +179,52 @@ backend's readings are estimates. A saga fed by a replayed log writes "(replay)"
 
 Saga is not in the `v` cycle and not in `--rotate`.
 
+## The arcade panel
+
+Saga can also be a panel of the arcade (`a`). The built-in layout `now-serving` shows it on the
+right of its bottom row, beside the Wafer Waffler and under the inference server, and any
+`[[arcade.layouts]]` table can name it with `view = "saga"` (see `docs/arcade-layout.md`). The
+rule over it says `Ψ SAGA`.
+
+The panel draws the same story with the same map renderer, so the fog, the hero's glow and trail,
+the biome colours and the heat are the view's own. It shares the view's memory of what the hero
+has seen, so the map it shows is the map the full view shows.
+
+| Panel size | What it shows |
+|---|---|
+| under 20 x 6 | nothing: the panel is taken out and its rule says `◌ SAGA needs 20x6` |
+| 20 x 6 and up | the HUD row over the map |
+| 60 x 12 and up | a chronicle strip of the newest lines under the map, a third of the rows |
+| 100 columns and up (and 12 rows) | the chronicle strip right of the map, as in the full view |
+
+The HUD is the full view's status row after the label: `(mock)` or `(replay)` when the story has
+one, the hero's name, the `▰▱` vitality bar, the quest, how much of the floor is mapped, and the
+tick. The segments at the end are dropped when they do not fit.
+
+When there is no map to draw, the panel says why on one line, wrapped when the panel is narrow:
+
+| State | The note |
+|---|---|
+| no world yet | `saga waiting for the first world` |
+| `[saga] enabled = false` | `saga is off: set [saga] enabled = true in config.toml` |
+| on, but the driver did not start | `saga is not running; the log says why` |
+| the driver stopped before the first world | `the story stopped before its first world` |
+
+A driver that stops after a world is born shows the full view's banner, `the story has stopped ·
+showing its last state`, under the HUD and over the last map.
+
+* `y` does nothing in the arcade, so the strip has no `y` hint. Press `S` for the full view.
+* Generated names (`[saga] names = "generated"`) reach the panel exactly as they reach the view,
+  because both draw the same beats, causes and quest text.
+* The panel takes no backdrop, as the view takes none.
+* No row of the panel ends in a right-edge border glyph: the map leaves its last column blank and
+  the strip's header ends in `═`.
+* Cost: the panel feeds once per update. The TUI hands the arcade the driver's state (an `Arc`, so
+  no copy) and copies its map memory into the panel's buffers, which allocates nothing once the
+  floor is known. A frame of the panel at 70 x 16 took 66 µs in a release build, against 54 µs for
+  the full view at 70 x 16 and 183 µs for both at 140 x 39 (`panel_cost` in
+  `src/ui/tui/saga_view_tests.rs`, a shared box with a load average near 11).
+
 ## Config
 
 `[saga]` in `~/.config/tt-toplike/config.toml`:
@@ -232,7 +278,8 @@ saga's settings and every problem in the section.
 * Monsters, treasure, fights, the hero's death and descendants, and the `saga.*` bus events come in
   phase 2.
 * The hero cannot be steered yet (phase 3).
-* Saga is not a stop in `--rotate`, and the shared backdrop is not drawn behind it.
+* Saga is not a stop in `--rotate`, and the shared backdrop is not drawn behind it or behind its
+  arcade panel.
 * The lexicon names some monsters after chips and parts, for example "Blackhole Flare", "Tensix
   Torch Moth" and "Clogged NoC". Whether chip names should name monsters is a decision for the
   project.
@@ -277,3 +324,6 @@ teal `#74C5DF`, green `#6FABA0`, yellow `#F6BC42` and orange `#FA512E`.
 * `src/saga/config.rs`: the `[saga]` section as the core's config. `src/saga/digest.rs`: `--saga-digest`.
 * `src/ui/tui/saga_view.rs`: the view draws the snapshot and never feeds the core. Its
   `SagaMemory` (the lit cells, the trail and the heat) lives in the TUI's loop.
+  `render_saga_panel` draws the arcade panel from the same pieces (`map_rows`, the status row,
+  `chronicle_rows`); the arcade keeps the last `PanelFeed` and a copy of the memory
+  (`ArcadeVisualization::set_saga`).

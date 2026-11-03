@@ -1485,6 +1485,36 @@ the point (and still fun!)", plus renaming Die 3D to a fun name the user liked, 
   speed and density drivers, docs/bus.md's "the other views read what they read before", README's
   "the arcade hero duel reads the local monitor".
 
+### Saga as an arcade panel (Nov 3 2026, branch `saga-panel`, 0.16.4)
+
+Prompt (Taylor): "add the Saga to 'now serving' arcade view instead of defrag". Decisions:
+
+* `View::Saga` (`saga`, rule label `Ψ SAGA`, at least 20x6, the view's own `MAP_MIN`). The brief
+  suggested `⚔`; it has an emoji form that some terminals draw two columns wide, so the label uses
+  the map's sage glyph, which is one column everywhere.
+* `now-serving` is inference over the Wafer Waffler and Saga at the old weights. Other presets keep
+  defrag; `deck` says "every view but saga".
+* The seam: `saga_view::render_saga_panel(&PanelFeed, &SagaMemory, area, frame)` builds the panel
+  from the view's own `map_rows`, its status row (now `status_after`, so the HUD can put the label
+  mark first) and `chronicle_rows` (a new `hint` flag; the arcade has no `y`). The full view calls
+  the same three, and its eight golden frames did not move. A combined "map plus HUD" function was
+  not added: the full view puts the status row at the bottom and the chronicle between, so the
+  shared unit is the renderers themselves.
+* Data: the TUI feeds `ArcadeVisualization::set_saga` once per update with the driver's
+  `Published` state (an `Arc`) and its `SagaMemory`. The arcade copies the memory into its own
+  buffers with `SagaMemory::copy_from` (`clone_from` keeps capacity) and observes the fed state,
+  so the fog matches the state whatever order the loop runs in. `relayout` keeps both, so the
+  frame after `{` `}` shows the map.
+* The panel takes no backdrop (`backdrop::accepts("saga")` is empty, asserted in
+  `only_the_inference_training_and_waffler_views_take_a_backdrop`).
+* Overlays: the arcade's help, legend and explain text name none of the Die 3D, Training or
+  inference panels, so they do not name Saga either.
+* Tests: the panel's four golden frames (70x16 and 20x6 at two cut points) are new; the wiring
+  test compares the arcade's Saga rectangle cell for cell with `render_saga_panel`. Mutations seen
+  red: `set_saga` dropping the feed (three arcade tests and the golden), the strip showing the `y`
+  hint (the size test and the golden), the HUD printing the quest's raw target (the panel's
+  generated-names test and the golden).
+
 ### Version history: 0.16.1 (Nov 3 2026)
 
 0.16.1 restyles the Saga view; the core and its digests are unchanged. Prompt (Taylor): "saga mode
@@ -2070,6 +2100,9 @@ rulings (R1 to R28) that amended the plan, then a final whole-branch review and 
 (`.superpowers/sdd/2026-11-02-saga/final-review.md` and `final-fix-report.md`).
 
 ### What exists (phase 1)
+
+* 0.16.4: Saga is also an arcade panel (`view = "saga"`; `now-serving` shows it). See "Saga as an
+  arcade panel" in the version history above and `docs/saga.md`, "The arcade panel".
 
 * `crates/tt-toplike-saga/` (library, 0.1.0): the pure core. `Saga::feed(&Record)` in order,
   `Saga::state()`, `Saga::drain_events()`, `Saga::digest()`. Modules: `observe` (records to
