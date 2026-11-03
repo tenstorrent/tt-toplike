@@ -57,6 +57,9 @@ fn non_finite_pushes_are_ignored() {
     assert!(t.ratio(f64::NAN).is_finite());
 }
 
+// REGRESSION GUARD ONLY. This runs one pure computation twice in one process,
+// so it can catch hidden state (a global, a hash order) but cannot go red on a
+// wrong constant or a platform difference. The test below pins the bits.
 #[test]
 fn the_same_series_gives_bit_identical_results_twice() {
     let series: Vec<f64> = (0..5000u32)
@@ -88,4 +91,37 @@ fn the_book_keeps_a_trail_per_entity_and_series() {
     assert_eq!(book.get(&b, "temp").unwrap().max(), 20.0);
     assert_eq!(book.get(&a, "power").unwrap().max(), 30.0);
     assert!(book.get(&b, "power").is_none());
+}
+
+/// Known-answer test: the bits after a short series, worked out by hand.
+///
+/// Series 4096.0, 0.0, 10.0. Every step is exact in binary floating point.
+///
+/// * push 4096: mean = 4096, max = 4096.
+/// * push 0: max = 4096 * 4095/4096 = 4095.
+///   mean = 4096 + (0 - 4096)/16 = 4096 - 256 = 3840.
+/// * push 10: decayed = 4095 * 4095/4096 = 16769025/4096 = 4094 + 1/4096,
+///   since 4096 * 4094 = 16769024. That exceeds 10, so max = 4094 + 2^-12.
+///   mean = 3840 + (10 - 3840)/16 = 3840 - 239.375 = 3600.625.
+///
+/// IEEE-754 bits, derived by hand (exponent 11, so the biased field is 0x40A):
+///
+/// * max = 4094 + 2^-12 = 2048 * (2 - 2^-10 + 2^-23). The mantissa field is
+///   2^52 - 2^42 + 2^29 = 0xFFC0020000000, so the bits are 0x40AFFC0020000000.
+/// * mean = 3600.625 = 2048 * (1 + 1552.625/2048). The mantissa field is
+///   1552.625 * 2^41 = 12421 * 2^38 = 0x3085 << 38 = 0xC214000000000, so the
+///   bits are 0x40AC214000000000.
+#[test]
+fn the_bits_after_a_short_series_match_hand_computed_constants() {
+    let mut t = Trail::new();
+    t.push(4096.0);
+    t.push(0.0);
+    assert_eq!(t.max().to_bits(), 4095.0_f64.to_bits());
+    assert_eq!(t.mean().to_bits(), 3840.0_f64.to_bits());
+    t.push(10.0);
+    assert_eq!(t.max().to_bits(), 0x40AF_FC00_2000_0000);
+    assert_eq!(t.mean().to_bits(), 0x40AC_2140_0000_0000);
+    // The hex constants agree with the decimal values worked out above.
+    assert_eq!(f64::from_bits(0x40AF_FC00_2000_0000), 4094.0 + 1.0 / 4096.0);
+    assert_eq!(f64::from_bits(0x40AC_2140_0000_0000), 3600.625);
 }
