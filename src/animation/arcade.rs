@@ -12,7 +12,7 @@
 //! - Middle 30%: Memory Castle (55% of the width) beside Defrag
 //! - Bottom 30%: Memory Flow (NoC particles, DDR perimeter, heat map center)
 //!
-//! Die 3D, Training and the inference server can be panels too. Each panel's
+//! Die 3D, Training, the inference server and Saga can be panels too. Each panel's
 //! view is built at its panel's size when the arcade is made, and the arcade
 //! is made again on a resize, so the frame path does no layout work.
 //!
@@ -31,6 +31,7 @@ use crate::animation::{
 };
 use crate::backend::TelemetryBackend;
 use crate::ui::colors;
+use crate::ui::tui::saga_view::{self, PanelFeed, SagaMemory};
 use crate::workload::inference_server::ServingStats;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -73,6 +74,22 @@ fn is_undervolt(arch: crate::models::Architecture, volts: Option<f32>, aiclk: Op
     v < 0.75
 }
 
+/// The Saga panel's input: the last feed and a copy of the TUI's memory.
+#[derive(Debug, Clone)]
+struct SagaPanel {
+    feed: PanelFeed,
+    memory: SagaMemory,
+}
+
+impl Default for SagaPanel {
+    fn default() -> Self {
+        SagaPanel {
+            feed: PanelFeed::Waiting,
+            memory: SagaMemory::new(),
+        }
+    }
+}
+
 /// Arcade visualization combining all three modes with hero character
 pub struct ArcadeVisualization {
     width: usize,
@@ -91,6 +108,8 @@ pub struct ArcadeVisualization {
     train: Option<crate::animation::TrainView>,
     /// The inference panel: the `i` view's serving snake.
     snake: Option<crate::animation::Snake>,
+    /// The Saga panel: what the TUI last fed it (`set_saga`).
+    saga: Option<SagaPanel>,
 
     /// Where every panel goes, worked out once at construction.
     layout: Layout,
@@ -214,6 +233,7 @@ impl ArcadeVisualization {
         });
         let train = rect(View::Training).map(|r| crate::animation::TrainView::new(r.w, r.h));
         let snake = rect(View::Inference).map(|_| crate::animation::Snake::new());
+        let saga = rect(View::Saga).map(|_| SagaPanel::default());
 
         Self {
             width,
@@ -225,6 +245,7 @@ impl ArcadeVisualization {
             die3d,
             train,
             snake,
+            saga,
             layout,
             config: config.clone(),
             services: Vec::new(),
@@ -336,6 +357,11 @@ impl ArcadeVisualization {
         // The Die 3D panel, if the new layout has one, draws its overlay at
         // the last bus time until the next `set_bus` feeds it.
         next.die3d_bus_now = self.die3d_bus_now.filter(|_| next.die3d.is_some());
+        // The Saga panel draws what it was last fed, so a switch draws the
+        // map at once instead of the waiting note.
+        if let (Some(old), Some(new)) = (self.saga, next.saga.as_mut()) {
+            *new = old;
+        }
         next
     }
 
@@ -368,6 +394,25 @@ impl ArcadeVisualization {
     /// Hand the arcade this tick's training run, for the Training panel.
     pub fn set_train_state(&mut self, st: Option<crate::workload::train::TrainState>) {
         self.train_state = st;
+    }
+
+    /// Hand the arcade the saga driver's last published state (or why there
+    /// is none) and the TUI's Saga memory (the lit cells, the trail and the
+    /// heat), once per update. Only a layout with a Saga panel keeps them.
+    ///
+    /// The memory is copied into the panel's own buffers
+    /// ([`SagaMemory::copy_from`]), which allocates nothing once the floor
+    /// is known, and then takes in the fed state, so the panel's fog
+    /// matches its state even when the TUI observes the state after this
+    /// call. The state is an `Arc`, so no state is copied.
+    pub fn set_saga(&mut self, feed: PanelFeed, memory: &SagaMemory) {
+        if let Some(p) = self.saga.as_mut() {
+            p.memory.copy_from(memory);
+            if let PanelFeed::Live { state, .. } = &feed {
+                p.memory.observe(state);
+            }
+            p.feed = feed;
+        }
     }
 
     /// Set the Die 3D panel's view time, in seconds.
@@ -1131,6 +1176,17 @@ impl ArcadeVisualization {
                 } else {
                     note("no inference server")
                 }
+            }),
+            View::Saga => self.saga.as_ref().map(|s| {
+                saga_view::render_saga_panel(
+                    &s.feed,
+                    &s.memory,
+                    (
+                        w.min(u16::MAX as usize) as u16,
+                        h.min(u16::MAX as usize) as u16,
+                    ),
+                    u64::from(self.frame),
+                )
             }),
         }
         .unwrap_or_default()

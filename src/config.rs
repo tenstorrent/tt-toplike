@@ -1690,6 +1690,41 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
         assert_eq!(p.len(), 1, "{p:?}");
         assert!(p[0].starts_with("c.toml:2: unknown view `castel`"), "{p:?}");
         assert!(p[0].contains("starfield, castle"), "{p:?}");
+        assert!(
+            p[0].ends_with("training, inference, saga)"),
+            "the list names saga: {p:?}"
+        );
+    }
+
+    /// `view = "saga"` loads in `[[arcade.row]]` and in a layout of its
+    /// own, `--check-config` prints it by its key, and a second Saga panel
+    /// is reported like any view shown twice.
+    #[test]
+    fn a_saga_panel_loads_and_check_config_names_it() {
+        let text = "[[arcade.row]]\npanels = [{ view = \"saga\", width = 2 }, { view = \"castle\" }]\n\n[[arcade.layouts]]\nname = \"quest\"\n\n[[arcade.layouts.row]]\npanels = [{ view = \"Saga\" }]\n";
+        let mut l = load(&[("c.toml", text)]);
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(
+            l.arcade.rows[0].panels[0],
+            PanelSpec {
+                view: View::Saga,
+                width: 2
+            }
+        );
+        choose_layout(&mut l, Some("quest"));
+        let mut out = Vec::new();
+        assert_eq!(write_check_report(&l, &mut out), 0);
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("row 1 (height 1): saga x2, castle x1\n"),
+            "{out}"
+        );
+        assert!(out.contains("\narcade starts with quest: 1 row\n"), "{out}");
+        let twice = "[[arcade.row]]\npanels = [{ view = \"saga\" }, { view = \"saga\" }]\n";
+        assert_eq!(
+            problems(&[("c.toml", twice)]),
+            vec!["c.toml:2: view `saga` appears twice; each view can be shown once"]
+        );
     }
 
     #[test]
@@ -2812,7 +2847,7 @@ panels = [{ view = "starfield" }]
         );
         assert!(
             out.contains("now-serving  ")
-                && out.contains("defrag\n    row 1 (height 3): inference x1\n")
+                && out.contains("and saga\n    row 1 (height 3): inference x1\n    row 2 (height 4): die3d x1, saga x1\n")
                 && !out.contains("when selected"),
             "{out}"
         );

@@ -237,6 +237,7 @@ fn each_preset_draws_every_panel_it_names() {
                 "{}",
                 l.name
             );
+            assert_eq!(a.saga.is_some(), named.contains(&View::Saga), "{}", l.name);
         }
     })
 }
@@ -458,4 +459,179 @@ fn the_right_edge_list_holds_every_border_agents_md_names() {
             "not in RIGHT_EDGE_GLYPHS: {ch:?}"
         );
     }
+}
+
+// ---- The Saga panel (0.16.4) ---------------------------------------------------
+
+/// The saga state after every record of the saga crate's busy fixture, mock
+/// label, with `names`, and a memory that observed each state on the way,
+/// as the TUI's loop does.
+fn busy_saga(
+    names: tt_toplike_saga::chronicle::NameMode,
+) -> (std::sync::Arc<tt_toplike_saga::SagaState>, SagaMemory) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/tt-toplike-saga/tests/fixtures/busy.jsonl");
+    let read = tt_toplike_bus::segment::read_segment(&path).expect("busy.jsonl");
+    let mut saga = tt_toplike_saga::Saga::new(tt_toplike_saga::SagaConfig {
+        season_ticks: 200,
+        names,
+        label: tt_toplike_saga::Label::Mock,
+    });
+    let mut memory = SagaMemory::new();
+    for r in &read.records {
+        saga.feed(r);
+        memory.observe(saga.state());
+    }
+    (std::sync::Arc::new(saga.state().clone()), memory)
+}
+
+/// The cells of `rect` in `lines`, one string per row.
+fn cells(lines: &[Line<'static>], rect: arcade_layout::Rect) -> Vec<String> {
+    rect.rows()
+        .map(|y| {
+            let cols = columns(&lines[y]);
+            rect.cols()
+                .map(|x| match cols.get(x) {
+                    Some('\0') | None => ' ',
+                    Some(c) => *c,
+                })
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+/// `now-serving` with a live saga fed through `set_saga`, as the TUI feeds
+/// it: at 80x24, 140x40 and 200x60 the Saga panel shows what
+/// `render_saga_panel` draws for its rectangle (the wiring, cell for cell),
+/// its label is on the rule, and no row ends in a right-edge glyph.
+#[test]
+fn now_serving_draws_the_fed_saga_and_no_right_edge_glyph() {
+    tc(|| {
+        let b = Fixed::new(2);
+        let ns = crate::animation::arcade_presets::preset("now-serving").unwrap();
+        let (state, memory) = busy_saga(tt_toplike_saga::chronicle::NameMode::Real);
+        for (w, h) in [(80, 24), (140, 40), (200, 60)] {
+            let mut a = arcade_of(ns, w, h, &b);
+            busy(&mut a, &b);
+            a.set_saga(
+                PanelFeed::Live {
+                    state: state.clone(),
+                    stopped: false,
+                },
+                &memory,
+            );
+            a.hero_trail.clear();
+            (a.hero_x, a.hero_y) = ((w - 1) as f32, (h - 1) as f32);
+            let lines = a.render(&b);
+            let p = *a.layout().find(View::Saga).expect("a Saga panel");
+            let rule = text(&lines[a.layout().row_of(&p).unwrap().rule_y]);
+            assert!(rule.contains("Ψ SAGA"), "{w}x{h}: {rule:?}");
+            let want = saga_view::render_saga_panel(
+                &PanelFeed::Live {
+                    state: state.clone(),
+                    stopped: false,
+                },
+                &memory,
+                (p.rect.w as u16, p.rect.h as u16),
+                u64::from(a.frame),
+            );
+            let want_cells: Vec<String> = want
+                .iter()
+                .map(|l| text(l).trim_end().to_string())
+                .chain(std::iter::repeat(String::new()))
+                .take(p.rect.h)
+                .collect();
+            assert_eq!(cells(&lines, p.rect), want_cells, "{w}x{h}");
+            assert!(want_cells.iter().any(|l| l.contains('@')), "{w}x{h}");
+            for (y, line) in lines.iter().enumerate() {
+                let cols = columns(line);
+                assert!(
+                    !(cols.len() >= w && is_right_border(cols[w - 1])),
+                    "{w}x{h} row {y} ends in {:?}: {:?}",
+                    cols[w - 1],
+                    text(line)
+                );
+            }
+        }
+    })
+}
+
+/// Before the first feed the Saga panel says it is waiting; a feed with no
+/// driver says why; a layout switch keeps what was fed, so the frame after
+/// `{` or `}` still shows the map. A layout without a Saga panel ignores a
+/// feed.
+#[test]
+fn the_saga_panel_waits_takes_a_feed_and_keeps_it_across_a_switch() {
+    tc(|| {
+        let b = Fixed::new(2);
+        let ns = crate::animation::arcade_presets::preset("now-serving").unwrap();
+        let panel_text = |a: &ArcadeVisualization| {
+            let lines = a.render(&b);
+            cells(&lines, a.layout().find(View::Saga).unwrap().rect).join("\n")
+        };
+        let mut a = arcade_of(ns, 140, 40, &b);
+        a.update(&b);
+        assert!(panel_text(&a).contains(saga_view::PANEL_WAITING));
+        a.set_saga(PanelFeed::Off { enabled: false }, &SagaMemory::new());
+        assert!(panel_text(&a).contains("[saga] enabled = true"));
+        let (state, memory) = busy_saga(tt_toplike_saga::chronicle::NameMode::Real);
+        a.set_saga(
+            PanelFeed::Live {
+                state,
+                stopped: true,
+            },
+            &memory,
+        );
+        assert!(panel_text(&a).contains("the story has stopped"));
+        let a = a.relayout(120, 40, &config_of(ns), &b);
+        let after = panel_text(&a);
+        assert!(after.contains("the story has stopped"), "{after}");
+        assert!(after.contains('@'), "{after}");
+        // classic has no Saga panel: the feed is dropped, nothing breaks.
+        let mut c = arcade_of(&presets()[0], 120, 40, &b);
+        c.set_saga(PanelFeed::Off { enabled: true }, &memory);
+        assert!(c.saga.is_none());
+        let _ = c.render(&b);
+    })
+}
+
+/// In generated mode the panel inside the arcade shows no real name, as the
+/// full view shows none.
+#[test]
+fn the_saga_panel_in_the_arcade_shows_no_real_name_in_generated_mode() {
+    tc(|| {
+        let b = Fixed::new(2);
+        let ns = crate::animation::arcade_presets::preset("now-serving").unwrap();
+        for (names, control) in [
+            (tt_toplike_saga::chronicle::NameMode::Generated, false),
+            (tt_toplike_saga::chronicle::NameMode::Real, true),
+        ] {
+            let (state, memory) = busy_saga(names);
+            let mut a = arcade_of(ns, 200, 60, &b);
+            a.update(&b);
+            a.set_saga(
+                PanelFeed::Live {
+                    state,
+                    stopped: false,
+                },
+                &memory,
+            );
+            let all: String = a.render(&b).iter().map(text).collect::<Vec<_>>().join("\n");
+            for name in ["demo-sage", "demo-scribe", "demo-run"] {
+                if !control {
+                    assert!(!all.contains(name), "generated mode shows {name}");
+                }
+            }
+            if control {
+                assert!(
+                    ["demo-sage", "demo-scribe", "demo-run"]
+                        .iter()
+                        .any(|n| all.contains(n)),
+                    "the control finds a real name:\n{all}"
+                );
+            }
+        }
+    })
 }

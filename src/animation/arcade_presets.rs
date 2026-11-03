@@ -102,21 +102,19 @@ pub fn presets() -> &'static [NamedLayout] {
             ),
             // The user's words: "now serving: top: 3 wide inference
             // server, big bottom: left: 3d cube, right: defrag", and "this is
-            // not the default" (no starfield). The arcade carries no
-            // backdrop ("disable the cloud layer behind the arcade mode");
-            // the Die 3D panel draws its own clouds. Heights 3:4 keep the
-            // inference panel at its 8 rows at 80x24 with the bottom row
-            // the bigger one.
+            // not the default" (no starfield). In 0.16.4 the right of the
+            // bottom row became Saga: "add the Saga to 'now serving' arcade
+            // view instead of defrag". The arcade carries no backdrop
+            // ("disable the cloud layer behind the arcade mode"); the Die 3D
+            // panel draws its own clouds. Heights 3:4 keep the inference
+            // panel at its 8 rows at 80x24 with the bottom row the bigger
+            // one.
             named(
                 "now-serving",
-                concat!(
-                    "inference over ",
-                    crate::die3d_display_name!(),
-                    " and defrag"
-                ),
+                concat!("inference over ", crate::die3d_display_name!(), " and saga"),
                 vec![
                     row(3, vec![p(Inference, 1)]),
-                    row(4, vec![p(Die3d, 1), p(Defrag, 1)]),
+                    row(4, vec![p(Die3d, 1), p(Saga, 1)]),
                 ],
             ),
             named(
@@ -151,7 +149,7 @@ pub fn presets() -> &'static [NamedLayout] {
             ),
             named(
                 "deck",
-                "all seven views; best at 120x40 and up",
+                "every view but saga; best at 120x40 and up",
                 vec![
                     row(2, vec![p(Starfield, 1)]),
                     row(4, vec![p(Castle, 1), p(Defrag, 1), p(Die3d, 1)]),

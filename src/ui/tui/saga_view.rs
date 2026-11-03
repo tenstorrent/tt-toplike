@@ -423,6 +423,21 @@ impl SagaMemory {
         self.heat = celsius.filter(|c| c.is_finite());
     }
 
+    /// Makes this memory a copy of `other`, reusing this memory's buffers.
+    /// The arcade's Saga panel keeps a copy of the TUI's memory and takes
+    /// it once per update; after the first copy of a floor this allocates
+    /// nothing (`Vec::clone_from` and `VecDeque::clone_from` keep their
+    /// capacity).
+    pub fn copy_from(&mut self, other: &SagaMemory) {
+        self.key = other.key;
+        self.w = other.w;
+        self.h = other.h;
+        self.seen.clone_from(&other.seen);
+        self.trail.clone_from(&other.trail);
+        self.last = other.last;
+        self.heat = other.heat;
+    }
+
     /// Marks every cell of the memory's floor seen, so a test can draw every
     /// wall a floor has.
     #[cfg(test)]
@@ -948,7 +963,7 @@ pub fn render_saga(
             let map_h = floor_h.min(body * 3 / 5).max(1).min(body - 3);
             out.extend(map(w, map_h).into_iter().map(Row::line));
             out.extend(
-                chronicle_rows(state, flags, &look, w, body - map_h)
+                chronicle_rows(state, flags, &look, w, body - map_h, true)
                     .into_iter()
                     .map(Row::line),
             );
@@ -966,7 +981,7 @@ pub fn render_saga(
             let map_w = (floor_w + 3).min(w * 3 / 5);
             let chron_w = w - map_w - 1;
             let maps = map(map_w, body);
-            let chron = chronicle_rows(state, flags, &look, chron_w, body);
+            let chron = chronicle_rows(state, flags, &look, chron_w, body, true);
             out.extend(maps.into_iter().zip(chron).map(|(m, c)| m.join(1, c)));
             out.push(status_row(state, memory, &look, w).line());
         }
@@ -1275,13 +1290,15 @@ fn halo(style: Style, near_hero: bool, cell: Cell, look: &Look) -> Style {
 
 /// The chronicle pane: a header row, then the newest beats with the newest
 /// at the bottom, every row `cols` wide at most and starting with the bar.
-/// Exactly `rows` rows.
+/// Exactly `rows` rows. `hint` puts the `y` key's hint on the header; the
+/// arcade panel, where `y` does nothing, leaves it off.
 fn chronicle_rows(
     state: &SagaState,
     flags: SagaFlags,
     look: &Look,
     cols: usize,
     rows: usize,
+    hint: bool,
 ) -> Vec<Row> {
     let mut out = Vec::with_capacity(rows);
     if rows == 0 {
@@ -1289,12 +1306,16 @@ fn chronicle_rows(
     }
     let mut head = Row::new(cols);
     head.push("╔═ ", look.bar).push("CHRONICLE", look.head);
-    let hint = if flags.why {
-        "  y hides why "
+    if hint {
+        let hint = if flags.why {
+            "  y hides why "
+        } else {
+            "  y: why "
+        };
+        head.push(hint, look.dim);
     } else {
-        "  y: why "
-    };
-    head.push(hint, look.dim);
+        head.push(" ", Style::default());
+    }
     let rule = "═".repeat(head.room());
     head.push(&rule, look.bar);
     out.push(head);
@@ -1580,6 +1601,14 @@ fn wrap_words(text: &str, first: usize, rest: usize) -> Vec<Vec<(usize, String)>
 /// `  Wren the Unthrottled  ▰▰▰▰▰▰▰▱▱▱  74%  • visiting the sage demo-sage
 /// • mapped 34%  • t208`.
 fn status_row(state: &SagaState, memory: &SagaMemory, look: &Look, w: usize) -> Row {
+    status_after(Row::new(w), state, memory, look)
+}
+
+/// The status row's segments (hero, vitality, quest, mapped share, tick)
+/// pushed after what `row` already holds. The full view starts from an
+/// empty row ([`status_row`]); the arcade panel's HUD starts with the
+/// "(mock)" or "(replay)" mark ([`hud_row`]).
+fn status_after(mut row: Row, state: &SagaState, memory: &SagaMemory, look: &Look) -> Row {
     let p = &look.p;
     let hero = &state.hero;
     let v = if hero.vitality.is_finite() {
@@ -1596,7 +1625,6 @@ fn status_row(state: &SagaState, memory: &SagaMemory, look: &Look, w: usize) -> 
         fg(p.orange)
     };
     let sep = fg(mix(p.base, p.accent, 80));
-    let mut row = Row::new(w);
     row.push(" ", Style::default())
         .push(&hero.name, look.name)
         .push("  ", Style::default())
@@ -1675,6 +1703,159 @@ fn quest_target(state: &SagaState) -> Option<String> {
         .rev()
         .find(|b| b.cause.ordinal == q.reason.ordinal && b.cause.signal == q.reason.signal)
         .map(|b| key_id(b.cause.entity.as_str()).to_string())
+}
+
+// ---------------------------------------------------------------------------
+// The arcade panel
+// ---------------------------------------------------------------------------
+
+/// The smallest Saga panel in an arcade layout (columns, rows): the HUD
+/// row over five map rows. It is the full view's own threshold for drawing
+/// the map ([`MAP_MIN`]). `arcade_layout::View::Saga` reads it, so a
+/// smaller panel is taken out of its row and named on the rule
+/// (`◌ SAGA needs 20x6`).
+pub const PANEL_MIN: (usize, usize) = MAP_MIN;
+/// From this size (columns, rows) the panel draws a chronicle strip under
+/// the map. 70x16 has one; the Saga panel of `now-serving` at 80x24
+/// (39x11) does not.
+pub const PANEL_CHRONICLE_MIN: (usize, usize) = (60, 12);
+
+/// What the arcade's Saga panel draws, set by the TUI once per update
+/// (`ArcadeVisualization::set_saga`).
+#[derive(Debug, Clone)]
+pub enum PanelFeed {
+    /// Nothing has been fed yet: the arcade was just made.
+    Waiting,
+    /// There is no driver: `[saga] enabled = false` (`enabled` false), or
+    /// a driver that could not start.
+    Off { enabled: bool },
+    /// The driver's last published state (an `Arc`, so a feed copies no
+    /// state) and whether the driver has stopped.
+    Live {
+        state: std::sync::Arc<SagaState>,
+        stopped: bool,
+    },
+}
+
+/// The note the panel draws before its first world.
+pub const PANEL_WAITING: &str = "saga waiting for the first world";
+/// The note for `[saga] enabled = false`.
+pub const PANEL_OFF: &str = "saga is off: set [saga] enabled = true in config.toml";
+/// The note for a driver that is on in the config but did not start.
+pub const PANEL_NOT_RUNNING: &str = "saga is not running; the log says why";
+/// The note for a driver that stopped before the first world.
+pub const PANEL_STOPPED_EARLY: &str = "the story stopped before its first world";
+
+/// The Saga view as an arcade panel of `area` = (columns, rows): at most
+/// `rows` lines, none wider than `columns`, and the last column always
+/// blank on a map row (the map's own rule, see "Borders").
+///
+/// * Before the first world, with no driver, or with a driver that stopped
+///   before one: a note, one column in like the arcade's other notes. The
+///   off note wraps to the panel's width so the way to turn Saga on is
+///   never cut.
+/// * With a world: the HUD row (the "(mock)" or "(replay)" mark, the
+///   hero's name, the vitality bar, the quest, the mapped share and the
+///   tick: the full view's status row, [`status_after`]), the stopped
+///   banner when the driver has stopped, then the hero's floor from
+///   [`map_rows`], the same renderer the full view uses, so the fog, the
+///   glow, the trail and the colours are the view's own and a floor larger
+///   than the panel scrolls to keep the hero in the middle.
+/// * From [`PANEL_CHRONICLE_MIN`]: a chronicle strip from
+///   [`chronicle_rows`], without the `y` hint (the key does nothing in the
+///   arcade). Under [`SIDE_MIN_COLS`] it is a third of the rows under the
+///   map; from there it sits right of the map, as in the full view.
+///
+/// Names come from the state's beats and causes, so generated mode aliases
+/// the panel exactly as it does the full view. `frame` drives the pulse and
+/// the shimmer; the arcade passes its own frame count.
+pub fn render_saga_panel(
+    feed: &PanelFeed,
+    memory: &SagaMemory,
+    area: (u16, u16),
+    frame: u64,
+) -> Vec<Line<'static>> {
+    let (w, h) = (area.0 as usize, area.1 as usize);
+    if w == 0 || h == 0 {
+        return Vec::new();
+    }
+    let (state, stopped) = match feed {
+        PanelFeed::Waiting => return panel_note(PANEL_WAITING, w, h),
+        PanelFeed::Off { enabled: false } => return panel_note(PANEL_OFF, w, h),
+        PanelFeed::Off { enabled: true } => return panel_note(PANEL_NOT_RUNNING, w, h),
+        PanelFeed::Live { state, stopped } => (state.as_ref(), *stopped),
+    };
+    if !state.has_world() {
+        let text = if stopped {
+            PANEL_STOPPED_EARLY
+        } else {
+            PANEL_WAITING
+        };
+        return panel_note(text, w, h);
+    }
+    let look = Look::for_state(state, memory);
+    let mut out = vec![hud_row(state, memory, &look, w).line()];
+    if stopped && out.len() < h {
+        out.push(banner_row(&look, w).line());
+    }
+    let body = h - out.len();
+    if body == 0 {
+        return out;
+    }
+    let map = |cols, rows| map_rows(state, memory, &look, cols, rows, frame);
+    let flags = SagaFlags {
+        stopped,
+        why: false,
+    };
+    let chronicle = w >= PANEL_CHRONICLE_MIN.0 && h >= PANEL_CHRONICLE_MIN.1;
+    if chronicle && w >= SIDE_MIN_COLS {
+        // As the full view's side layout: the map pane is the floor's width
+        // and three columns, up to three fifths of the panel.
+        let floor_w = hero_floor(state).map_or(1, |f| f.w as usize);
+        let map_w = (floor_w + 3).min(w * 3 / 5);
+        let chron_w = w - map_w - 1;
+        let maps = map(map_w, body);
+        let chron = chronicle_rows(state, flags, &look, chron_w, body, false);
+        out.extend(maps.into_iter().zip(chron).map(|(m, c)| m.join(1, c)));
+    } else if chronicle {
+        // A third of the rows, and at least the header and three beats'
+        // first lines.
+        let chron_h = (body / 3).max(4).min(body - 1);
+        out.extend(map(w, body - chron_h).into_iter().map(Row::line));
+        out.extend(
+            chronicle_rows(state, flags, &look, w, chron_h, false)
+                .into_iter()
+                .map(Row::line),
+        );
+    } else {
+        out.extend(map(w, body).into_iter().map(Row::line));
+    }
+    out
+}
+
+/// The panel's HUD: the label mark, then the full view's status row.
+fn hud_row(state: &SagaState, memory: &SagaMemory, look: &Look, w: usize) -> Row {
+    let mut row = Row::new(w);
+    if let Some(mark) = state.label.mark() {
+        row.push(" ", Style::default())
+            .push(mark, fg(look.p.yellow).add_modifier(Modifier::BOLD));
+    }
+    status_after(row, state, memory, look)
+}
+
+/// A note in the panel: ` text` in the arcade's note colour, wrapped to
+/// the panel's width, at most `h` lines.
+fn panel_note(text: &str, w: usize, h: usize) -> Vec<Line<'static>> {
+    let style = Style::default().fg(colors::text_secondary());
+    wrap(text, w.saturating_sub(1), w.saturating_sub(1))
+        .into_iter()
+        .take(h)
+        .map(|t| {
+            let mut row = Row::new(w);
+            row.push(" ", Style::default()).push(&t, style);
+            row.line()
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------

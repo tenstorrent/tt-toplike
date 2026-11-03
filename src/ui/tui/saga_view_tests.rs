@@ -1286,3 +1286,276 @@ fn golden_saga_hashes() {
 fn the_busy_frames_are_the_pinned_frames() {
     assert_eq!(golden_frames(), GOLDEN.to_vec());
 }
+
+// ---- The arcade panel (0.16.4) ------------------------------------------------
+
+/// A live feed of `state`, not stopped.
+fn live(state: &SagaState, stopped: bool) -> PanelFeed {
+    PanelFeed::Live {
+        state: std::sync::Arc::new(state.clone()),
+        stopped,
+    }
+}
+
+/// The panel's frame with a memory that observed only `state`.
+fn panel(state: &SagaState, stopped: bool, area: (u16, u16)) -> Vec<Line<'static>> {
+    let mut memory = SagaMemory::new();
+    memory.observe(state);
+    render_saga_panel(&live(state, stopped), &memory, area, 3)
+}
+
+/// The panel's sizes: the HUD on the first row, then the map; a chronicle
+/// strip under the map from 60x12, and beside it from 100 columns. Below
+/// 60x12 there is no chronicle.
+#[test]
+fn the_panel_draws_the_hud_over_the_map_and_a_chronicle_when_it_has_room() {
+    let state = busy_state();
+    let hero = state.hero.name.clone();
+    tc(|| {
+        for (w, h, chronicle) in [
+            (20, 6, false),
+            (39, 11, false),
+            (59, 16, false),
+            (60, 12, true),
+            (70, 16, true),
+            (99, 30, true),
+            (120, 30, true),
+        ] {
+            let t = text(&panel(&state, false, (w, h)));
+            assert_eq!(t.len(), h as usize, "{w}x{h}: {t:#?}");
+            assert!(t[0].starts_with(" (mock) "), "{w}x{h}: {:?}", t[0]);
+            assert!(
+                t[0].contains(&hero) || w < 30,
+                "{w}x{h}: the HUD names the hero: {:?}",
+                t[0]
+            );
+            assert!(t[0].contains('▰') || t[0].contains('▱') || w < 40);
+            let has = t.iter().any(|l| l.contains("CHRONICLE"));
+            assert_eq!(has, chronicle, "{w}x{h}: {t:#?}");
+            // The arcade's `y` does nothing, so the panel gives no hint.
+            assert!(!t.iter().any(|l| l.contains("y: why")), "{w}x{h}");
+            assert!(t.iter().any(|l| l.contains('@')), "{w}x{h}: no hero");
+        }
+        // At 70x16: the HUD, ten map rows, the strip of five (header and
+        // four rows) at the bottom.
+        let t = text(&panel(&state, false, (70, 16)));
+        assert!(t[11].starts_with("╔═ CHRONICLE"), "{t:#?}");
+        // From 100 columns the strip sits right of the map.
+        let t = text(&panel(&state, false, (120, 30)));
+        let head = t.iter().position(|l| l.contains("CHRONICLE")).unwrap();
+        assert_eq!(head, 1, "the strip starts under the HUD: {t:#?}");
+        assert!(!t[1].starts_with('╔'), "it starts right of the map");
+    })
+}
+
+/// Every panel size up to 160x50 fits its area, and no row ends in a
+/// right-edge glyph: the map's last column is always blank and the strip's
+/// header ends in `═`.
+#[test]
+fn every_panel_size_fits_and_no_row_ends_in_a_right_edge_glyph() {
+    use crate::animation::arcade::RIGHT_EDGE_GLYPHS;
+    let state = busy_state();
+    let mut all_seen = SagaMemory::new();
+    all_seen.observe(&state);
+    all_seen.see_everything();
+    tc(|| {
+        for stopped in [false, true] {
+            let feed = live(&state, stopped);
+            for w in 1..=160u16 {
+                for h in [1u16, 2, 5, 6, 11, 12, 16, 20, 31, 50] {
+                    let lines = render_saga_panel(&feed, &all_seen, (w, h), 3);
+                    assert_fits(&lines, w, h, "panel");
+                    for (i, l) in lines.iter().enumerate() {
+                        let t = text(std::slice::from_ref(l)).remove(0);
+                        if width(l) == w as usize {
+                            let last = t.chars().last().unwrap();
+                            assert!(
+                                !RIGHT_EDGE_GLYPHS.contains(&last),
+                                "{w}x{h} row {i} ends in {last:?}: {t:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// The notes: before the first world, with `[saga] enabled = false`, with a
+/// driver that did not start, and a stopped driver with no world. Each is
+/// one line at a width that holds it; the off note wraps rather than lose
+/// the way to turn Saga on.
+#[test]
+fn the_panel_notes_say_why_there_is_no_map() {
+    let memory = SagaMemory::new();
+    let empty = empty_state(Label::Live);
+    let one = |feed: &PanelFeed, w: u16| text(&tc(|| render_saga_panel(feed, &memory, (w, 11), 0)));
+    assert_eq!(
+        one(&PanelFeed::Waiting, 70),
+        vec![format!(" {PANEL_WAITING}")]
+    );
+    assert_eq!(
+        one(&live(&empty, false), 70),
+        vec![format!(" {PANEL_WAITING}")]
+    );
+    assert_eq!(PANEL_WAITING, "saga waiting for the first world");
+    assert_eq!(
+        one(&PanelFeed::Off { enabled: false }, 70),
+        vec![format!(" {PANEL_OFF}")]
+    );
+    assert!(PANEL_OFF.contains("[saga] enabled = true") && PANEL_OFF.contains("config.toml"));
+    assert_eq!(
+        one(&PanelFeed::Off { enabled: true }, 70),
+        vec![format!(" {PANEL_NOT_RUNNING}")]
+    );
+    assert_eq!(
+        one(&live(&empty, true), 70),
+        vec![format!(" {PANEL_STOPPED_EARLY}")]
+    );
+    // At 39 columns the off note wraps, and all of it is there.
+    let narrow = one(&PanelFeed::Off { enabled: false }, 39);
+    assert!(narrow.len() > 1, "{narrow:?}");
+    let joined: Vec<&str> = narrow.iter().map(|l| l.trim()).collect();
+    assert_eq!(joined.join(" "), PANEL_OFF);
+    // The notes take the arcade's note colour.
+    let lines = tc(|| render_saga_panel(&PanelFeed::Waiting, &memory, (70, 11), 0));
+    let note = lines[0].spans.last().unwrap();
+    assert_eq!(note.style.fg, Some(tc(colors::text_secondary)));
+}
+
+/// A stopped driver with a world: the HUD, then the full view's stopped
+/// banner, then the map of the last state.
+#[test]
+fn a_stopped_driver_shows_the_banner_over_the_last_map() {
+    let state = busy_state();
+    let t = text(&tc(|| panel(&state, true, (70, 16))));
+    assert!(t[1].contains("the story has stopped"), "{t:#?}");
+    assert!(t.iter().any(|l| l.contains('@')), "the last map is drawn");
+    let running = text(&tc(|| panel(&state, false, (70, 16))));
+    assert!(!running.iter().any(|l| l.contains("stopped")));
+}
+
+/// The panel shares the view's renderers: its map rows are the rows
+/// `map_rows` gives the full view for the same size, cell for cell, and its
+/// HUD is the full view's status row after the label mark.
+#[test]
+fn the_panel_map_and_hud_are_the_views_own() {
+    let (saga, memory) = saga_and_memory(busy().len());
+    let state = saga.state();
+    tc(|| {
+        let feed = PanelFeed::Live {
+            state: std::sync::Arc::new(state.clone()),
+            stopped: false,
+        };
+        let lines = render_saga_panel(&feed, &memory, (39, 11), 5);
+        let look = Look::for_state(state, &memory);
+        let want: Vec<Line<'static>> = map_rows(state, &memory, &look, 39, 10, 5)
+            .into_iter()
+            .map(Row::line)
+            .collect();
+        assert_eq!(frame_hash(&lines[1..]), frame_hash(&want));
+        let status = text(&[status_row(state, &memory, &look, 80).line()]).remove(0);
+        let hud = text(&lines[..1]).remove(0);
+        let after_mark = hud.strip_prefix(" (mock)").expect("the mark comes first");
+        assert!(status.starts_with(after_mark), "{hud:?} vs {status:?}");
+    })
+}
+
+/// Generated names reach the panel exactly as they reach the view: no real
+/// model or process name in the HUD or the chronicle strip, at every
+/// hundredth state of the busy log and two panel sizes. The real-name run
+/// is the control.
+#[test]
+fn the_panel_in_generated_mode_shows_no_real_name() {
+    let scan = |names: NameMode| -> String {
+        tc(|| {
+            let mut saga = Saga::new(config(names, Label::Mock));
+            let mut memory = SagaMemory::new();
+            let mut all = String::new();
+            for (i, r) in busy().iter().enumerate() {
+                saga.feed(r);
+                memory.observe(saga.state());
+                if i % 100 != 0 && i + 1 != busy().len() {
+                    continue;
+                }
+                let feed = live(saga.state(), false);
+                for size in [(70, 16), (120, 30)] {
+                    all.push_str(&text(&render_saga_panel(&feed, &memory, size, 0)).join("\n"));
+                }
+            }
+            all
+        })
+    };
+    let generated = scan(NameMode::Generated);
+    for name in REAL_NAMES {
+        assert!(!generated.contains(name), "the panel shows {name}");
+    }
+    assert!(
+        scan(NameMode::Real).contains("demo-sage"),
+        "the control finds the name"
+    );
+}
+
+/// The panel's frames at 70x16 and at its smallest size, 20x6, after half
+/// the busy log and after all of it, with a memory built over the log.
+fn golden_panel_frames() -> Vec<u64> {
+    tc(|| {
+        let half = busy().len() / 2;
+        let mut out = Vec::new();
+        for cut in [half, busy().len()] {
+            let (saga, memory) = saga_and_memory(cut);
+            let feed = live(saga.state(), false);
+            for size in [(70u16, 16u16), (PANEL_MIN.0 as u16, PANEL_MIN.1 as u16)] {
+                out.push(frame_hash(&render_saga_panel(&feed, &memory, size, 5)));
+            }
+        }
+        out
+    })
+}
+
+/// The hashes of [`golden_panel_frames`], pinned when the panel was added
+/// in 0.16.4 and looked at in a 140x40 and an 80x24 tmux capture.
+const GOLDEN_PANEL: [u64; 4] = [
+    12009227563986411993,
+    13429898114650174554,
+    1019373424927296806,
+    11240896677602126856,
+];
+
+/// Prints the hashes for [`GOLDEN_PANEL`]. Run with
+/// `cargo test --locked --lib --features tui golden_panel_hashes -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints the hashes to pin"]
+fn golden_panel_hashes() {
+    println!("{:?}", golden_panel_frames());
+}
+
+#[test]
+fn the_panel_frames_are_the_pinned_frames() {
+    assert_eq!(golden_panel_frames(), GOLDEN_PANEL.to_vec());
+}
+
+/// What a panel frame costs next to the full view's at the same size, in a
+/// release build. It prints; it asserts nothing about time. Run with
+/// `cargo test --release --locked --lib --features tui panel_cost -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints timings"]
+fn panel_cost() {
+    let (saga, memory) = saga_and_memory(busy().len());
+    let state = saga.state();
+    let feed = live(state, false);
+    let n = 2000;
+    for size in [(70u16, 16u16), (140, 39)] {
+        let t = std::time::Instant::now();
+        for f in 0..n {
+            std::hint::black_box(render_saga(state, &memory, PLAIN, size, f));
+        }
+        let view = t.elapsed() / n as u32;
+        let t = std::time::Instant::now();
+        for f in 0..n {
+            std::hint::black_box(render_saga_panel(&feed, &memory, size, f));
+        }
+        let panel = t.elapsed() / n as u32;
+        println!("{size:?}: view {view:?} a frame, panel {panel:?} a frame");
+    }
+}

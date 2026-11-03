@@ -70,6 +70,10 @@ fn only_the_inference_training_and_waffler_views_take_a_backdrop() {
         takers(),
         "only inference, training and Wafer Waffler take a backdrop"
     );
+    // Saga, as a view and as an arcade panel, takes none: it is not a
+    // backdrop view, and the arcade carries none behind any panel.
+    assert!(accepts("saga").is_empty());
+    assert!(!takes_backdrop("saga"));
 }
 
 #[test]

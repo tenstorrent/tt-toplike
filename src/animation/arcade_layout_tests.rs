@@ -306,3 +306,48 @@ fn the_old_cloudfield_command_says_the_arcade_carries_no_backdrop() {
     assert!(command("sparkle").1);
     assert!(command("").1);
 }
+
+// ---- Saga (0.16.4) -----------------------------------------------------------
+
+/// `saga` is a view like the others: its key parses in any case, it is in
+/// [`View::ALL`] (so the "unknown view" message lists it), and its rule
+/// label is `Ψ SAGA`, one column per character.
+#[test]
+fn saga_is_a_view_with_a_key_and_a_single_width_label() {
+    assert_eq!(View::from_key("saga"), Some(View::Saga));
+    assert_eq!(View::from_key(" Saga "), Some(View::Saga));
+    assert_eq!(View::Saga.key(), "saga");
+    assert!(View::ALL.contains(&View::Saga));
+    assert_eq!(View::Saga.label(), "Ψ SAGA");
+    let label = View::Saga.label();
+    assert_eq!(
+        unicode_width::UnicodeWidthStr::width(label),
+        label.chars().count(),
+        "every character of the label is one column wide"
+    );
+}
+
+/// A Saga panel needs 20x6, the HUD over five map rows. Smaller, it is
+/// taken out of its row and named on the rule, and the other panel takes
+/// the columns.
+#[test]
+fn a_saga_panel_under_20x6_is_named_on_the_rule() {
+    assert_eq!(View::Saga.min_size(), (20, 6));
+    assert!(View::Saga.fits(20, 6));
+    assert!(!View::Saga.fits(19, 6));
+    assert!(!View::Saga.fits(20, 5));
+    assert!(!View::Saga.fits(0, 0), "an empty Saga panel is not drawn");
+    // 30 columns shared 1:1 give Saga 14.
+    let rows = vec![row(1, &[(View::Castle, 1), (View::Saga, 1)])];
+    let l = layout(&rows, 30, 30);
+    let r = &l.rows[0];
+    assert_eq!(r.hidden, vec![(View::Saga, (20, 6))]);
+    assert_eq!(r.panels.len(), 1);
+    assert_eq!(r.panels[0].rect.w, 30);
+    assert_eq!(hidden_note(View::Saga, 20, 6), "◌ SAGA needs 20x6");
+    assert!(r.label().contains("◌ SAGA needs 20x6"), "{}", r.label());
+    // 50 columns give it 24: it shows.
+    let l = layout(&rows, 50, 30);
+    assert!(l.rows[0].hidden.is_empty());
+    assert_eq!(l.find(View::Saga).unwrap().rect.w, 24);
+}

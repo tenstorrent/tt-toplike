@@ -52,11 +52,13 @@ pub enum View {
     Die3d,
     Training,
     Inference,
+    /// The Saga view's map and HUD (`saga_view::render_saga_panel`).
+    Saga,
 }
 
 impl View {
     /// Every view, in the order the docs list them.
-    pub const ALL: [View; 7] = [
+    pub const ALL: [View; 8] = [
         View::Starfield,
         View::Castle,
         View::Flow,
@@ -64,6 +66,7 @@ impl View {
         View::Die3d,
         View::Training,
         View::Inference,
+        View::Saga,
     ];
 
     /// The name used in the config file.
@@ -76,6 +79,7 @@ impl View {
             View::Die3d => "die3d",
             View::Training => "training",
             View::Inference => "inference",
+            View::Saga => "saga",
         }
     }
 
@@ -91,7 +95,9 @@ impl View {
 
     /// The label on the panel's rule. The first four are the labels the
     /// arcade has always printed. Die 3D's comes from its display name
-    /// (`DIE3D_DISPLAY_NAME`), in capitals like the others.
+    /// (`DIE3D_DISPLAY_NAME`), in capitals like the others. Saga's mark is
+    /// `Ψ`, the map's sage: one column wide and never drawn as an emoji
+    /// (`⚔` has an emoji form some terminals draw two columns wide).
     pub fn label(self) -> &'static str {
         match self {
             View::Starfield => "✧ STARFIELD",
@@ -101,6 +107,7 @@ impl View {
             View::Die3d => die3d_label(),
             View::Training => "∿ TRAINING",
             View::Inference => "≈ INFERENCE",
+            View::Saga => "Ψ SAGA",
         }
     }
 
@@ -114,12 +121,15 @@ impl View {
     /// * Training: the Training view's own floor (`TrainView::new` never
     ///   draws below 20 x 10).
     /// * Inference: the serving creature's dashboard needs about 24 x 8.
+    /// * Saga: the HUD row over five map rows, the size from which the Saga
+    ///   view draws its map (`saga_view::PANEL_MIN`, 20 x 6).
     pub fn min_size(self) -> (usize, usize) {
         match self {
             View::Starfield | View::Castle | View::Flow | View::Defrag => (1, 1),
             View::Die3d => crate::animation::die3d::SCENE_MIN_CELLS,
             View::Training => (20, 10),
             View::Inference => (24, 8),
+            View::Saga => crate::ui::tui::saga_view::PANEL_MIN,
         }
     }
 }
@@ -137,8 +147,8 @@ impl View {
     /// [`View::min_size`] fits. So does an empty panel (no column or no row)
     /// of a view whose minimum is 1x1: the four original views draw nothing
     /// there and keep their row and label, as the arcade did before the
-    /// layout engine. Die 3D, Training and the inference panel need their
-    /// minimum.
+    /// layout engine. Die 3D, Training, the inference panel and Saga need
+    /// their minimum.
     pub fn fits(self, w: usize, h: usize) -> bool {
         let (mw, mh) = self.min_size();
         let empty = w == 0 || h == 0;

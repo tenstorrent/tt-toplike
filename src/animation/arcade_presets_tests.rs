@@ -165,7 +165,7 @@ fn the_status_line_names_the_layout_its_place_and_its_description() {
     c.prev();
     assert_eq!(
         c.status(),
-        "layout: now-serving (2/8) — inference over Wafer Waffler and defrag"
+        "layout: now-serving (2/8) — inference over Wafer Waffler and saga"
     );
     let mut c = LayoutCycle::new(
         &[NamedLayout {
@@ -313,15 +313,26 @@ fn each_preset_degrades_as_the_docs_say() {
     );
     // now-serving keeps the inference panel at 80x24; at 60x20 its row is
     // 6 rows, under the panel's 8, so it is taken out and its rows go to
-    // the Wafer Waffler and defrag.
+    // the Wafer Waffler and Saga.
     assert_eq!(
         shown("now-serving", 80, 24),
         (everything("now-serving"), vec![])
     );
     assert_eq!(
         shown("now-serving", 60, 20),
-        (vec![Die3d, Defrag], vec![Inference])
+        (vec![Die3d, Saga], vec![Inference])
     );
+    // The Saga panel's sizes the docs give: 39x11 at 80x24, 29x15 at 60x20.
+    let at = |w, h| {
+        let r = layout(&preset("now-serving").unwrap().rows, w, h)
+            .find(Saga)
+            .unwrap()
+            .rect;
+        (r.w, r.h)
+    };
+    assert_eq!(at(80, 24), (39, 11));
+    assert_eq!(at(60, 20), (29, 15));
+    assert_eq!(at(140, 40), (69, 20));
     let l = layout(&preset("now-serving").unwrap().rows, 80, 24);
     assert_eq!(l.find(Inference).unwrap().rect.h, 8);
     assert!(
@@ -385,7 +396,45 @@ fn now_serving_has_no_starfield() {
         .iter()
         .flat_map(|r| r.panels.iter().map(|p| p.view))
         .collect();
-    assert_eq!(views, vec![View::Inference, View::Die3d, View::Defrag]);
+    assert_eq!(views, vec![View::Inference, View::Die3d, View::Saga]);
+}
+
+/// 0.16.4: "add the Saga to 'now serving' arcade view instead of defrag".
+/// Saga takes defrag's place on the right of the bottom row, at the same
+/// weights, and every other preset that showed defrag still does. No other
+/// preset shows Saga.
+#[test]
+fn now_serving_has_saga_in_place_of_defrag_and_the_others_keep_defrag() {
+    let views = |l: &NamedLayout| -> Vec<View> {
+        l.rows
+            .iter()
+            .flat_map(|r| r.panels.iter().map(|p| p.view))
+            .collect()
+    };
+    let ns = preset("now-serving").unwrap();
+    assert!(!views(ns).contains(&View::Defrag));
+    assert_eq!(
+        ns.rows[1].panels,
+        vec![
+            PanelSpec {
+                view: View::Die3d,
+                width: 1
+            },
+            PanelSpec {
+                view: View::Saga,
+                width: 1
+            },
+        ]
+    );
+    assert_eq!((ns.rows[0].height, ns.rows[1].height), (3, 4));
+    for name in ["classic", "defrag-wide", "workload", "deck", "memory-lane"] {
+        let l = preset(name).unwrap();
+        assert!(views(l).contains(&View::Defrag), "{name} keeps defrag");
+        assert!(!views(l).contains(&View::Saga), "{name} has no saga");
+    }
+    for l in presets().iter().filter(|l| l.name != "now-serving") {
+        assert!(!views(l).contains(&View::Saga), "{}", l.name);
+    }
 }
 
 /// Every built-in layout's status line fits an 80-column status bar

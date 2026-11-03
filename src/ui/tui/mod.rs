@@ -48,7 +48,7 @@ mod hivemind_bus;
 mod hivemind_view;
 pub(crate) mod inference_bus;
 pub(crate) mod inference_panel;
-mod saga_view;
+pub(crate) mod saga_view;
 mod saga_why;
 
 use crate::animation::{
@@ -1746,6 +1746,12 @@ fn run_app(
                         // The bus: gauges, labels, hits, heartbeat, sparks
                         // and reset flashes (see `arcade_bus`).
                         arc.set_bus(Some(&tui_bus.read()), backend);
+                        // The Saga panel: the driver's last state and the
+                        // view's memory (a layout without one ignores it).
+                        arc.set_saga(
+                            saga_panel_feed(saga, loaded_config.saga.enabled),
+                            &saga_memory,
+                        );
                         arc.update(backend);
                     }
                 }
@@ -4316,6 +4322,22 @@ fn ui_saga(
     };
     let widget = Paragraph::new(lines).style(Style::default().bg(colors::canvas_bg()));
     f.render_widget(widget, area);
+}
+
+/// What the arcade's Saga panel is fed: the driver's last published state
+/// and its stopped flag in one read, or why there is no driver (`enabled`
+/// is the `[saga] enabled` setting).
+fn saga_panel_feed(saga: Option<&crate::saga::SagaDriver>, enabled: bool) -> saga_view::PanelFeed {
+    match saga {
+        Some(d) => {
+            let p = d.published();
+            saga_view::PanelFeed::Live {
+                state: p.state,
+                stopped: p.stopped,
+            }
+        }
+        None => saga_view::PanelFeed::Off { enabled },
+    }
 }
 
 /// Render Arcade mode — uses the composite canvas so the hero `@` and trail
