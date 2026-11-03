@@ -103,29 +103,32 @@ pub const HELP_KEYS: &[&[(&str, &str)]] = &[
 ];
 
 /// The `!` text. Each claim is checked against the code: the floors in
-/// `tt_toplike_saga::maze`, worlds in `world`, determinism in the crate's
+/// `tt_toplike_saga::maze` and `topology`, worlds in `world`, determinism in the crate's
 /// docs, causes in `chronicle`, names in `config.rs`, labels in spec 3.9.
 pub const EXPLAIN_TEXT: &[&str] = &[
     "Saga",
     "",
     "A hero quests through a dungeon built from this box's",
-    "own signals. Each chip is a floor: rooms and walls from",
-    "its tile grid, a vault per GDDR channel, a portal per",
-    "live Ethernet link and a gate for PCIe. A model coming",
-    "up raises a world with a sage to visit. A reset, the",
-    "model going away or a quiet season ends it, and the",
-    "next world gets a new maze.",
+    "own signals. Each chip is a floor. A Blackhole floor",
+    "follows the chip's tile grid, with ruins over harvested",
+    "columns, a vault per GDDR channel and a portal per live",
+    "Ethernet link. Other chips get a default floor. Every",
+    "floor has a gate for PCIe. The seed, taken from the low",
+    "bits of the readings, places the rooms. A model coming",
+    "up raises a world with a sage to visit, and a training",
+    "run raises a forge that ends when the run stops. A",
+    "reset, the model going away or a quiet season ends a",
+    "world, and the next world gets a new maze.",
     "",
     "The same recording gives the same story. The saga reads",
     "the order of the bus's records and ignores their clocks.",
     "",
-    "The fiction is decoration. Every chronicle line names",
-    "the signal behind it: press y to see each line's",
-    "entity, signal and place in the stream.",
+    "The fiction is decoration. Every chronicle line has a",
+    "cause: press y to see its entity, its signal (or \"no",
+    "signal\") and its place in the stream.",
     "",
     "For screen sharing, set names = \"generated\" under",
-    "[saga] in config.toml to replace model and process",
-    "names with made-up ones.",
+    "[saga] to show made-up model and process names.",
     "",
     "(mock) in the title means the readings are estimates",
     "from --mock. (replay) means a recorded log is playing.",
@@ -477,11 +480,24 @@ pub fn render_saga_off(area: (u16, u16), enabled: bool) -> Vec<Line<'static>> {
     out
 }
 
-/// The hero's floor, or the world's first floor when the hero's index is
-/// past the end (the core plans on the first floor then too).
+/// The index of the hero's floor in the world's floors: the hero's own
+/// index, or 0 (the first floor) when that index is past the end, since the
+/// core plans on the first floor then too. `None` when the world has no
+/// floors. The title and the map both use it, so they always name the same
+/// floor.
+fn hero_floor_index(state: &SagaState) -> Option<usize> {
+    let n = state.world.floors.len();
+    let i = state.hero.floor as usize;
+    match n {
+        0 => None,
+        _ if i < n => Some(i),
+        _ => Some(0),
+    }
+}
+
+/// The hero's floor (see [`hero_floor_index`]).
 fn hero_floor(state: &SagaState) -> Option<&Floor> {
-    let floors = &state.world.floors;
-    floors.get(state.hero.floor as usize).or(floors.first())
+    hero_floor_index(state).and_then(|i| state.world.floors.get(i))
 }
 
 /// `▌ SAGA (mock) · world 3 · dungeon · floor 1 of 2 · chip 0000:01:00.0`,
@@ -500,8 +516,7 @@ fn title_row(state: &SagaState, look: &Look, w: usize, stopped_mark: bool) -> Ro
         let world = &state.world;
         let mut info = format!(" · world {} · {}", world.id, biome_word(world.biome));
         let n = world.floors.len();
-        if n > 0 {
-            let i = (state.hero.floor as usize).min(n - 1);
+        if let Some(i) = hero_floor_index(state) {
             info.push_str(&format!(" · floor {} of {n}", i + 1));
             if let Some(chip) = world.chips.get(i) {
                 info.push_str(&format!(" · chip {}", key_id(chip.as_str())));
@@ -977,10 +992,11 @@ pub fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'static>> {
             look.goal,
             "a sage: a ready model, when the hero visits it",
         ),
-        line(vec![
-            ("x".to_string(), look.goal),
-            ("  the highlighted cell is the hero's goal".to_string(), dim),
-        ]),
+        glyph(
+            g.floor,
+            look.goal,
+            "the hero's goal: its own glyph, highlighted like this",
+        ),
         line(vec![]),
         line(vec![("THE CHRONICLE".to_string(), look.head)]),
         line(vec![

@@ -444,6 +444,48 @@ fn the_quest_goal_is_marked() {
     });
 }
 
+/// A hero floor index past the end of the world's floors (the core never
+/// makes one, but the view must not disagree with itself if it did): the
+/// title and the map both fall back to the first floor, as the core's
+/// planner does. The title once clamped to the last floor while the map
+/// showed the first.
+#[test]
+fn an_out_of_range_floor_is_the_first_floor_in_title_and_map() {
+    let mut state = busy_state();
+    let n = state.world.floors.len();
+    assert!(
+        n >= 2,
+        "the busy world has two floors, so first and last differ"
+    );
+    let look = tc(Look::new);
+    let first_title = tc(|| {
+        let mut s = state.clone();
+        s.hero.floor = 0;
+        title_row(&s, &look, 200, false).line()
+    });
+    let first_map = tc(|| {
+        let mut s = state.clone();
+        s.hero.floor = 0;
+        map_rows(&s, &look, 140, 30, 0)
+            .into_iter()
+            .map(Row::line)
+            .collect::<Vec<_>>()
+    });
+    state.hero.floor = u8::try_from(n + 3).unwrap_or(u8::MAX);
+    assert_eq!(hero_floor_index(&state), Some(0));
+    let title = tc(|| title_row(&state, &look, 200, false).line());
+    let all = text(std::slice::from_ref(&title)).join("");
+    assert!(all.contains(&format!("floor 1 of {n}")), "{all}");
+    assert_eq!(text(&[title]), text(&[first_title]));
+    let map = tc(|| {
+        map_rows(&state, &look, 140, 30, 0)
+            .into_iter()
+            .map(Row::line)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(text(&map), text(&first_map));
+}
+
 // ---- The status line and names ---------------------------------------------
 
 /// The bottom row names the hero and shows its vitality as a bar and its
