@@ -17,7 +17,7 @@ use crate::hero::HEARTBEAT_ALIVE;
 use crate::maze::{MIN_H, MIN_W};
 use crate::stats::RESERVED_TRAILS;
 use crate::topology::{MAX_COLS, MAX_ROWS};
-use crate::world::MAX_CHIPS;
+use crate::world::MAX_FLOORS;
 
 #[allow(dead_code)]
 #[path = "../tests/support/fuzz.rs"]
@@ -32,6 +32,10 @@ const RULED_TRAIL_NAMES: usize = 128;
 const RULED_READY: usize = 64;
 /// Undrained events kept (ruling R20).
 const RULED_EVENTS: usize = 4096;
+/// Bytes in the longest key, signal name or event string kept (ruling R21).
+const RULED_ITEM_BYTES: usize = 256;
+/// Floors one world generates (ruling R22).
+const RULED_FLOORS: usize = 32;
 /// Chronicle lines (spec 9).
 const SPEC_CHRONICLE: usize = 500;
 /// Entities (spec 9).
@@ -135,11 +139,11 @@ fn memory_stays_bounded() {
             "{at}: aliases"
         );
 
-        // The world: the huge ModelReady named 1000 chips; a world keeps 64,
+        // The world: the huge ModelReady named 1000 chips; a world keeps 32,
         // and every floor fits the grid limit.
         let w = &saga.state.world;
         assert!(
-            w.chips.len() <= RULED_CHIPS,
+            w.chips.len() <= RULED_FLOORS,
             "{at}: {} world chips",
             w.chips.len()
         );
@@ -152,6 +156,49 @@ fn memory_stays_bounded() {
                 f.h
             );
         }
+
+        // Item sizes (ruling R21): the flood's five 1 MB records were
+        // dropped whole, and nothing the saga keeps is longer than 256
+        // bytes.
+        let mut longest = saga.trails.longest_item();
+        let mut note = |what: &str, len: usize| {
+            assert!(
+                len <= RULED_ITEM_BYTES,
+                "{at}: a {len}-byte {what} is stored"
+            );
+            longest = longest.max(len);
+        };
+        for c in saga.chips.keys() {
+            note("chip key", c.as_str().len());
+        }
+        for (m, cause) in &saga.ready {
+            note("model key", m.as_str().len());
+            note("cause entity", cause.entity.as_str().len());
+            note("cause signal", cause.signal.len());
+        }
+        for h in &saga.hooks {
+            note(
+                "hook target",
+                h.target.as_ref().map_or(0, |t| t.as_str().len()),
+            );
+            note("hook reason", h.reason.entity.as_str().len());
+            note("hook signal", h.reason.signal.len());
+        }
+        for beat in saga.state.chronicle.lines(CAPACITY) {
+            note("beat cause entity", beat.cause.entity.as_str().len());
+            note("beat cause signal", beat.cause.signal.len());
+        }
+        for c in &w.chips {
+            note("world chip", c.as_str().len());
+        }
+        let q = &saga.state.quest;
+        note("quest reason", q.reason.entity.as_str().len());
+        note("quest signal", q.reason.signal.len());
+        assert!(
+            longest <= RULED_ITEM_BYTES,
+            "{at}: a {longest}-byte trail key or name is stored"
+        );
+        assert_eq!(saga.oversized(), gen::FLOOD_OVERSIZED, "{at}: oversized");
 
         // Every entity the saga holds, counted once: under the spec's 500.
         let mut held: BTreeSet<&EntityKey> = BTreeSet::new();
@@ -167,15 +214,29 @@ fn memory_stays_bounded() {
     }
 }
 
+/// One record's work stays under a million work units (spec 9's step
+/// budget, ledger rulings R9 and R22).
+///
+/// A work unit is one of four things the test-only counter in
+/// [`crate::cost`] counts: a maze cell generated, an A* expansion, a trail
+/// push, or an event raised. A unit is not an elementary operation. A maze
+/// cell costs roughly 30 elementary operations on today's floors (allocation,
+/// room fill, corridors, Prim's comparisons, the ruin pass and the exit
+/// search, estimated from the code in `maze.rs`), an A* expansion a few
+/// dozen (four neighbours and the open set), and a trail push or an event a
+/// few. So the budget of a million units is a budget of roughly tens of
+/// millions of operations, and the number that matters for the 1 ms target
+/// is the measured time quoted in the Task 1.12 report.
 #[test]
-fn a_step_costs_under_a_million_operations() {
+fn a_step_stays_under_a_million_work_units() {
     // The structural worst case of one record, from the constants: at most
     // one world is born per record (see "Bounds" in the module comment of
-    // saga.rs), with one floor per chip of at most MAX_COLS x MAX_ROWS cells;
-    // the hero searches once, expanding each cell at most once. Trail pushes
-    // and events are counted below; they depend on the record's own size.
+    // saga.rs), with at most MAX_FLOORS floors of at most MAX_COLS x MAX_ROWS
+    // cells; the hero searches once, expanding each cell at most once. Trail
+    // pushes and events are counted below; they depend on the record's own
+    // size.
     let cells = u64::from(MAX_COLS) * u64::from(MAX_ROWS);
-    let structural = MAX_CHIPS as u64 * cells + cells;
+    let structural = MAX_FLOORS as u64 * cells + cells;
     assert!(
         structural < BUDGET,
         "the caps allow {structural} units in one record"
@@ -204,10 +265,15 @@ fn a_step_costs_under_a_million_operations() {
         "{at} cost {units:?} = {} units",
         units.total()
     );
-    // The flood reached the widest birth: a floor for each of 64 chips.
+    // The flood reached the widest birth: a floor for each of 32 chips, and
+    // no more.
     let smallest_floor = u64::from(MIN_W) * u64::from(MIN_H);
     assert!(
-        units.cells >= RULED_CHIPS as u64 * smallest_floor,
-        "the worst record ({at}, {units:?}) was not a 64-chip birth"
+        units.cells >= RULED_FLOORS as u64 * smallest_floor,
+        "the worst record ({at}, {units:?}) was not a 32-floor birth"
+    );
+    assert!(
+        units.cells <= RULED_FLOORS as u64 * cells,
+        "the worst record ({at}, {units:?}) generated more than 32 floors"
     );
 }

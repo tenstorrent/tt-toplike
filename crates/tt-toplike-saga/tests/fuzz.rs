@@ -8,7 +8,7 @@
 //! seed list is not read from the environment.)
 //!
 //! The bounds tests (`memory_stays_bounded`,
-//! `a_step_costs_under_a_million_operations`) are unit tests in
+//! `a_step_stays_under_a_million_work_units`) are unit tests in
 //! `src/fuzz_tests.rs`: they read the saga's private collections and a work
 //! counter that exists only in the crate's own test build (ledger ruling R9).
 
@@ -16,17 +16,36 @@ mod support;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+use std::collections::BTreeSet;
 use support::fuzz::{random_stream, FUZZ_RECORDS};
-use tt_toplike_bus::Record;
+
+use tt_toplike_bus::{EntityKey, Event, Payload, Provenance, Record, Sample, Value};
 use tt_toplike_saga::chronicle::{NameMode, CAPACITY};
 use tt_toplike_saga::maze::Cell;
 use tt_toplike_saga::rng::Pcg32;
-use tt_toplike_saga::world::MAX_CHIPS;
+use tt_toplike_saga::world::{MAX_CHIPS, MAX_FLOORS};
 use tt_toplike_saga::{Label, Saga, SagaConfig};
 
 /// The seeds a normal run tries. Each gives a stream of [`FUZZ_RECORDS`]
 /// records.
 const SEEDS: [u64; 3] = [1, 0x005e_ed0f_5a9a, 0xdead_beef_caff];
+
+/// Distinct chips that carry a sample or sweep from a source other than
+/// `saga` in `records`: the chips a saga fed this stream is offered.
+fn offered_chips(records: &[Record]) -> usize {
+    let mut chips = BTreeSet::new();
+    for r in records.iter().filter(|r| r.source != "saga") {
+        let entity = match &r.payload {
+            Payload::Sample(s) => &s.entity,
+            Payload::Sweep(s) => &s.entity,
+            _ => continue,
+        };
+        if let Some(chip) = entity.chip_owner() {
+            chips.insert(chip);
+        }
+    }
+    chips.len()
+}
 
 /// A short season, so quiet stretches end worlds and dreams are born within
 /// one stream. The seed picks the name mode and the label, so the three
@@ -61,7 +80,7 @@ fn check_state(saga: &Saga, seed: u64, i: usize, last_tick: u64) {
         "{at}: chips and floors differ"
     );
     assert!(!w.floors.is_empty(), "{at}: a world with no floor");
-    assert!(w.chips.len() <= MAX_CHIPS, "{at}: {} chips", w.chips.len());
+    assert!(w.chips.len() <= MAX_FLOORS, "{at}: {} chips", w.chips.len());
     assert_eq!(s.has_world(), w.id > 0, "{at}: has_world disagrees with id");
     let floor = w
         .floors
@@ -120,7 +139,16 @@ fn random_record_streams_never_panic() {
         let saga = run(seed, &records);
 
         // The stream reached the saga's main paths: the clock ran, many
-        // worlds were born, and some chips were turned away at the cap.
+        // worlds were born, spoofed `saga.*` signals were rejected, and the
+        // stream offered more chips than the saga keeps. (Which chips were
+        // turned away is private; `memory_stays_bounded` in
+        // src/fuzz_tests.rs checks the chip table itself.)
+        let offered = offered_chips(&records);
+        assert!(
+            offered > MAX_CHIPS,
+            "seed {seed:#x}: only {offered} distinct chips offered"
+        );
+        assert!(saga.rejected() > 0, "seed {seed:#x}: no spoofed signal");
         let s = saga.state();
         assert!(s.has_world(), "seed {seed:#x}: no world was ever born");
         assert!(s.tick > 1000, "seed {seed:#x}: only {} ticks", s.tick);
@@ -152,5 +180,112 @@ fn random_record_streams_never_panic() {
                 "seed {seed:#x}: one stream gave two digests"
             );
         }
+    }
+}
+
+/// The busy fixture's records, with `extra(i)` inserted before record `i`
+/// for every `i` that is a multiple of 389 (a dozen or so insertions across
+/// the log, at varied points of its script).
+fn busy_with(extra: impl Fn(usize) -> Record) -> (Vec<Record>, u64) {
+    let mut out = Vec::new();
+    let mut inserted = 0;
+    for (i, r) in support::busy::records().into_iter().enumerate() {
+        if i % 389 == 0 {
+            out.push(extra(i));
+            inserted += 1;
+        }
+        out.push(r);
+    }
+    (out, inserted)
+}
+
+/// A record from the backend.
+fn backend(payload: Payload) -> Record {
+    Record {
+        seq: 0,
+        t_mono_ns: 0,
+        t_wall_ms: 0,
+        source: "backend".to_string(),
+        payload,
+    }
+}
+
+/// Feeds `records` to a fresh saga in `names` mode.
+fn fed(records: &[Record], names: NameMode) -> Saga {
+    let mut saga = Saga::new(SagaConfig {
+        season_ticks: 200,
+        names,
+        label: Label::Mock,
+    });
+    for r in records {
+        saga.feed(r);
+    }
+    saga
+}
+
+#[test]
+fn inserted_oversized_records_change_nothing() {
+    let plain = support::busy::records();
+    let long = "x".repeat(1 << 20);
+    let chip = support::busy::chip_a();
+    // A 1 MB signal on a kept chip, a 1 MB chip key, a ready model with a
+    // 1 MB key, and a kernel compile with a 1 MB source, in turn.
+    let (with, inserted) = busy_with(|i| {
+        backend(match i / 389 % 4 {
+            0 => Payload::Sample(Sample {
+                entity: chip.clone(),
+                signal: long.clone(),
+                value: Value::F64(1.0),
+                prov: Provenance::Measured,
+            }),
+            1 => Payload::Sample(Sample {
+                entity: EntityKey::chip(&long),
+                signal: "tt_asic_temperature_celsius".to_string(),
+                value: Value::F64(50.0),
+                prov: Provenance::Measured,
+            }),
+            2 => Payload::Event(Event::ModelReady {
+                model: EntityKey::model(&long),
+                chips: vec![chip.clone()],
+            }),
+            _ => Payload::Event(Event::KernelCompiled {
+                chip: Some(chip.clone()),
+                source: long.clone(),
+            }),
+        })
+    });
+    for names in [NameMode::Real, NameMode::Generated] {
+        let a = fed(&plain, names);
+        let b = fed(&with, names);
+        assert_eq!(a.digest(), b.digest(), "{names:?}: the digest moved");
+        assert_eq!(b.oversized(), inserted, "{names:?}: oversized count");
+        assert_eq!(a.oversized(), 0);
+    }
+}
+
+#[test]
+fn spoofed_saga_signals_change_nothing() {
+    let plain = support::busy::records();
+    let chip = support::busy::chip_b();
+    // Chip B's heartbeat stalls in the busy log; a spoofed "alive" series
+    // would lift its hero's vitality if it got through.
+    let (with, inserted) = busy_with(|i| {
+        backend(Payload::Sample(Sample {
+            entity: chip.clone(),
+            signal: if (i / 389) % 2 == 0 {
+                "saga.heartbeat_alive"
+            } else {
+                "saga.temperature_baseline"
+            }
+            .to_string(),
+            value: Value::F64(1.0),
+            prov: Provenance::Measured,
+        }))
+    });
+    for names in [NameMode::Real, NameMode::Generated] {
+        let a = fed(&plain, names);
+        let b = fed(&with, names);
+        assert_eq!(a.digest(), b.digest(), "{names:?}: the digest moved");
+        assert_eq!(b.rejected(), inserted, "{names:?}: rejected count");
     }
 }

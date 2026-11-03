@@ -223,3 +223,157 @@ fn the_fallback_tick_fires_when_the_pacemaker_goes_quiet() {
     let (out, _) = run(&payloads, |i| (i, i));
     assert_eq!(ticks(&out), 4);
 }
+
+/// Feeds one record from `source` to a fresh feed and returns the feed and
+/// the observations.
+fn feed_one(source: &str, payload: Payload) -> (Feed, Vec<Observation>) {
+    let mut feed = Feed::new();
+    let mut out = Vec::new();
+    feed.push(&record(1, 1, source, payload), &mut out);
+    (feed, out)
+}
+
+/// Text of exactly `n` bytes.
+fn text(n: usize) -> String {
+    "x".repeat(n)
+}
+
+#[test]
+fn an_item_of_256_bytes_is_accepted_and_257_is_dropped() {
+    // A signal name.
+    let (feed, out) = feed_one("backend", sample(chip(1), &text(256), Value::F64(1.0)));
+    assert_eq!((out.len(), feed.ordinal(), feed.oversized()), (1, 1, 0));
+    let (feed, out) = feed_one("backend", sample(chip(1), &text(257), Value::F64(1.0)));
+    assert_eq!((out.len(), feed.ordinal(), feed.oversized()), (0, 0, 1));
+    // An entity key, measured whole: "chip:" is 5 bytes.
+    let key = |n: usize| EntityKey::chip(&text(n - 5));
+    assert_eq!(key(256).as_str().len(), 256);
+    let (feed, out) = feed_one("backend", sample(key(256), "temp", Value::F64(1.0)));
+    assert_eq!((out.len(), feed.ordinal(), feed.oversized()), (1, 1, 0));
+    let (feed, out) = feed_one("backend", sample(key(257), "temp", Value::F64(1.0)));
+    assert_eq!((out.len(), feed.ordinal(), feed.oversized()), (0, 0, 1));
+}
+
+#[test]
+fn a_record_with_any_oversized_string_is_dropped_whole() {
+    let long = text(MAX_ITEM_BYTES + 1);
+    let big = EntityKey::model(&long);
+    let big_chip = EntityKey::chip(&long);
+    let payloads = vec![
+        sweep(big_chip.clone(), vec![("temp", Value::F64(1.0))]),
+        // One long signal among short ones drops the whole sweep, tick and
+        // all.
+        sweep(
+            chip(1),
+            vec![("temp", Value::F64(1.0)), (long.as_str(), Value::F64(2.0))],
+        ),
+        Payload::Event(Event::ModelLoading {
+            model: chip(1),
+            chips: vec![chip(2), big_chip.clone()],
+            progress: None,
+        }),
+        Payload::Event(Event::ModelReady {
+            model: big.clone(),
+            chips: vec![],
+        }),
+        Payload::Event(Event::ModelGone { model: big.clone() }),
+        Payload::Event(Event::RequestsCompleted {
+            model: big.clone(),
+            n: 1,
+        }),
+        Payload::Event(Event::KernelCompiled {
+            chip: None,
+            source: long.clone(),
+        }),
+        Payload::Event(Event::KernelCompiled {
+            chip: Some(big_chip.clone()),
+            source: "k.cpp".into(),
+        }),
+        Payload::Event(Event::Reset {
+            chips: vec![big_chip.clone()],
+        }),
+        Payload::Event(Event::LinkChanged {
+            chip: big_chip.clone(),
+            mask: 1,
+        }),
+        Payload::Event(Event::LeaseGranted {
+            lease: EntityKey::lease(&long),
+            chips: vec![],
+        }),
+        Payload::Event(Event::LeaseReleased {
+            lease: EntityKey::lease("l"),
+            chips: vec![big_chip.clone()],
+        }),
+        Payload::Event(Event::EccTick {
+            chip: big_chip.clone(),
+            channel: 0,
+        }),
+        Payload::Event(Event::ViewChanged { view: long.clone() }),
+        Payload::Event(Event::Spark {
+            chip: None,
+            kind: long.clone(),
+        }),
+        Payload::Event(Event::Spark {
+            chip: Some(big_chip),
+            kind: "k".into(),
+        }),
+        Payload::Gap(Gap {
+            reason: long.clone(),
+        }),
+    ];
+    let n = payloads.len() as u64;
+    let mut feed = Feed::new();
+    let mut out = Vec::new();
+    for (i, p) in payloads.into_iter().enumerate() {
+        feed.push(&record(i as u64, 0, "backend", p.clone()), &mut out);
+        assert!(out.is_empty(), "payload {i} gave observations: {p:?}");
+    }
+    assert_eq!(feed.oversized(), n);
+    assert_eq!(feed.ordinal(), 0, "a dropped record has no ordinal");
+    // The pacemaker is still unset: the dropped sweeps were not seen.
+    let ord = feed.ordinal();
+    feed.push(
+        &record(
+            99,
+            0,
+            "backend",
+            sweep(chip(3), vec![("t", Value::F64(1.0))]),
+        ),
+        &mut out,
+    );
+    assert_eq!(feed.ordinal(), ord + 1);
+    assert_eq!(ticks(&out), 1, "chip 3 became the pacemaker");
+}
+
+#[test]
+fn saga_signals_from_another_source_are_rejected() {
+    for p in [
+        sample(chip(1), "saga.heartbeat_alive", Value::F64(1.0)),
+        sample(chip(1), "saga.temperature_baseline", Value::F64(1.0)),
+        sweep(
+            chip(1),
+            vec![
+                ("temp", Value::F64(1.0)),
+                ("saga.anything", Value::F64(1.0)),
+            ],
+        ),
+    ] {
+        let (feed, out) = feed_one("backend", p.clone());
+        assert!(out.is_empty(), "{p:?} was accepted");
+        assert_eq!(
+            (feed.ordinal(), feed.rejected(), feed.oversized()),
+            (0, 1, 0)
+        );
+        // From the saga itself the record is skipped, and not counted as
+        // rejected.
+        let (feed, out) = feed_one("saga", p);
+        assert!(out.is_empty());
+        assert_eq!((feed.ordinal(), feed.rejected()), (0, 0));
+    }
+    // A name that merely contains "saga" is fine.
+    let (feed, out) = feed_one(
+        "backend",
+        sample(chip(1), "toplike.saga.x", Value::F64(1.0)),
+    );
+    assert_eq!((out.len(), feed.rejected()), (1, 0));
+}

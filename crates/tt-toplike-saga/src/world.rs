@@ -105,11 +105,18 @@ pub const FULL_POOL: u64 = 64;
 /// The chip id of the placeholder floor in a world with no chips.
 pub const NO_CHIP: &str = "none";
 
-/// Chips one world has floors for, and chips the front door keeps (ledger
-/// ruling R20). A world asked for on more chips (a `ModelReady` naming many)
-/// gets floors for the first [`MAX_CHIPS`] in key order. Birth cost is one
-/// maze per chip, so this bounds it: see "Bounds" in [`crate::saga`].
+/// Chips the front door keeps (ledger ruling R20): their floor specs,
+/// heartbeats and trails. A chip beyond the cap is observed but gets none of
+/// these.
 pub const MAX_CHIPS: usize = 64;
+
+/// Floors one world generates (ledger ruling R22, amending R20). A world
+/// asked for on more chips (a `ModelReady` naming many, or a birth on every
+/// one of 64 kept chips) keeps the first [`MAX_FLOORS`] chips in key order,
+/// and `World::chips` and `World::floors` stay index-aligned. 32 is the
+/// largest real box (a Galaxy). Birth cost is one maze per floor, so this
+/// bounds it: see "Bounds" in [`crate::saga`].
+pub const MAX_FLOORS: usize = 32;
 
 /// The signal whose first appearance starts a training run.
 const TRAIN_STEP: &str = "toplike.train.step";
@@ -341,7 +348,7 @@ impl Lifecycle {
         let mut chips = chips;
         chips.sort();
         chips.dedup();
-        chips.truncate(MAX_CHIPS);
+        chips.truncate(MAX_FLOORS);
         if chips.is_empty() {
             chips.push(EntityKey::chip(NO_CHIP));
         }

@@ -172,6 +172,19 @@ impl TrailBook {
         self.trails.len()
     }
 
+    /// The longest entity key or series name held, in bytes (for the
+    /// bounds tests).
+    #[cfg(test)]
+    pub(crate) fn longest_item(&self) -> usize {
+        self.trails
+            .iter()
+            .flat_map(|(e, names)| {
+                std::iter::once(e.as_str().len()).chain(names.keys().map(String::len))
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
     /// The number of trails `e` has (for the bounds tests).
     #[cfg(test)]
     pub(crate) fn names(&self, e: &EntityKey) -> usize {

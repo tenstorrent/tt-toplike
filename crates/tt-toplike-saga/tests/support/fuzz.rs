@@ -371,9 +371,16 @@ pub const FLOOD_MODELS: usize = 200;
 pub const FLOOD_RESETS: usize = 700;
 
 /// Chips named by the flood's one huge `ModelReady`. Far more than a world's
-/// cap of 64, and enough that a world with a floor for each would cost more
+/// 32 floors, and enough that a world with a floor for each would cost more
 /// than a million work units.
 pub const FLOOD_READY_CHIPS: usize = 1000;
+
+/// Records in the flood that carry a 1 MB key, signal name or event string
+/// (ledger ruling R21). The saga drops each one whole.
+pub const FLOOD_OVERSIZED: u64 = 5;
+
+/// Bytes in each of the flood's oversized items.
+pub const FLOOD_ITEM_BYTES: usize = 1 << 20;
 
 /// The flood's pacemaker chip (it sweeps first).
 pub fn flood_pacemaker() -> EntityKey {
@@ -437,9 +444,14 @@ impl Flood {
 /// The flood, in four phases. Nothing in it is drained by the generator; the
 /// tests decide.
 ///
-/// 1. **Event flood on one chip.** 70 ticks to open the seed gate and settle,
-///    then [`FLOOD_RESETS`] resets naming no chips, one tick after each. Each
-///    reset ends the world and births another on the pacemaker's floor.
+/// 1. **Oversized items, then an event flood on one chip.** 70 ticks to open
+///    the seed gate and settle. Then [`FLOOD_OVERSIZED`] records each carry
+///    one 1 MB item: a chip key, a signal name on the pacemaker, a ready
+///    model's key, a sweep signal, and a kernel compile's source. At this
+///    point the chip table, trail book and ready list all have room, so only
+///    the size limit can keep them out. Then [`FLOOD_RESETS`] resets naming
+///    no chips, one tick after each. Each reset ends the world and births
+///    another on the pacemaker's floor.
 /// 2. **Many chips, many names.** For each of [`FLOOD_CHIPS`] chips: a
 ///    topology reading, a heartbeat, a temperature, and
 ///    [`FLOOD_SIGNALS_PER_CHIP`] distinct signal names; a DRAM channel sample
@@ -447,8 +459,8 @@ impl Flood {
 /// 3. **Ready models that never go.** [`FLOOD_MODELS`] models become ready on
 ///    the pacemaker, one tick after each.
 /// 4. **The widest births.** A model ready on [`FLOOD_READY_CHIPS`] chips,
-///    then a reset naming no chips (a world on every chip the saga keeps),
-///    then 200 ticks with every chip's heartbeat advancing.
+///    then a reset naming no chips (a world on the first 32 of the 64 chips
+///    the saga keeps), then 200 ticks with every chip's heartbeat advancing.
 pub fn flood_stream() -> Vec<Record> {
     let mut f = Flood {
         out: Vec::new(),
@@ -460,6 +472,24 @@ pub fn flood_stream() -> Vec<Record> {
     for _ in 0..70 {
         f.tick();
     }
+    let long = "x".repeat(FLOOD_ITEM_BYTES);
+    f.sample(EntityKey::chip(&long), "tt_asic_temperature_celsius", 50.0);
+    f.sample(pacemaker.clone(), &long, 1.0);
+    f.event(Event::ModelReady {
+        model: EntityKey::model(&long),
+        chips: vec![pacemaker.clone()],
+    });
+    f.push(Payload::Sweep(Sweep {
+        entity: pacemaker.clone(),
+        signals: vec![long.clone()],
+        values: vec![Value::F64(1.0)],
+        prov: Provenance::Measured,
+    }));
+    f.event(Event::KernelCompiled {
+        chip: Some(pacemaker.clone()),
+        source: long,
+    });
+    f.tick();
     for _ in 0..FLOOD_RESETS {
         f.event(Event::Reset { chips: Vec::new() });
         f.tick();

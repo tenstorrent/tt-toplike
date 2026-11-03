@@ -122,13 +122,28 @@
 //! # Bounds
 //!
 //! Any local process can write to the bus, so a noisy or hostile writer can
-//! send any number of chips, signal names and models (ledger ruling R20).
+//! send any number of chips, signal names and models, of any length up to
+//! a bus line's 16 MB (ledger rulings R20, R21 and R22).
+//!
+//! **Item size.** The [`Feed`] drops, whole, any record that carries an
+//! entity key, signal name or event string longer than
+//! [`crate::observe::MAX_ITEM_BYTES`] (256 bytes), and counts it in
+//! [`Saga::oversized`]. So every key and name the saga stores is at most
+//! 256 bytes, and the counts below bound memory as well as items.
+//!
+//! **Spoofed series.** The feed also drops any sample or sweep from another
+//! source that carries a `saga.*` signal, the prefix of the saga's derived
+//! vitality series, and counts it in [`Saga::rejected`].
+//!
+//! A dropped record takes no ordinal, so it leaves the saga and its digest
+//! as they were.
+//!
 //! Every collection the saga keeps has a fixed bound:
 //!
 //! | Collection | Bound | Where the cap lives |
 //! |---|---|---|
 //! | chips seen (and their floor specs, heartbeats and topology) | [`MAX_CHIPS`] (64); a further chip feeds the seed pool and nothing else | [`crate::world`] |
-//! | a world's chips and floors | [`MAX_CHIPS`] (64), the first in key order | [`crate::world`] |
+//! | a world's chips and floors | [`crate::world::MAX_FLOORS`] (32), the first in key order | [`crate::world`] |
 //! | entities with trails | [`MAX_CHIPS`] (64): only kept chips get trails | here |
 //! | trails per chip | [`crate::stats::MAX_TRAILS_PER_ENTITY`] (128) names, plus [`crate::stats::RESERVED_TRAILS`] (4) for the vitality inputs | [`crate::stats`] |
 //! | ready models | [`MAX_READY_MODELS`] (64) | here |
@@ -144,19 +159,21 @@
 //! the largest record or event seen so far.
 //!
 //! The entities the saga holds at once are at most 64 kept chips, 64 ready
-//! models and 64 world chips that need not be kept chips: 192, under the
+//! models and 32 world chips that need not be kept chips: 160, under the
 //! spec's 500 (spec 9).
 //!
 //! **Cost of one record.** At most one world is born per record: an event
 //! births at most once, and a sweep's samples can start one training run,
 //! after which its tick finds the run fresh and the world newly active. A
-//! birth generates one maze per world chip, so it costs at most 64 mazes of
+//! birth generates one maze per world chip, so it costs at most 32 mazes of
 //! at most 120 x 60 cells. The hero searches at most once per tick, and A*
 //! expands each cell at most once. Today's floors are 53 x 38 (Blackhole) and
-//! 50 x 32 (generic), so the widest birth generates about 129,000 cells. The
-//! test-only work counter (`src/cost.rs`) checks this against the budget of
-//! a million units per record. Trail pushes grow with the record's own
-//! size: one per sweep value, plus one per kept chip on a tick.
+//! 50 x 32 (generic), so the widest birth generates about 64,000 cells. The
+//! test-only work counter (`src/cost.rs`) checks this against a budget of a
+//! million work units per record. A unit (a maze cell, an A* expansion, a
+//! trail push or an event) is not an elementary operation: a maze cell costs
+//! roughly 30 of them. Trail pushes grow with the record's own size: one per
+//! sweep value, plus one per kept chip on a tick.
 //!
 //! # The digest
 //!
@@ -453,6 +470,20 @@ impl Saga {
     /// after each batch of records it feeds.
     pub fn drain_events(&mut self) -> Vec<SagaEvent> {
         self.events.drain(..).collect()
+    }
+
+    /// Records dropped because they carry an entity key, signal name or event
+    /// string longer than [`crate::observe::MAX_ITEM_BYTES`] (ledger ruling
+    /// R21). A dropped record changes nothing else, including the digest.
+    pub fn oversized(&self) -> u64 {
+        self.feed.oversized()
+    }
+
+    /// Records dropped because a source other than "saga" sent a signal
+    /// named `saga.*`, the prefix of the saga's own derived series. A
+    /// dropped record changes nothing else, including the digest.
+    pub fn rejected(&self) -> u64 {
+        self.feed.rejected()
     }
 
     /// Events dropped, oldest first, because the buffer already held

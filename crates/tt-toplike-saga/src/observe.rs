@@ -22,6 +22,30 @@ const SAGA_SOURCE: &str = "saga";
 /// counts as a tick.
 pub const PACEMAKER_TIMEOUT: u64 = 2000;
 
+/// The longest text, in UTF-8 bytes, that a record may carry into the saga
+/// (ledger ruling R21). It applies to every entity key (the whole key, kind
+/// prefix included), every signal name, and every string field of an event
+/// (`KernelCompiled.source`, `Spark.kind`, `ViewChanged.view`, and every key
+/// an event names) and a gap's reason. A record with a longer item is
+/// dropped whole and counted in [`Feed::oversized`].
+///
+/// The caps on the saga's collections count items; this caps each item's
+/// size. A bus line may be 16 MB, and the saga stores keys and names in
+/// several places (the ready list, trails, beat causes), so without it a
+/// few hostile records could hold gigabytes.
+///
+/// Not checked: a text sample value (the feed reads no text value), a raw
+/// frame (the feed reads only that it is there), and the record's source
+/// (compared and never stored).
+pub const MAX_ITEM_BYTES: usize = 256;
+
+/// The prefix of the saga's own derived series (`saga.heartbeat_alive`,
+/// `saga.temperature_baseline`). A sample or sweep from another source that
+/// carries a signal with this prefix is dropped whole and counted in
+/// [`Feed::rejected`], so no outside writer can set the hero's vitality
+/// inputs directly. The saga pushes its derived series itself.
+pub const SAGA_SIGNAL_PREFIX: &str = "saga.";
+
 /// One thing the core observes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Observation {
@@ -46,6 +70,10 @@ pub struct Feed {
     pacemaker: Option<EntityKey>,
     /// The ordinal of the pacemaker's latest sweep.
     last_pacemaker_sweep: u64,
+    /// Records dropped for an item longer than [`MAX_ITEM_BYTES`].
+    oversized: u64,
+    /// Records dropped for a signal named with [`SAGA_SIGNAL_PREFIX`].
+    rejected: u64,
 }
 
 /// A number from a bus value, or `None` for text and non-finite floats.
@@ -59,23 +87,106 @@ fn number(value: &Value) -> Option<f64> {
     }
 }
 
+/// Whether `s` is at most [`MAX_ITEM_BYTES`] long.
+fn short(s: &str) -> bool {
+    s.len() <= MAX_ITEM_BYTES
+}
+
+/// Whether a key is at most [`MAX_ITEM_BYTES`] long, kind prefix included.
+fn short_key(k: &EntityKey) -> bool {
+    short(k.as_str())
+}
+
+/// Whether every key in a list is short.
+fn short_keys(ks: &[EntityKey]) -> bool {
+    ks.iter().all(short_key)
+}
+
+/// Whether every key, name and string a payload carries into the saga is at
+/// most [`MAX_ITEM_BYTES`] long. Each event variant is listed, so a new one
+/// does not compile until its fields are checked.
+fn fits(payload: &Payload) -> bool {
+    match payload {
+        Payload::Sample(s) => short_key(&s.entity) && short(&s.signal),
+        Payload::Sweep(s) => short_key(&s.entity) && s.signals.iter().all(|n| short(n)),
+        Payload::Event(e) => match e {
+            Event::ModelLoading { model, chips, .. } => short_key(model) && short_keys(chips),
+            Event::ModelReady { model, chips } => short_key(model) && short_keys(chips),
+            Event::ModelGone { model } => short_key(model),
+            Event::RequestsCompleted { model, .. } => short_key(model),
+            Event::KernelCompiled { chip, source } => {
+                chip.as_ref().is_none_or(short_key) && short(source)
+            }
+            Event::Reset { chips } => short_keys(chips),
+            Event::LinkChanged { chip, .. } => short_key(chip),
+            Event::LeaseGranted { lease, chips } => short_key(lease) && short_keys(chips),
+            Event::LeaseReleased { lease, chips } => short_key(lease) && short_keys(chips),
+            Event::EccTick { chip, .. } => short_key(chip),
+            Event::ViewChanged { view } => short(view),
+            Event::Spark { chip, kind } => chip.as_ref().is_none_or(short_key) && short(kind),
+        },
+        // The feed reads only that a raw frame is there.
+        Payload::Raw(_) => true,
+        Payload::Gap(g) => short(&g.reason),
+    }
+}
+
+/// Whether a sample or sweep carries a signal named with
+/// [`SAGA_SIGNAL_PREFIX`]. The caller has already skipped records from the
+/// saga itself.
+fn spoofed(payload: &Payload) -> bool {
+    let saga_name = |n: &String| n.starts_with(SAGA_SIGNAL_PREFIX);
+    match payload {
+        Payload::Sample(s) => saga_name(&s.signal),
+        Payload::Sweep(s) => s.signals.iter().any(saga_name),
+        _ => false,
+    }
+}
+
 impl Feed {
     /// A feed that has seen nothing.
     pub fn new() -> Feed {
         Feed::default()
     }
 
-    /// The number of records pushed so far, not counting records from source
-    /// "saga". A replayed log that carries the saga's own events therefore
-    /// gives the same ordinals the live run had. Every payload kind counts,
-    /// including raw frames and gaps.
+    /// The number of records the feed has accepted. Records from source
+    /// "saga" are not counted, so a replayed log that carries the saga's own
+    /// events gives the same ordinals the live run had. Every payload kind
+    /// counts, including raw frames and gaps.
+    ///
+    /// A record dropped as oversized or rejected is not counted either. The
+    /// ordinal feeds world seeds and every beat's cause, so a dropped record
+    /// is invisible: inserting one anywhere in a stream leaves the saga and
+    /// its digest as they were.
     pub fn ordinal(&self) -> u64 {
         self.ordinal
+    }
+
+    /// Records dropped because they carry an item longer than
+    /// [`MAX_ITEM_BYTES`].
+    pub fn oversized(&self) -> u64 {
+        self.oversized
+    }
+
+    /// Records dropped because a source other than "saga" sent a signal named
+    /// with [`SAGA_SIGNAL_PREFIX`].
+    pub fn rejected(&self) -> u64 {
+        self.rejected
     }
 
     /// Appends the observations for `rec` to `out`.
     pub fn push(&mut self, rec: &Record, out: &mut Vec<Observation>) {
         if rec.source == SAGA_SOURCE {
+            return;
+        }
+        // Dropped records take no ordinal (see `ordinal`). A record that is
+        // both oversized and spoofed counts as oversized.
+        if !fits(&rec.payload) {
+            self.oversized += 1;
+            return;
+        }
+        if spoofed(&rec.payload) {
+            self.rejected += 1;
             return;
         }
         self.ordinal += 1;
