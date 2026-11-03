@@ -1509,6 +1509,10 @@ Prompt (Taylor): "add the Saga to 'now serving' arcade view instead of defrag". 
   `only_the_inference_training_and_waffler_views_take_a_backdrop`).
 * Overlays: the arcade's help, legend and explain text name none of the Die 3D, Training or
   inference panels, so they do not name Saga either.
+* The first tmux capture at 80x24 showed the 39-column HUD cut inside the vitality bar, with no
+  quest. `hud_row` now has a short form (label, name or its first word, percentage, quest) for a
+  panel too narrow for the status row up to the end of its quest. Three of the four panel goldens
+  moved with it, and the commit says which.
 * Tests: the panel's four golden frames (70x16 and 20x6 at two cut points) are new; the wiring
   test compares the arcade's Saga rectangle cell for cell with `render_saga_panel`. Mutations seen
   red: `set_saga` dropping the feed (three arcade tests and the golden), the strip showing the `y`
