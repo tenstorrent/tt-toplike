@@ -1,3 +1,12 @@
+tt-toplike (0.16.6) noble; urgency=medium
+
+  * The status bar flags a stalled ARC: a chip whose firmware heartbeat
+    reads 0 shows a red "ARC!" after its readings, and with more than four
+    chips the averaged column ends with "ARC!xN". A chip that reports no
+    heartbeat is not flagged. The arcade's removed hero used to show this.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 16:00:00 -0800
+
 tt-toplike (0.16.5) noble; urgency=medium
 
   * Arcade mode no longer has the @ hero that moved over the whole screen,

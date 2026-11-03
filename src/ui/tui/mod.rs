@@ -4369,6 +4369,13 @@ fn ui_arcade(f: &mut Frame, arcade: &ArcadeVisualization, backend: &dyn Telemetr
 /// >4 chips: a single `avg  44°  822M  79W` column instead.
 ///
 /// The command bar and overlay panels render on top of this row when active.
+/// The chip's ARC firmware has stalled: its heartbeat reads 0. A backend
+/// that reports no heartbeat is not stalled (the old arcade hero's `?` rule,
+/// now shown in the status bar).
+fn arc_stalled(telem: Option<&crate::models::telemetry::Telemetry>) -> bool {
+    telem.is_some_and(|t| t.heartbeat == Some(0))
+}
+
 fn render_global_statusbar(
     f: &mut Frame,
     backend: &dyn TelemetryBackend,
@@ -4468,6 +4475,9 @@ fn render_global_statusbar(
         temp: f32,
         mhz: u32,
         watts: f32,
+        /// The ARC firmware heartbeat reads 0: the chip's firmware has
+        /// stalled. A chip that does not report a heartbeat is not stalled.
+        arc_stalled: bool,
     }
 
     let chips: Vec<ChipTelem> = devices
@@ -4489,11 +4499,13 @@ fn render_global_statusbar(
                 temp,
                 mhz,
                 watts,
+                arc_stalled: arc_stalled(telem),
             }
         })
         .collect();
 
     let mut right: Vec<Span> = Vec::new();
+    let stalled_fg = colors::rgb(255, 100, 80);
 
     if chips.is_empty() {
         // nothing to show
@@ -4533,6 +4545,12 @@ fn render_global_statusbar(
                 format!("{:>3.0}W", c.watts),
                 Style::default().fg(colors::rgb(200, 160, 255)),
             ));
+            if c.arc_stalled {
+                right.push(Span::styled(
+                    " ARC!",
+                    Style::default().fg(stalled_fg).add_modifier(Modifier::BOLD),
+                ));
+            }
         }
         right.push(Span::raw(" "));
     } else {
@@ -4565,6 +4583,13 @@ fn render_global_statusbar(
             format!("  ×{}", chips.len()),
             Style::default().fg(label_fg),
         ));
+        let stalled = chips.iter().filter(|c| c.arc_stalled).count();
+        if stalled > 0 {
+            right.push(Span::styled(
+                format!(" ARC!×{stalled}"),
+                Style::default().fg(stalled_fg).add_modifier(Modifier::BOLD),
+            ));
+        }
         right.push(Span::raw(" "));
     }
 
@@ -14553,6 +14578,37 @@ mod bus_wiring_tests {
         .unwrap();
         let buf = term.backend().buffer();
         (0..buf.area.width).map(|x| buf[(x, 2)].symbol()).collect()
+    }
+
+    /// A chip whose ARC heartbeat reads 0 shows `ARC!` after its readings; a
+    /// healthy chip, and one that reports no heartbeat, show nothing.
+    #[test]
+    fn the_status_bar_flags_a_stalled_arc() {
+        let mut b = mock();
+        assert!(!bar(&b, None).contains("ARC!"));
+        b.set_heartbeat_for_test(1, Some(0));
+        let stalled = bar(&b, None);
+        assert!(stalled.contains("ARC!"), "{stalled}");
+        // Only the chip that stalled: one marker, after the second chip.
+        assert_eq!(stalled.matches("ARC!").count(), 1, "{stalled}");
+        b.set_heartbeat_for_test(1, None);
+        assert!(
+            !bar(&b, None).contains("ARC!"),
+            "no heartbeat is not a stall"
+        );
+    }
+
+    /// Past four chips the bar shows one average column, and the stalls are
+    /// counted after it.
+    #[test]
+    fn the_averaged_status_bar_counts_stalled_arcs() {
+        let mut b = MockBackend::new(6);
+        b.init().unwrap();
+        b.update().unwrap();
+        b.set_heartbeat_for_test(0, Some(0));
+        b.set_heartbeat_for_test(3, Some(0));
+        let s = bar(&b, None);
+        assert!(s.contains("ARC!×2"), "{s}");
     }
 
     /// A local bus adds nothing to the status bar, so a default run's bar is

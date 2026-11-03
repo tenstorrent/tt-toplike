@@ -29,7 +29,7 @@ tt-toplike reads a small set of telemetry values from the chip — through the t
 - **GDDR ECC counters** — correctable and uncorrectable memory errors. The row shows amber for corrected errors and red once any is uncorrectable, which means corrupted data
 - **Thermal-trip count** — how many times the card has hit hardware thermal shutdown in its lifetime. Any count above zero deserves a look
 - **PCIe link traffic** — the driver keeps data-word counters for both directions of the PCIe link; differentiating them between ~1 Hz samples gives live bytes/sec into and out of the chip, next to the link's generation and width
-- **ARC heartbeat** — the RISC-V management firmware pulses this counter to signal it's alive. A frozen heartbeat is how the tool tells "busy" from "wedged"
+- **ARC heartbeat** — the RISC-V management firmware pulses this counter to signal it's alive. A frozen heartbeat is how the tool tells "busy" from "wedged" A heartbeat of 0 shows as a red `ARC!` after the chip's readings in the status bar.
 
 Most of that arrives without shelling out to anything. The safe default backend reads the driver's sysfs attributes directly, so clocks, the ARC heartbeat, the board SKU, firmware version and PCIe counters all come for free — `tt-smi` is only needed for the deeper SMBUS block (DDR training detail, per-component firmware versions, GDDR sensors). Older drivers simply expose fewer attributes, and the corresponding readouts drop out rather than breaking anything; see [`docs/SYSFS_BACKEND.md`](docs/SYSFS_BACKEND.md) for exactly which fields come from where.
 

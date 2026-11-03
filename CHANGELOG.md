@@ -17,6 +17,12 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.16.6
+- The status bar flags a stalled ARC. A chip whose firmware heartbeat reads 0 shows a red `ARC!` after
+  its readings (`BH0  66°  990M  80W ARC!`). With more than four chips the averaged column ends with
+  `ARC!×N`, N being how many chips stalled. A chip that reports no heartbeat is not flagged. The
+  arcade's roaming hero used to show this and was removed in 0.16.5.
+
 ### 0.16.5
 - Arcade mode no longer has the `@` hero that moved over the whole screen, or its trail. It
   distracted from the panels. The duel on the top row (the chip's `@` against the inference
