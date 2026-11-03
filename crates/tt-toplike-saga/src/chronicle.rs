@@ -18,6 +18,7 @@
 //! | `{name}` | the beat's model, process or service name (see "Names" below) |
 //! | `{world}` | [`BeatCtx::world`], in decimal |
 //! | `{tick}` | [`BeatCtx::tick`], in decimal |
+//! | `{count}` | [`BeatCtx::count`]: in words from zero to twelve ("four"), in digits above ("32") |
 //! | `{biome}` | `dungeon`, `forge` or `dream` |
 //! | `{place}` | a composed name from the biome's place tag ([`place_tag`]) |
 //! | `{adj}` | one word from the tone's adjective tag ([`adjective_tag`]), in lower case |
@@ -62,6 +63,13 @@
 //!   entity key keeps its kind prefix and gets an alias for its id from the
 //!   same table, so `model:X` and the text name `X` share one alias. Real
 //!   mode keeps the cause exactly as given.
+//! * Two calls use the same table without writing a line.
+//!   [`Chronicle::clean_cause`] gives the cause `push_beat` would store, for
+//!   a line the front door leaves unwritten (the party's pace), so that
+//!   line's event still carries no real name. [`Chronicle::label_for`]
+//!   gives the text `{name}` writes for a name, which the front door keeps
+//!   as a quest's target label. Each draws an alias only for a name the
+//!   table lacks, from the same generator as the beats.
 //!
 //! The hero's name is not a real name. It comes from the lexicon (see
 //! [`Pack::hero_name`]) and is inserted as given.
@@ -133,11 +141,14 @@ pub enum BeatKind {
     Rest,
     /// A quiet line about the world, for stretches when nothing happens.
     Ambient,
+    /// A party of two or more heroes woke in a new world. Set
+    /// [`BeatCtx::count`] to the number of heroes.
+    PartyBorn,
 }
 
 impl BeatKind {
     /// Every kind, in declaration order.
-    pub const ALL: [BeatKind; 7] = [
+    pub const ALL: [BeatKind; 8] = [
         BeatKind::WorldBorn,
         BeatKind::WorldEnded,
         BeatKind::HeroBorn,
@@ -145,6 +156,7 @@ impl BeatKind {
         BeatKind::QuestDone,
         BeatKind::Rest,
         BeatKind::Ambient,
+        BeatKind::PartyBorn,
     ];
 }
 
@@ -233,6 +245,9 @@ pub struct BeatCtx {
     /// beside the text and never written into it, so a template's text does
     /// not depend on it.
     pub floor: Option<u8>,
+    /// How many heroes the party has, for [`BeatKind::PartyBorn`]. The
+    /// front door sets it on every beat; only `{count}` reads it.
+    pub count: u8,
 }
 
 /// One line of the chronicle.
@@ -349,6 +364,47 @@ impl Chronicle {
         self.ring.is_empty()
     }
 
+    /// The cause `push_beat` would store for a beat caused by `cause`,
+    /// with no line written: the cause as given in [`NameMode::Real`], and
+    /// in [`NameMode::Generated`] the cause with its entity aliased from the
+    /// same table, drawing from `rng` only for a name the table lacks (see
+    /// "Names" in the module comment).
+    ///
+    /// The front door uses it for a routine line that the chronicle's pace
+    /// leaves unwritten, so the line's event still carries no real name.
+    /// Aliases are drawn from the builtin pack's lexicon, the pack the front
+    /// door writes every beat with.
+    pub fn clean_cause(&mut self, cause: &Cause, names: NameMode, rng: &mut Pcg32) -> Cause {
+        match names {
+            NameMode::Real => cause.clone(),
+            NameMode::Generated => Cause {
+                entity: self.alias_entity(&cause.entity, Pack::builtin(), rng),
+                ..cause.clone()
+            },
+        }
+    }
+
+    /// The text `{name}` writes for `name` in role `role`: the real name in
+    /// [`NameMode::Real`], and in [`NameMode::Generated`] its alias from
+    /// the table. An alias is drawn from `rng` only when the table lacks
+    /// one, so a label taken after the name's beat was written draws
+    /// nothing. Aliases come from the builtin pack's lexicon, as in
+    /// [`Chronicle::clean_cause`].
+    pub fn label_for(
+        &mut self,
+        name: &RealName,
+        role: NameRole,
+        names: NameMode,
+        rng: &mut Pcg32,
+    ) -> String {
+        match names {
+            NameMode::Real => name.as_str().to_string(),
+            NameMode::Generated => self
+                .alias(name.as_str(), name_tag(role), Pack::builtin(), rng)
+                .to_string(),
+        }
+    }
+
     /// Entries in the generated-name table (for the bounds tests).
     #[cfg(test)]
     pub(crate) fn alias_count(&self) -> usize {
@@ -382,6 +438,7 @@ impl Chronicle {
                 "name" => self.name(ctx, pack, names, rng),
                 "world" => ctx.world.to_string(),
                 "tick" => ctx.tick.to_string(),
+                "count" => count_words(ctx.count),
                 "biome" => biome_word(ctx.biome).to_string(),
                 "place" => lex.compose(place_tag(ctx.biome), ctx.tone, rng),
                 // Mid-sentence, an adjective is lower case ("a quiet
@@ -526,6 +583,19 @@ fn entity_key(text: &str) -> EntityKey {
     use serde::Deserialize;
     let de: StrDeserializer<'_, Error> = text.into_deserializer();
     EntityKey::deserialize(de).expect("an EntityKey deserialises from any string")
+}
+
+/// A count as the chronicle writes it: in words from zero to twelve
+/// ("four"), in digits above ("32").
+fn count_words(n: u8) -> String {
+    const WORDS: [&str; 13] = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve",
+    ];
+    match WORDS.get(n as usize) {
+        Some(word) => (*word).to_string(),
+        None => n.to_string(),
+    }
 }
 
 /// The plain word for a biome.

@@ -38,6 +38,7 @@ fn quest_to(goal: (u8, u8)) -> Quest {
         target: None,
         reason: cause(),
         goal,
+        target_label: None,
     }
 }
 

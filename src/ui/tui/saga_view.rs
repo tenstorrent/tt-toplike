@@ -75,13 +75,13 @@
 //!
 //! In generated mode (`[saga] names = "generated"`) the chronicle's beats
 //! and their causes already carry aliases (ledger ruling R17). The state's
-//! `quest` does not: it keeps the real target so both modes plan alike (the
-//! saga module comment, "Names"). So the status row never prints a
-//! non-hardware quest target from the quest itself. It takes the target's
-//! name from the newest beat whose cause is the quest's reason (same signal
-//! and ordinal); that beat's cause is aliased in generated mode and real in
-//! real mode. Chip keys are PCI addresses and show as they are, as the core
-//! keeps them. Making a name bold prints no new text.
+//! `quest` keeps the real target and reason so both modes plan alike (the
+//! saga module comment, "Names"), so the status row never prints them. It
+//! prints the quest's `target_label`, which the core fills with the name the
+//! quest's chronicle line writes: the alias in generated mode, the real name
+//! in real mode. The core fills it even when the party's pace leaves that
+//! line unwritten. Chip keys are PCI addresses and show as they are, as the
+//! core keeps them. Making a name bold prints no new text.
 //!
 //! # Sizes
 //!
@@ -1705,30 +1705,14 @@ fn quest_text(state: &SagaState) -> String {
     text
 }
 
-/// The name to show for the quest's target, or `None` to show none.
-///
-/// * A chip-owned key (a chip, tile, DRAM channel, Ethernet port) is a
-///   hardware identifier that the core never aliases: its id.
-/// * A target that is the quest's reason's entity (a sage's model): the id
-///   of the cause of the newest beat with the reason's signal and ordinal.
-///   That beat came from the same record, and its cause is aliased in
-///   generated mode.
-/// * Anything else, or no such beat in the chronicle: `None`.
+/// The name to show for the quest's target, or `None` to show none: the
+/// core's [`tt_toplike_saga::quest::Quest::target_label`]. The core fills
+/// it when the quest starts, with a hardware key's id or the sage's name as
+/// its chronicle line writes it (the alias in generated mode), so the view
+/// needs no chronicle line to find it. With a party many quest lines are
+/// never written.
 fn quest_target(state: &SagaState) -> Option<String> {
-    let q = &state.lead().quest;
-    let target = q.target.as_ref()?;
-    if target.chip_owner().is_some() {
-        return Some(key_id(target.as_str()).to_string());
-    }
-    if *target != q.reason.entity {
-        return None;
-    }
-    let beats: Vec<&Beat> = state.chronicle.lines(usize::MAX).collect();
-    beats
-        .into_iter()
-        .rev()
-        .find(|b| b.cause.ordinal == q.reason.ordinal && b.cause.signal == q.reason.signal)
-        .map(|b| key_id(b.cause.entity.as_str()).to_string())
+    state.lead().quest.target_label.clone()
 }
 
 // ---------------------------------------------------------------------------
@@ -1792,8 +1776,9 @@ pub const PANEL_STOPPED_EARLY: &str = "the story stopped before its first world"
 ///   arcade). Under [`SIDE_MIN_COLS`] it is a third of the rows under the
 ///   map; from there it sits right of the map, as in the full view.
 ///
-/// Names come from the state's beats and causes, so generated mode aliases
-/// the panel exactly as it does the full view. `frame` drives the pulse and
+/// Names come from the state's beats, their causes and the quest's target
+/// label, so generated mode aliases the panel exactly as it does the full
+/// view. `frame` drives the pulse and
 /// the shimmer; the arcade passes its own frame count.
 pub fn render_saga_panel(
     feed: &PanelFeed,

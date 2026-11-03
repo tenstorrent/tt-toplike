@@ -36,6 +36,7 @@ fn ctx(name: Option<RealName>, tone: Tone, tick: u64) -> BeatCtx {
         tick,
         cause: cause(tick),
         floor: Some(2),
+        count: 4,
     }
 }
 
@@ -531,5 +532,160 @@ fn beat_text_is_the_same_on_every_floor() {
             assert_eq!(none, run(Some(0)), "{names:?} seed {seed}: floor 0");
             assert_eq!(none, run(Some(2)), "{names:?} seed {seed}: floor 2");
         }
+    }
+}
+
+// ---- The party (Task A.4 of the party plan) ----------------------------------
+
+/// A pack whose only template is `text`, for every kind.
+fn one_line_pack(text: &'static str) -> Pack {
+    use crate::pack::Template;
+    let mut pack = Pack::builtin().clone();
+    pack.templates = BeatKind::ALL
+        .iter()
+        .map(|&kind| Template {
+            kind,
+            tone: None,
+            verb: None,
+            why: None,
+            text,
+        })
+        .collect();
+    pack
+}
+
+#[test]
+fn count_is_written_in_words_up_to_twelve_and_in_digits_above() {
+    let pack = one_line_pack("{count} heroes");
+    let mut rng = Pcg32::from_seed(1);
+    let mut chron = Chronicle::new();
+    let mut write = |count: u8| {
+        let mut c = ctx(None, Tone::Calm, 1);
+        c.count = count;
+        chron
+            .push_beat(BeatKind::PartyBorn, &c, &pack, NameMode::Real, &mut rng)
+            .text
+            .clone()
+    };
+    assert_eq!(write(0), "zero heroes");
+    assert_eq!(write(1), "one heroes");
+    assert_eq!(write(2), "two heroes");
+    assert_eq!(write(4), "four heroes");
+    assert_eq!(write(11), "eleven heroes");
+    assert_eq!(write(12), "twelve heroes");
+    assert_eq!(write(13), "13 heroes");
+    assert_eq!(write(32), "32 heroes");
+    // The article rule sees the word: "an eight".
+    let pack = one_line_pack("a {count}");
+    let mut c = ctx(None, Tone::Calm, 1);
+    c.count = 8;
+    let text = Chronicle::new()
+        .push_beat(BeatKind::PartyBorn, &c, &pack, NameMode::Real, &mut rng)
+        .text
+        .clone();
+    assert_eq!(text, "an eight");
+}
+
+#[test]
+fn clean_cause_is_the_cause_push_beat_would_store() {
+    // For every kind of entity, the cause clean_cause returns is the cause
+    // a later beat with that cause stores: one table gives both the alias.
+    // Real mode and hardware keys keep the cause as given.
+    let chip = EntityKey::chip("0000:01:00.0");
+    let entities = [
+        EntityKey::model("Zyxwv-Model-9B"),
+        EntityKey::process(4242, 77),
+        chip.clone(),
+        EntityKey::eth_port(&chip, 3),
+    ];
+    for entity in entities {
+        for names in [NameMode::Real, NameMode::Generated] {
+            for seed in 0..8 {
+                let c = Cause {
+                    entity: entity.clone(),
+                    signal: "ModelReady".to_string(),
+                    ordinal: 9,
+                };
+                // The cause alone, then a beat with that cause.
+                let mut rng = Pcg32::from_seed(seed);
+                let mut chron = Chronicle::new();
+                let clean = chron.clean_cause(&c, names, &mut rng);
+                let mut bc = ctx(None, Tone::Calm, 1);
+                bc.cause = c.clone();
+                let later = chron
+                    .push_beat(BeatKind::Ambient, &bc, &one_line_pack("x"), names, &mut rng)
+                    .cause
+                    .clone();
+                assert_eq!(clean, later, "{entity:?} {names:?} seed {seed}");
+                match names {
+                    NameMode::Real => assert_eq!(clean, c),
+                    NameMode::Generated if entity.chip_owner().is_some() => {
+                        assert_eq!(clean, c)
+                    }
+                    NameMode::Generated => {
+                        assert_ne!(clean.entity, entity);
+                        assert!(!clean.entity.as_str().contains("Zyxwv"));
+                        assert_eq!(clean.entity.kind(), entity.kind());
+                        assert_eq!((clean.signal.as_str(), clean.ordinal), ("ModelReady", 9));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn label_for_is_the_name_a_beat_writes() {
+    // label_for gives the name `{name}` writes: the real name in real mode,
+    // its alias in generated mode. It draws an alias only when the table
+    // lacks one, so a label taken after the beat costs no draw.
+    let pack = one_line_pack("{name}");
+    let real = RealName::new("Zyxwv-Model-9B").expect("a token");
+    for seed in 0..8 {
+        // Real mode: the name as given, with no draw.
+        let mut rng = Pcg32::from_seed(seed);
+        let mut chron = Chronicle::new();
+        let label = chron.label_for(&real, NameRole::Model, NameMode::Real, &mut rng);
+        assert_eq!(label, "Zyxwv-Model-9B");
+        assert_eq!(rng, Pcg32::from_seed(seed), "real mode draws nothing");
+
+        // Generated mode, after the beat: the beat's text, with no draw.
+        let mut rng = Pcg32::from_seed(seed);
+        let mut chron = Chronicle::new();
+        let c = ctx(Some(real.clone()), Tone::Calm, 1);
+        let text = chron
+            .push_beat(
+                BeatKind::QuestStarted,
+                &c,
+                &pack,
+                NameMode::Generated,
+                &mut rng,
+            )
+            .text
+            .clone();
+        let before = rng.clone();
+        let label = chron.label_for(&real, NameRole::Model, NameMode::Generated, &mut rng);
+        assert_eq!(label, text);
+        assert_ne!(label, "Zyxwv-Model-9B");
+        assert_eq!(rng, before, "a known name draws nothing");
+
+        // Generated mode, before any beat: it draws the alias, and a later
+        // beat writes the same one.
+        let mut rng = Pcg32::from_seed(seed);
+        let mut chron = Chronicle::new();
+        let label = chron.label_for(&real, NameRole::Model, NameMode::Generated, &mut rng);
+        assert_ne!(rng, Pcg32::from_seed(seed), "a new alias is drawn");
+        assert!(!label.contains("Zyxwv"));
+        let text = chron
+            .push_beat(
+                BeatKind::QuestStarted,
+                &c,
+                &pack,
+                NameMode::Generated,
+                &mut rng,
+            )
+            .text
+            .clone();
+        assert_eq!(label, text);
     }
 }

@@ -1274,15 +1274,22 @@ fn golden_frames() -> Vec<u64> {
 /// other templates. A model's dungeon also spans both chips now. The view
 /// still draws only the lead's floor (the party view is Task A.7). All eight
 /// frames moved. The solo frames below did not.
+///
+/// Re-pinned in Task A.4 (the merged chronicle). Each busy world has two
+/// members, so its birth writes one party line, and the pace leaves some of
+/// chip B's member's quest lines unwritten (and some of the lead's, in
+/// windows chip B owns). The chronicle these frames show changed, and the
+/// generator's later draws with it. All eight frames moved. The solo frames
+/// below did not.
 const GOLDEN: [u64; 8] = [
-    7777802160480240132,
-    11192886936226315285,
-    6408111355053286409,
-    8864821999538925488,
-    2263614868807788187,
-    6677668656645925998,
-    7884385801550798112,
-    1677261263598188733,
+    2823822441598792507,
+    10011667271693178222,
+    15588437517750267014,
+    314746947548751076,
+    14101431863956101849,
+    13731776209435916461,
+    9677398856115480327,
+    11316589869872957457,
 ];
 
 /// Prints the hashes for [`GOLDEN`]. Run with
@@ -1365,6 +1372,70 @@ fn print_solo_frames() {
 #[test]
 fn solo_frames_are_the_pre_party_frames() {
     assert_eq!(solo_frames(), SOLO_GOLDEN.to_vec());
+}
+
+/// The status row prints the quest's target label from the core (Task A.4
+/// of the party plan). A label written into the state by hand shows on the
+/// row, and with no label the row names no sage. On the solo log the label
+/// equals what the view's old lookup found (the newest beat with the
+/// reason's signal and ordinal), in both name modes, at every record, so one
+/// chip's status row does not change.
+#[test]
+fn the_status_row_names_the_target_from_the_core() {
+    let mut state = busy_state();
+    {
+        let q = &mut state.party[0].quest;
+        q.verb = Verb::VisitSage;
+        q.target = Some(tt_toplike_bus::EntityKey::model("demo-sage"));
+        q.reason.entity = tt_toplike_bus::EntityKey::model("demo-sage");
+        q.target_label = Some("Hand-Label".to_string());
+    }
+    assert_eq!(quest_target(&state).as_deref(), Some("Hand-Label"));
+    let row = |state: &SagaState| {
+        let lines = text(&tc(|| draw(state, PLAIN, (140, 39), 0)));
+        lines.last().cloned().unwrap_or_default()
+    };
+    assert!(
+        row(&state).contains("visiting the sage Hand-Label"),
+        "{}",
+        row(&state)
+    );
+    state.party[0].quest.target_label = None;
+    assert!(row(&state).contains("visiting a sage"), "{}", row(&state));
+
+    // The old lookup, kept here to compare against.
+    let old = |state: &SagaState| -> Option<String> {
+        let q = &state.lead().quest;
+        let target = q.target.as_ref()?;
+        if target.chip_owner().is_some() {
+            return Some(key_id(target.as_str()).to_string());
+        }
+        if *target != q.reason.entity {
+            return None;
+        }
+        let beats: Vec<&Beat> = state.chronicle.lines(usize::MAX).collect();
+        beats
+            .into_iter()
+            .rev()
+            .find(|b| b.cause.ordinal == q.reason.ordinal && b.cause.signal == q.reason.signal)
+            .map(|b| key_id(b.cause.entity.as_str()).to_string())
+    };
+    for names in [NameMode::Real, NameMode::Generated] {
+        let mut saga = Saga::new(config(names, Label::Mock));
+        let mut named = 0;
+        for r in solo() {
+            saga.feed(r);
+            let state = saga.state();
+            assert_eq!(
+                quest_target(state),
+                old(state),
+                "{names:?} at tick {}",
+                state.tick
+            );
+            named += quest_target(state).is_some() as usize;
+        }
+        assert!(named > 0, "{names:?}: the solo hero never visits a sage");
+    }
 }
 
 // ---- The arcade panel (0.16.4) ------------------------------------------------
@@ -1635,10 +1706,15 @@ fn golden_panel_frames() -> Vec<u64> {
 /// [`GOLDEN`]: chip B's member writes quest beats into the chronicle, and
 /// shares its generator. The two 70x16 frames, which show the chronicle,
 /// moved. The two 20x6 frames show only the lead's status row and did not.
+///
+/// Re-pinned in Task A.4, for the reason given at [`GOLDEN`]: the party
+/// line and the pace change the chronicle strip. The two 70x16 frames moved
+/// again. The two 20x6 frames did not, so the status row, which now prints
+/// the core's target label, is unchanged on the busy log.
 const GOLDEN_PANEL: [u64; 4] = [
-    16106432338813788831,
+    12535114590062944551,
     14813228560897824468,
-    11419400611681437161,
+    13927346534510494317,
     413437031925912577,
 ];
 

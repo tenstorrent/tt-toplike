@@ -213,15 +213,18 @@ fn a_world_on_four_chips_has_four_members_each_on_its_floor() {
         assert_eq!(m.hero.floor as usize, i);
         assert_eq!(m.hero.pos, floor.entrance, "member {i}");
         assert!(floor.cell(m.quest.goal.0, m.quest.goal.1).walkable());
-        assert_eq!(m.unwritten, 0);
+        // Member 0's first quest line takes the birth tick's window, so the
+        // others' first lines are left unwritten (Task A.4, the pace).
+        assert_eq!(m.unwritten, u32::from(i > 0), "member {i}");
     }
     assert_eq!(state.lead().hero, state.party[0].hero);
     let on_2: Vec<usize> = state.on_floor(2).map(|(i, _)| i).collect();
     assert_eq!(on_2, [2]);
 
-    // The birth's events: the world and its beat, every HeroBorn in floor
-    // order with no beat (a party of more than one), then each member's
-    // first quest and its beat.
+    // The birth's events: the world and its beat, the party's one line,
+    // every HeroBorn in floor order with no beat (a party of more than one),
+    // then each member's first quest. Only member 0's quest has its line:
+    // it took the window, and the others' lines are left unwritten.
     let shape: Vec<String> = events
         .iter()
         .map(|e| match e {
@@ -235,7 +238,7 @@ fn a_world_on_four_chips_has_four_members_each_on_its_floor() {
         .collect();
     assert_eq!(
         shape,
-        ["W", "b", "H0", "H1", "H2", "H3", "Q0", "b0", "Q1", "b1", "Q2", "b2", "Q3", "b3"]
+        ["W", "b", "b", "H0", "H1", "H2", "H3", "Q0", "b0", "Q1", "Q2", "Q3"]
     );
     let born: Vec<&String> = events
         .iter()
@@ -316,5 +319,210 @@ fn four_and_thirty_two_chips_give_the_same_digest_after_renumbering() {
                 "{chips} chips ({names:?}): a replay host's numbering changed the saga"
             );
         }
+    }
+}
+
+// ---- The merged chronicle (Task A.4) ------------------------------------------
+
+/// Ticks of the 32-chip log the pace tests read: long enough for a world to
+/// live past a minute (600 ticks) of story.
+const PACE_TICKS: u64 = 1300;
+
+/// One record's worth of story: the tick after the record and the events it
+/// raised.
+type Step = (u64, Vec<SagaEvent>);
+
+/// Feeds every record of `records` to a saga in `names` mode and returns
+/// the saga and, for each record, the tick and the events it raised.
+fn run_log(records: &[Record], names: NameMode) -> (Saga, Vec<Step>) {
+    let mut s = saga(names);
+    let mut steps = Vec::with_capacity(records.len());
+    for r in records {
+        s.feed(r);
+        let events = s.drain_events();
+        if !events.is_empty() {
+            steps.push((s.state().tick, events));
+        }
+    }
+    (s, steps)
+}
+
+/// The steps of the 32-chip log of [`PACE_TICKS`] ticks, fed in real-name
+/// mode, built once per test process.
+fn thirty_two() -> &'static [Step] {
+    use std::sync::OnceLock;
+    static RUN: OnceLock<Vec<Step>> = OnceLock::new();
+    RUN.get_or_init(|| {
+        let (s, steps) = run_log(&party::records(32, PACE_TICKS), NameMode::Real);
+        assert_eq!(s.state().party.len(), 32);
+        steps
+    })
+}
+
+/// A member's line in a party is a routine line: its quest started, its
+/// quest done (a party writes no hero's birth line). A world's line has no
+/// floor.
+fn routine_floor(e: &SagaEvent) -> Option<u8> {
+    match e {
+        SagaEvent::Beat { floor, .. } => *floor,
+        _ => None,
+    }
+}
+
+#[test]
+fn routine_lines_come_from_one_floor_per_window() {
+    use std::collections::{BTreeMap, BTreeSet};
+    use tt_toplike_saga::saga::ROUTINE_WINDOW_TICKS;
+    assert_eq!(ROUTINE_WINDOW_TICKS, 10);
+    let steps = thirty_two();
+    let mut windows: BTreeMap<u64, BTreeSet<u8>> = BTreeMap::new();
+    let (mut quests, mut lines) = (0, 0);
+    for (tick, events) in steps {
+        quests += events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    SagaEvent::QuestStarted { .. } | SagaEvent::QuestDone { .. }
+                )
+            })
+            .count();
+        lines += events.iter().filter_map(routine_floor).count();
+        for f in events.iter().filter_map(routine_floor) {
+            windows
+                .entry(tick / ROUTINE_WINDOW_TICKS)
+                .or_default()
+                .insert(f);
+        }
+    }
+    for (k, floors) in &windows {
+        assert_eq!(
+            floors.len(),
+            1,
+            "window {k} (ticks {} to {}) has lines from floors {floors:?}",
+            k * 10,
+            k * 10 + 9
+        );
+    }
+    // The check is not empty: many windows, many floors, and lines held
+    // back from the chronicle.
+    let heard: BTreeSet<u8> = windows.values().flatten().copied().collect();
+    assert!(windows.len() >= 60, "only {} windows", windows.len());
+    assert!(heard.len() >= 16, "only floors {heard:?} heard");
+    assert!(
+        quests > lines + 100,
+        "{quests} quests started or done, {lines} lines"
+    );
+}
+
+#[test]
+fn every_floor_is_heard_within_a_minute() {
+    // In each world, from its birth, every floor writes a routine line at
+    // least once in every 600 ticks (one minute at 10 Hz).
+    const MINUTE: u64 = 600;
+    let steps = thirty_two();
+    let mut last: Vec<u64> = Vec::new();
+    let mut longest_world = 0;
+    let mut born = 0;
+    let check = |tick: u64, last: &[u64]| {
+        for (f, &l) in last.iter().enumerate() {
+            assert!(
+                tick - l <= MINUTE,
+                "floor {f} silent from tick {l} to tick {tick}"
+            );
+        }
+    };
+    for (tick, events) in steps {
+        check(*tick, &last);
+        for e in events {
+            if let SagaEvent::WorldBorn { .. } = e {
+                longest_world = longest_world.max(tick - born);
+                born = *tick;
+                last = vec![*tick; 32];
+            }
+            if let Some(f) = routine_floor(e) {
+                last[f as usize] = *tick;
+            }
+        }
+    }
+    check(PACE_TICKS, &last);
+    longest_world = longest_world.max(PACE_TICKS - born);
+    assert!(
+        longest_world > MINUTE,
+        "no world lived past a minute ({longest_world} ticks)"
+    );
+}
+
+#[test]
+fn a_one_member_party_never_drops_a_line() {
+    // One floor owns every window, so a one-chip story is today's story:
+    // every quest started or done has its line, and nothing is unwritten.
+    let records = support::read_fixture("solo.jsonl");
+    for names in [NameMode::Real, NameMode::Generated] {
+        let mut s = saga(names);
+        let (mut quests, mut lines) = (0, 0);
+        for r in &records {
+            s.feed(r);
+            assert_eq!(s.state().party.len(), 1);
+            assert_eq!(s.state().party[0].unwritten, 0, "{names:?}");
+            let events = s.drain_events();
+            for w in events.windows(2) {
+                if matches!(
+                    w[0],
+                    SagaEvent::QuestStarted { .. } | SagaEvent::QuestDone { .. }
+                ) {
+                    quests += 1;
+                    lines += matches!(w[1], SagaEvent::Beat { .. }) as usize;
+                }
+            }
+        }
+        assert!(quests > 20, "{quests} quests");
+        assert_eq!(lines, quests, "{names:?}");
+    }
+}
+
+/// The model names in the party logs.
+const FIXTURE_NAMES: [&str; 2] = ["demo-sage", "demo-scribe"];
+
+/// Everything a party saga shows of names over `records` in `names` mode:
+/// every drained event, every chronicle line and cause, and every member's
+/// target label after every record.
+fn everything_shown(records: &[Record], names: NameMode) -> String {
+    let mut s = saga(names);
+    let mut out = String::new();
+    for r in records {
+        s.feed(r);
+        for e in s.drain_events() {
+            out.push_str(&format!("{e:?}\n"));
+        }
+        for m in &s.state().party {
+            if let Some(label) = &m.quest.target_label {
+                out.push_str(label);
+                out.push('\n');
+            }
+        }
+    }
+    for b in s.state().chronicle.lines(usize::MAX) {
+        out.push_str(&format!("{} {:?}\n", b.text, b.cause));
+    }
+    out
+}
+
+#[test]
+fn generated_mode_leaves_no_fixture_name_anywhere_in_a_party() {
+    let logs = [
+        ("party4.jsonl", support::read_fixture("party4.jsonl")),
+        ("32 chips", party::records(32, 450)),
+    ];
+    for (what, records) in &logs {
+        let shown = everything_shown(records, NameMode::Generated);
+        for name in FIXTURE_NAMES {
+            assert!(!shown.contains(name), "{what}: generated mode shows {name}");
+        }
+        // The control: real mode shows the sage's name in the same places,
+        // labels included.
+        let real = everything_shown(records, NameMode::Real);
+        assert!(real.contains("\ndemo-sage\n"), "{what}: no real label");
+        assert!(real.contains("model:demo-sage"), "{what}: no real cause");
     }
 }

@@ -251,14 +251,22 @@ fn one_temperature_bit_changes_the_first_world() {
 /// and a model's dungeon now spans every chip (in `busy`, `demo-scribe`'s
 /// dungeon, ready on chip A, gained chip B's floor). `bringup` births no world and `solo` has
 /// one chip, so neither moved.
+///
+/// `quiet`, `busy` and `party4` were re-pinned again for the merged
+/// chronicle (Task A.4): a party's birth writes one `PartyBorn` line in
+/// place of no hero line, and the pace leaves some members' routine lines
+/// unwritten, so the beat events, the chronicle lines and the chronicle
+/// generator's later draws all change. In generated mode an unwritten
+/// quest's reason is aliased through `clean_cause`. `bringup` and `solo`
+/// did not move.
 #[test]
 fn a_snapshot_of_the_digests_matches() {
     let golden: [(&str, u64, u64); 5] = [
-        ("quiet.jsonl", 0x57bb527c7d770f78, 0x57bb527c7d770f78),
+        ("quiet.jsonl", 0x6508927b58eeed16, 0x6508927b58eeed16),
         ("bringup.jsonl", 0x88bb8d2b104511c3, 0x88bb8d2b104511c3),
-        ("busy.jsonl", 0x27b23f19be60e618, 0xf12a947d3b84637c),
+        ("busy.jsonl", 0xb57380171988a4e6, 0xc96c1d6b13a18291),
         ("solo.jsonl", 0xe9ed5f1dae160dfa, 0x5a73462b53067a2a),
-        ("party4.jsonl", 0x15d5369d05d95a20, 0x7ae86aff392d98cc),
+        ("party4.jsonl", 0x245050e12931e637, 0x03610514c0841cc7),
     ];
     let mut actual = Vec::new();
     for (name, _, _) in golden {

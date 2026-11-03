@@ -436,11 +436,24 @@ fn the_name_mode_changes_only_the_chronicle() {
     // change mazes, heroes or quests.
     let mut real = Saga::new(config(NameMode::Real, Label::Live));
     let mut generated = Saga::new(config(NameMode::Generated, Label::Live));
+    // A quest's target label is the name the chronicle prints, so it is
+    // the only part of a member that follows the names setting: it is left
+    // out here and checked on its own below.
     let walked = |s: &Saga| Walked {
         world: s.state.world.clone(),
-        party: s.state.party.clone(),
+        party: s
+            .state
+            .party
+            .iter()
+            .cloned()
+            .map(|mut m| {
+                m.quest.target_label = None;
+                m
+            })
+            .collect(),
         lines: s.state.chronicle.len(),
     };
+    let mut labels_differ = 0;
     let mut real_events = Vec::new();
     let mut generated_events = Vec::new();
     for r in busy_script() {
@@ -451,6 +464,13 @@ fn the_name_mode_changes_only_the_chronicle() {
         let rngs =
             |s: &Saga| -> Vec<Pcg32> { s.members.iter().map(|m| m.plan_rng.clone()).collect() };
         assert_eq!(rngs(&real), rngs(&generated));
+        for (a, b) in real.state.party.iter().zip(&generated.state.party) {
+            assert_eq!(
+                a.quest.target_label.is_some(),
+                b.quest.target_label.is_some()
+            );
+            labels_differ += (a.quest.target_label != b.quest.target_label) as usize;
+        }
         real_events.extend(real.drain_events());
         generated_events.extend(generated.drain_events());
     }
@@ -479,8 +499,10 @@ fn the_name_mode_changes_only_the_chronicle() {
             _ => assert_eq!(a, b),
         }
     }
-    // The sage quests name a model, so their published causes differ.
+    // The sage quests name a model, so their published causes and their
+    // labels differ.
     assert!(differ > 0);
+    assert!(labels_differ > 0);
     // The generated story names no model.
     for e in &generated_events {
         let text = format!("{e:?}");
@@ -847,13 +869,17 @@ fn the_digest_encoding_matches_a_hand_written_byte_string() {
 /// The floor a beat should carry, from the event raised just before it: a
 /// world's event gives `None`, a hero's or a quest's event gives the floor
 /// it names.
+///
+/// The one case of two beats in a row is a party's line, which follows the
+/// world's line: a beat after a world's beat is a world's beat too.
 fn floor_after(ev: &SagaEvent) -> Option<u8> {
     match ev {
         SagaEvent::WorldBorn { .. } | SagaEvent::WorldEnded { .. } => None,
         SagaEvent::HeroBorn { floor, .. }
         | SagaEvent::QuestStarted { floor, .. }
         | SagaEvent::QuestDone { floor, .. } => Some(*floor),
-        SagaEvent::Beat { .. } => panic!("two beats in a row"),
+        SagaEvent::Beat { floor: None, .. } => None,
+        SagaEvent::Beat { .. } => panic!("a member's beat followed by another beat"),
     }
 }
 
@@ -989,10 +1015,15 @@ fn saga_on(others: &[EntityKey]) -> Saga {
 }
 
 /// What a member's walk is, after one record: everything another member's
-/// draws could change.
+/// draws could change. The member's `unwritten` count is left out (set to
+/// 0): the chronicle's pace shares one window among all floors, so another
+/// member's extra line can leave this member's line unwritten. That changes
+/// the chronicle only, never the walk.
 fn walk_of(saga: &Saga, i: usize) -> (Member, Pcg32, Option<u64>, Vec<Hook>) {
+    let mut member = saga.state.party[i].clone();
+    member.unwritten = 0;
     (
-        saga.state.party[i].clone(),
+        member,
         saga.members[i].plan_rng.clone(),
         saga.members[i].dwell_until,
         saga.members[i].hooks.clone(),
@@ -1221,4 +1252,237 @@ fn the_sage_floors_are_the_floors_with_a_sage_hook() {
         );
     }
     assert!(checked >= 2, "only {checked} sage floors checked");
+}
+
+// ---- The merged chronicle (Task A.4 of the party plan) -----------------------
+
+/// A model name found in no lexicon, so a search for it in the text finds
+/// only a leak.
+const ODD_MODEL: &str = "Zyxwv-Model-9B";
+
+/// A saga on chips A and B in `names` mode, where the model [`ODD_MODEL`]
+/// became ready before the first world, naming no chips, so both members
+/// get its sage hook and both start towards it at the birth. Returns the
+/// saga and the birth's events.
+fn two_sage_saga(names: NameMode) -> (Saga, Vec<SagaEvent>) {
+    let mut saga = Saga::new(config(names, Label::Live));
+    saga.feed(&sample(&chip_b(), ASIC_TEMPERATURE, Value::F64(46.0)));
+    saga.feed(&event(Event::ModelReady {
+        model: EntityKey::model(ODD_MODEL),
+        chips: Vec::new(),
+    }));
+    run_ticks(&mut saga, 5);
+    assert_eq!(saga.state.party.len(), 2);
+    let events = saga.drain_events();
+    (saga, events)
+}
+
+/// The short form of a birth's events: `W` world born, `H<f>` hero born,
+/// `Q<f>` quest started, `b` a world's beat, `b<f>` a member's beat.
+fn shape(events: &[SagaEvent]) -> Vec<String> {
+    events
+        .iter()
+        .map(|e| match e {
+            SagaEvent::WorldBorn { .. } => "W".to_string(),
+            SagaEvent::WorldEnded { .. } => "E".to_string(),
+            SagaEvent::HeroBorn { floor, .. } => format!("H{floor}"),
+            SagaEvent::QuestStarted { floor, .. } => format!("Q{floor}"),
+            SagaEvent::QuestDone { floor, .. } => format!("D{floor}"),
+            SagaEvent::Beat { floor: None, .. } => "b".to_string(),
+            SagaEvent::Beat { floor: Some(f), .. } => format!("b{f}"),
+        })
+        .collect()
+}
+
+#[test]
+fn a_party_birth_writes_one_party_line() {
+    // Three chips: the world's line, then one line for the whole party, and
+    // no hero's line. Each member still raises its HeroBorn.
+    let mut saga = saga_on(&[chip_b(), chip_c()]);
+    let events = saga.drain_events();
+    assert_eq!(
+        shape(&events),
+        ["W", "b", "b", "H0", "H1", "H2", "Q0", "b0", "Q1", "Q2"]
+    );
+    let lines: Vec<&Beat> = saga.state.chronicle.lines(CAPACITY).collect();
+    assert_eq!(lines.len(), 3, "world, party and the lead's first quest");
+    let party = lines[1];
+    assert_eq!(party.floor, None);
+    assert!(party.text.contains("three"), "{}", party.text);
+    // Its text comes from a PartyBorn template of the pack.
+    let fits = Pack::builtin()
+        .templates
+        .iter()
+        .filter(|t| t.kind == BeatKind::PartyBorn)
+        .any(|t| {
+            let head = t.text.split('{').next().unwrap_or("");
+            party.text.starts_with(head)
+        });
+    assert!(fits, "{}", party.text);
+
+    // One chip: the hero's line as before, and no party line.
+    let mut solo = Saga::new(config(NameMode::Real, Label::Live));
+    run_ticks(&mut solo, 5);
+    assert_eq!(
+        shape(&solo.drain_events()),
+        ["W", "b", "H0", "b0", "Q0", "b0"]
+    );
+}
+
+#[test]
+fn a_dropped_quest_still_raises_its_event_with_a_clean_cause() {
+    // At the birth both members set off for the sage. Member 0's line owns
+    // the window, so member 1's line is not written. Its QuestStarted is
+    // still raised, and in generated mode its reason and target carry the
+    // alias the written line used. The model's name never appears.
+    let (saga, events) = two_sage_saga(NameMode::Generated);
+    assert_eq!(
+        shape(&events),
+        ["W", "b", "b", "H0", "H1", "Q0", "b0", "Q1"]
+    );
+    let started: Vec<(&Option<EntityKey>, &Cause)> = events
+        .iter()
+        .filter_map(|e| match e {
+            SagaEvent::QuestStarted {
+                verb: Verb::VisitSage,
+                target,
+                reason,
+                ..
+            } => Some((target, reason)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started.len(), 2, "both members visit the sage");
+    let (target0, reason0) = started[0];
+    let (target1, reason1) = started[1];
+    assert!(!reason1.entity.as_str().contains(ODD_MODEL), "{reason1:?}");
+    assert_eq!(reason1, reason0, "one alias for one model");
+    assert_eq!(target1.as_ref(), Some(&reason1.entity));
+    assert_eq!(target0, target1);
+    assert_eq!(saga.state.party[0].unwritten, 0);
+    assert_eq!(saga.state.party[1].unwritten, 1);
+    // The member's own quest keeps the real reason (the modes plan alike).
+    assert_eq!(
+        saga.state.party[1].quest.reason.entity,
+        EntityKey::model(ODD_MODEL)
+    );
+
+    // Real mode: the dropped quest's event carries the real reason.
+    let (_, events) = two_sage_saga(NameMode::Real);
+    let reasons: Vec<&Cause> = events
+        .iter()
+        .filter_map(|e| match e {
+            SagaEvent::QuestStarted { reason, .. } => Some(reason),
+            _ => None,
+        })
+        .collect();
+    assert!(reasons
+        .iter()
+        .all(|r| r.entity == EntityKey::model(ODD_MODEL)));
+}
+
+#[test]
+fn target_label_is_the_beat_name_in_both_modes() {
+    for names in [NameMode::Real, NameMode::Generated] {
+        let (mut saga, events) = two_sage_saga(names);
+        // Member 0's line was written: the label is the name in its text.
+        let line = saga
+            .state
+            .chronicle
+            .lines(CAPACITY)
+            .find(|b| b.floor == Some(0))
+            .expect("member 0's first line")
+            .clone();
+        let label0 = saga.state.party[0].quest.target_label.clone();
+        let label1 = saga.state.party[1].quest.target_label.clone();
+        let label = label0.clone().expect("a sage quest has a label");
+        assert!(
+            line.text.contains(&label),
+            "{names:?}: {label} in {}",
+            line.text
+        );
+        // It is the id of the event's reason: the alias in generated mode.
+        let reason = events
+            .iter()
+            .find_map(|e| match e {
+                SagaEvent::QuestStarted { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+            .expect("a quest");
+        let id = reason.entity.as_str().split_once(':').map(|(_, id)| id);
+        assert_eq!(id, Some(label.as_str()));
+        match names {
+            NameMode::Real => assert_eq!(label, ODD_MODEL),
+            NameMode::Generated => assert_ne!(label, ODD_MODEL),
+        }
+        // Member 1's line was not written; its label is the same name.
+        assert_eq!(label1, label0, "{names:?}");
+
+        // Over a longer run, every quest has a label exactly when it visits
+        // a sage, and a written sage line always holds its member's label.
+        for _ in 0..400 {
+            let t = saga.state().tick as f64;
+            saga.feed(&sweep(&chip_a(), 45.0 + t * 0.013, 1350));
+            saga.feed(&sweep(&chip_b(), 46.0 + t * 0.011, 1350));
+            let events = saga.drain_events();
+            for w in events.windows(2) {
+                if let (
+                    SagaEvent::QuestStarted {
+                        verb: Verb::VisitSage,
+                        floor,
+                        ..
+                    },
+                    SagaEvent::Beat { text, .. },
+                ) = (&w[0], &w[1])
+                {
+                    let label = saga.state.party[*floor as usize]
+                        .quest
+                        .target_label
+                        .clone()
+                        .expect("a label");
+                    assert!(text.contains(&label), "{label} in {text}");
+                }
+            }
+            for m in &saga.state.party {
+                assert_eq!(
+                    m.quest.target_label.is_some(),
+                    m.quest.verb == Verb::VisitSage,
+                    "{:?}",
+                    m.quest
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_model_ready_reads_only_the_first_64_chips_it_names() {
+    // The front door reads the first MAX_NAMED_CHIPS (64) entries of a
+    // ModelReady's chip list. Chip A as entry 64 (the 65th) is not read, so
+    // the model's sage is on no floor; as entry 63 it is read.
+    use crate::world::MAX_NAMED_CHIPS;
+    assert_eq!(MAX_NAMED_CHIPS, 64);
+    let sage = EntityKey::model("demo-sage");
+    let hooked = |ghosts: usize| {
+        let mut saga = Saga::new(config(NameMode::Real, Label::Live));
+        let mut chips: Vec<EntityKey> = (0..ghosts)
+            .map(|k| EntityKey::chip(&format!("ghost-{k:02}")))
+            .collect();
+        chips.push(chip_a());
+        saga.feed(&sample(&chip_a(), ASIC_TEMPERATURE, Value::F64(45.0)));
+        saga.feed(&event(Event::ModelReady {
+            model: sage.clone(),
+            chips,
+        }));
+        run_ticks(&mut saga, 5);
+        assert_eq!(saga.state.world.chips, [chip_a()]);
+        let hook = saga.members[0]
+            .hooks
+            .iter()
+            .any(|h| h.target.as_ref() == Some(&sage));
+        assert_eq!(saga.state.world.sage_chips.contains(&chip_a()), hook);
+        hook
+    };
+    assert!(hooked(63), "the 64th entry is read");
+    assert!(!hooked(64), "the 65th entry is not read");
 }

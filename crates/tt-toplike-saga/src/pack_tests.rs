@@ -11,7 +11,9 @@ use crate::quest::Verb;
 use crate::rng::Pcg32;
 
 /// The placeholders that take no tag.
-const PLAIN: [&str; 7] = ["hero", "name", "world", "tick", "biome", "place", "adj"];
+const PLAIN: [&str; 8] = [
+    "hero", "name", "world", "tick", "biome", "place", "adj", "count",
+];
 
 /// Every `{...}` in `text`, without the braces. Panics on an unclosed brace
 /// or a stray closing brace, which are template typos.

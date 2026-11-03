@@ -83,15 +83,19 @@
 //!   members before it, and plans its first quest.
 //!
 //! The events of a birth come in this order: `WorldBorn` and its `Beat`;
-//! then for each member in index order its `HeroBorn` (with a beat only in a
-//! party of one); then for each member its `QuestStarted` and its `Beat`. An
-//! end comes before the birth that follows it: `WorldEnded`, its `Beat`.
+//! in a party of two or more, one `PartyBorn` `Beat` for the whole party (a
+//! world's line, with no floor, whose `{count}` is the party's size); then
+//! for each member in index order its `HeroBorn` (with a beat only in a
+//! party of one); then for each member its `QuestStarted` and its `Beat`,
+//! when the pace writes that line (see "Pace"). An end comes before the
+//! birth that follows it: `WorldEnded`, its `Beat`.
 //!
 //! On each tick in a world, each member in index order reads its vitality
 //! from the trails of its floor's chip and takes one step. A member's step
 //! reads only its own floor, quest, hooks and generator. Then:
 //!
-//! * **Arrived.** `QuestDone` and a beat. A sage hook is dropped, for this
+//! * **Arrived.** `QuestDone` and, when the pace writes it, a beat. A sage
+//!   hook is dropped, for this
 //!   member only, once it has visited the sage. The member then waits
 //!   [`DWELL_TICKS`] ticks and plans its next quest, so the chronicle does
 //!   not fill with arrivals.
@@ -102,6 +106,35 @@
 //!   it does not retry one unreachable goal forever, and it plans again at
 //!   once (ruling R15). The explore hook is never dropped: each plan draws a
 //!   new room, so the next one may be reachable.
+//!
+//! # Pace
+//!
+//! A party of 32 heroes, each starting and finishing quests, would give the
+//! chronicle one or two lines a tick, too fast to read. So a member's
+//! routine lines share one budget (the party addendum, section 3.5). The
+//! routine kinds are `QuestStarted`, `QuestDone`, `Rest` and `Ambient`; a
+//! world's line (born, ended, the party's birth) and a hero's birth line are
+//! notable and always written.
+//!
+//! * Ticks fall into windows of [`ROUTINE_WINDOW_TICKS`] (10, one second at
+//!   10 Hz): window `k` is ticks `10k` to `10k + 9`.
+//! * The first floor to write a routine line in a window owns it. Its
+//!   routine lines in that window are written; another floor's are not.
+//! * One addition to the addendum's rule keeps every floor heard. A member
+//!   is overdue when its last written routine line, or its birth, is at
+//!   least [`OVERDUE_TICKS`] (300) ticks old. While any member is overdue, a
+//!   window with no owner goes only to an overdue member, and other lines in
+//!   it are not written until one takes it. Over the 32-chip party log every
+//!   floor is then heard at least once a minute.
+//! * A line that is not written still raises its event, so tensixinet and
+//!   the digest see every quest. The member's [`Member::unwritten`] counts
+//!   one more. In generated mode a `QuestStarted` with no line takes its
+//!   reason from [`Chronicle::clean_cause`] (see "Names").
+//!
+//! The pace reads only ticks and the order of lines, so it keeps the
+//! determinism contract. A party of one takes every window, since either
+//! its member is overdue or no member is, so a one-chip saga writes every
+//! line, as 0.16 did.
 //!
 //! # Tone
 //!
@@ -135,6 +168,20 @@
 //! left out of the event in generated mode (phase 1 quests have none). Each
 //! member's `quest` keeps the real reason in both modes, so the two modes
 //! plan and walk alike.
+//!
+//! A `QuestStarted` whose line the pace leaves unwritten has no stored
+//! cause. Its reason then goes through [`Chronicle::clean_cause`], which
+//! aliases it the same way, from the same table and the chronicle's own
+//! generator.
+//!
+//! A quest's [`Quest::target_label`] is the name a view prints for its
+//! target. The saga fills it when the quest starts, after its line is
+//! written or left unwritten: a hardware key's id, or for a sage the name
+//! the line writes, through [`Chronicle::label_for`] (the model's real name
+//! in real mode, its alias in generated mode). An alias the table already
+//! holds costs no draw, so a label taken after a written line leaves the
+//! chronicle's generator as it was. Of a member's fields, only the label
+//! differs between the name modes.
 //!
 //! # Labels
 //!
@@ -317,6 +364,20 @@ pub const CHRONICLE_STREAM: u64 = 2;
 /// one (3 s at 10 Hz).
 pub const DWELL_TICKS: u64 = 30;
 
+/// Ticks in one window of the chronicle's pace: 10, one second at 10 Hz
+/// (the party addendum, section 3.5). Window `k` is ticks `10k` to
+/// `10k + 9`. In each window the routine lines of one floor are written (see
+/// "Pace" in the module comment).
+pub const ROUTINE_WINDOW_TICKS: u64 = 10;
+
+/// A member whose last written routine line (or its birth) is this many
+/// ticks old or older is overdue: 300 ticks, 30 seconds at 10 Hz. While any
+/// member is overdue, an open window of the pace goes only to an overdue
+/// member (see "Pace" in the module comment). This rule is an addition to
+/// the party addendum's first-come rule, which on its own left some floors
+/// of a 32-chip party unheard for over a thousand ticks.
+pub const OVERDUE_TICKS: u64 = 300;
+
 /// Ready models the saga keeps (ledger ruling R20). A `ModelReady` for a new
 /// model while this many are ready is not added to the list; its world is
 /// still born. Each member's sage hooks come from this list, so a member has
@@ -387,9 +448,10 @@ pub struct Member {
     /// The hero's current quest. After an arrival it stays the finished
     /// quest until the hero plans the next one.
     pub quest: Quest,
-    /// The member's routine chronicle lines that were not written. Always 0
-    /// until the chronicle's shared budget exists (Task A.4 of the party
-    /// plan).
+    /// The member's routine chronicle lines that the pace left unwritten in
+    /// the current world (see "Pace" in the module comment). It counts up
+    /// from 0 at the member's birth and stops at `u32::MAX`. A member alone
+    /// in its party never has a line left unwritten.
     pub unwritten: u32,
 }
 
@@ -446,6 +508,9 @@ struct MemberCore {
     plan_rng: Pcg32,
     /// The tick at which the member plans its next quest after an arrival.
     dwell_until: Option<u64>,
+    /// The tick of the member's last written routine line, or of its birth
+    /// before its first (see "Pace" in the module comment).
+    heard: u64,
 }
 
 /// A ready model: the cause of its `ModelReady` and the chips it named.
@@ -501,6 +566,11 @@ pub struct Saga {
     /// The chronicle's own stream, shared by every member. Reseeded at each
     /// birth.
     story_rng: Pcg32,
+    /// The window of the pace that last had an owner, and the floor that
+    /// owns it: `(k, floor)` for ticks `10k` to `10k + 9` (see "Pace" in
+    /// the module comment). A window other than the current tick's has no
+    /// owner yet.
+    window_owner: Option<(u64, u8)>,
     /// Whether the first chronicle line has been written (and marked).
     wrote_first: bool,
     /// Events raised and not yet drained, oldest first, at most
@@ -565,8 +635,10 @@ impl Saga {
                 hooks: Vec::new(),
                 plan_rng: Pcg32::new(0, PLAN_STREAM),
                 dwell_until: None,
+                heard: 0,
             }],
             story_rng: Pcg32::new(0, CHRONICLE_STREAM),
+            window_owner: None,
             wrote_first: false,
             events: VecDeque::new(),
             dropped_events: 0,
@@ -1003,6 +1075,7 @@ impl Saga {
                 hooks,
                 plan_rng,
                 dwell_until: None,
+                heard: self.state.tick,
             });
         }
         let (id, biome) = (world.id, world.biome);
@@ -1038,7 +1111,23 @@ impl Saga {
         let ctx = self.ctx(None, tone, model_name, role, None, None, &moment.cause);
         self.beat(BeatKind::WorldBorn, &ctx);
 
+        // A party of two or more: one line for the whole party, a world's
+        // line with no floor, in the world's tone. It names no model, so it
+        // draws no alias.
         let alone = self.state.party.len() == 1;
+        if !alone {
+            let ctx = self.ctx(
+                None,
+                tone,
+                None,
+                NameRole::Service,
+                None,
+                None,
+                &moment.cause,
+            );
+            self.beat(BeatKind::PartyBorn, &ctx);
+        }
+
         for i in 0..self.state.party.len() {
             let hero = &self.state.party[i].hero;
             let (name, floor, vitality) = (hero.name.clone(), hero.floor, hero.vitality);
@@ -1048,7 +1137,7 @@ impl Saga {
                 floor,
             });
             // A hero's beat, on its floor, only in a party of one. A larger
-            // party's birth gets one line of its own (Task A.4).
+            // party's birth has its single party line above.
             if alone {
                 let tone = self.tone(moment.collapse, triumph, vitality);
                 let ctx = self.ctx(
@@ -1097,16 +1186,21 @@ impl Saga {
             None,
             &quest.reason,
         );
-        let stored = self.write_beat(BeatKind::QuestStarted, &ctx);
+        let stored = self.routine_beat(i, BeatKind::QuestStarted, &ctx);
 
-        // In generated mode the event takes the beat's cleaned cause (see
+        // In generated mode the event takes the beat's cleaned cause, or for
+        // a line the pace left unwritten the cause cleaned the same way (see
         // "Names" in the module comment).
         let (reason, target) = match self.cfg.names {
             NameMode::Real => (quest.reason.clone(), quest.target.clone()),
             NameMode::Generated => {
                 let cause = match &stored {
-                    SagaEvent::Beat { cause, .. } => cause.clone(),
-                    _ => quest.reason.clone(),
+                    Some(SagaEvent::Beat { cause, .. }) => cause.clone(),
+                    _ => self.state.chronicle.clean_cause(
+                        &quest.reason,
+                        self.cfg.names,
+                        &mut self.story_rng,
+                    ),
                 };
                 let target = quest.target.as_ref().and_then(|t| {
                     if t == &quest.reason.entity {
@@ -1127,8 +1221,40 @@ impl Saga {
             target,
             reason,
         });
-        self.emit(stored);
+        if let Some(stored) = stored {
+            self.emit(stored);
+        }
+        let mut quest = quest;
+        quest.target_label = self.target_label(&quest);
         self.state.party[i].quest = quest;
+    }
+
+    /// The name a view prints for `quest`'s target, taken after the
+    /// quest's line was written or left unwritten (see "Names" in the module
+    /// comment):
+    ///
+    /// * no target: `None`;
+    /// * a hardware key (a chip, tile, DRAM channel or Ethernet port): its
+    ///   id, which the chronicle never aliases;
+    /// * the reason's entity (a sage's model): the name its line writes,
+    ///   through [`Chronicle::label_for`], so the alias in generated mode;
+    /// * anything else, or an id that is not a single token: `None`.
+    fn target_label(&mut self, quest: &Quest) -> Option<String> {
+        let target = quest.target.as_ref()?;
+        if target.chip_owner().is_some() {
+            let id = target.as_str().split_once(':').map_or("", |(_, id)| id);
+            return Some(id.to_string());
+        }
+        if *target != quest.reason.entity {
+            return None;
+        }
+        let name = real_name(target)?;
+        Some(self.state.chronicle.label_for(
+            &name,
+            NameRole::Model,
+            self.cfg.names,
+            &mut self.story_rng,
+        ))
     }
 
     /// Member `i`'s tick: vitality, one step, and what follows it.
@@ -1174,7 +1300,9 @@ impl Saga {
                 None,
                 &quest.reason,
             );
-            self.beat(BeatKind::QuestDone, &ctx);
+            if let Some(ev) = self.routine_beat(i, BeatKind::QuestDone, &ctx) {
+                self.emit(ev);
+            }
             self.members[i].dwell_until = Some(self.state.tick + DWELL_TICKS);
         } else if r.no_path {
             let quest = member.quest.clone();
@@ -1245,7 +1373,46 @@ impl Saga {
             tick: self.state.tick,
             cause: cause.clone(),
             floor: who.map(|_| hero.floor),
+            // At most MAX_FLOORS (32) members, so the count fits a byte.
+            count: u8::try_from(self.state.party.len()).unwrap_or(u8::MAX),
         }
+    }
+
+    /// Member `i`'s routine line under the chronicle's pace (see "Pace" in
+    /// the module comment). When the line's floor owns the current window,
+    /// or the window has no owner yet and the floor takes it, the line is
+    /// written, and its event is returned without being raised. Otherwise nothing is
+    /// written, member `i`'s `unwritten` counts one more, and `None` is
+    /// returned. A line with no floor is always written.
+    fn routine_beat(&mut self, i: usize, kind: BeatKind, ctx: &BeatCtx) -> Option<SagaEvent> {
+        if let Some(floor) = ctx.floor {
+            let tick = self.state.tick;
+            let window = tick / ROUTINE_WINDOW_TICKS;
+            let overdue = |heard: u64| tick.saturating_sub(heard) >= OVERDUE_TICKS;
+            let writes = match self.window_owner {
+                // A window with an owner: only the owner's floor writes.
+                Some((k, owner)) if k == window => owner == floor,
+                // An open window: an overdue member takes it; another member
+                // takes it only while no member is overdue. With one member
+                // either holds, so a lone member takes every window.
+                _ => {
+                    let takes = overdue(self.members[i].heard)
+                        || !self.members.iter().any(|m| overdue(m.heard));
+                    if takes {
+                        self.window_owner = Some((window, floor));
+                    }
+                    takes
+                }
+            };
+            if !writes {
+                if let Some(m) = self.state.party.get_mut(i) {
+                    m.unwritten = m.unwritten.saturating_add(1);
+                }
+                return None;
+            }
+            self.members[i].heard = tick;
+        }
+        Some(self.write_beat(kind, ctx))
     }
 
     /// Writes a beat and raises its event.
@@ -1308,6 +1475,7 @@ fn rest_at(pos: (u8, u8), chip: EntityKey) -> Quest {
             ordinal: 0,
         },
         goal: pos,
+        target_label: None,
     }
 }
 

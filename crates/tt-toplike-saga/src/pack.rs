@@ -1489,7 +1489,9 @@ const fn ending(why: EndWhy, text: &'static str) -> Template {
     }
 }
 
-use BeatKind::{Ambient, HeroBorn, QuestDone, QuestStarted, Rest, WorldBorn, WorldEnded};
+use BeatKind::{
+    Ambient, HeroBorn, PartyBorn, QuestDone, QuestStarted, Rest, WorldBorn, WorldEnded,
+};
 use Tone::{Calm, Tense, Triumphant};
 
 /// Every builtin template, in a fixed order (the draw among fitting
@@ -1625,6 +1627,42 @@ static TEMPLATES: &[Template] = &[
     any(
         HeroBorn,
         "A new user logs on to world {world}: {hero}. The sysop waves hello.",
+    ),
+    // A party of two or more wakes: one line for every hero at once. The
+    // count is written mid-sentence, since `{count}` writes a lower-case word.
+    toned(
+        PartyBorn,
+        Calm,
+        "In {place}, {count} heroes wake, one on each floor.",
+    ),
+    toned(
+        PartyBorn,
+        Calm,
+        "The party gathers: {count} heroes, each at the {w:place:gate} of its own floor.",
+    ),
+    toned(
+        PartyBorn,
+        Tense,
+        "A {adj} wind stirs {count} heroes awake, one on every floor of {place}.",
+    ),
+    toned(
+        PartyBorn,
+        Tense,
+        "The floors tremble, and {count} heroes scramble to their feet.",
+    ),
+    toned(
+        PartyBorn,
+        Triumphant,
+        "Hail the party of {count}! One hero stands ready on each floor.",
+    ),
+    toned(
+        PartyBorn,
+        Triumphant,
+        "Trumpets sound as {count} heroes rise across {place}!",
+    ),
+    any(
+        PartyBorn,
+        "Party log, tick {tick}: {count} users log on to world {world}, one per floor.",
     ),
     // A quest begins.
     quest(

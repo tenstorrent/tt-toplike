@@ -85,6 +85,14 @@ pub struct Quest {
     pub reason: Cause,
     /// `(x, y)` on the hero's floor.
     pub goal: (u8, u8),
+    /// The name a view prints for the target, or `None` to print none.
+    /// [`plan`] leaves it `None`. The front door fills it when the quest
+    /// starts, after the quest's chronicle line is written or left
+    /// unwritten: a hardware key's id, or for a sage the model's real name
+    /// in real mode and the chronicle's alias for it in generated mode (the
+    /// party addendum, section 3.3). So no real name reaches it in
+    /// generated mode.
+    pub target_label: Option<String>,
 }
 
 /// Picks the hero's next quest from `hooks`. See the module comment for the
@@ -102,6 +110,7 @@ pub fn plan(world: &World, hero: &Hero, hooks: &[Hook], rng: &mut Pcg32) -> Ques
         target: hook.target.clone(),
         reason: hook.reason.clone(),
         goal,
+        target_label: None,
     };
 
     if let Some(floor) = floor {
@@ -141,6 +150,7 @@ pub fn plan(world: &World, hero: &Hero, hooks: &[Hook], rng: &mut Pcg32) -> Ques
             ordinal: 0,
         },
         goal: hero.pos,
+        target_label: None,
     }
 }
 
