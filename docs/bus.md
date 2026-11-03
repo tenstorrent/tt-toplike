@@ -999,8 +999,10 @@ before the bus; a test pins them by hash.
 
 Saga (`S`, [docs/saga.md](saga.md)) reads the record stream itself. It does not read the world.
 A driver thread (`src/saga/driver.rs`) feeds every record, in order, to the saga core
-(`crates/tt-toplike-saga`): from `Bus::read_from` on a TUI that hosts its bus, and from the
-socket's `subscribe` on an attached TUI, which starts from the host's snapshot. The core reads
+(`crates/tt-toplike-saga`): from `Bus::read_from` on a TUI that hosts its bus, starting at that
+bus instance's first record (`Bus::first_seq`, so a reused `--bus-dir` does not replay earlier
+sessions into the story), and from the socket's `subscribe` on an attached TUI, which starts from
+the host's snapshot. The core reads
 only each record's source and payload, so the same records give the same saga whatever their
 sequence numbers and times. `--bus-inspect DIR --saga-digest` prints that saga's digest for a
 recorded log.

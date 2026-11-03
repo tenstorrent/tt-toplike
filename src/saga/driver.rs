@@ -11,8 +11,11 @@
 //! # Where the records come from
 //!
 //! * [`SagaDriver::spawn`] reads a [`Bus`] this process hosts with
-//!   [`Bus::read_from`], [`BATCH`] records at a time from sequence number 1,
-//!   and parks for [`IDLE_PARK`] when it has caught up.
+//!   [`Bus::read_from`], [`BATCH`] records at a time, from the bus
+//!   instance's first sequence number ([`Bus::first_seq`]), and parks for
+//!   [`IDLE_PARK`] when it has caught up. A `--bus-dir` or `--record`
+//!   directory that holds earlier sessions is read from this session on:
+//!   the old records are on disk but belong to other stories.
 //! * [`SagaDriver::spawn_remote`] (Unix only) reads another process's bus
 //!   over its socket: a snapshot, then `subscribe_from` the snapshot's
 //!   sequence number. The saga starts from the snapshot's readings (each
@@ -338,8 +341,8 @@ impl std::fmt::Debug for SagaDriver {
 }
 
 impl SagaDriver {
-    /// Feed a saga from `bus`, starting at its oldest record, on a new
-    /// thread. The label comes from the bus header ([`label_for`]) and
+    /// Feed a saga from `bus`, starting at this bus instance's first record
+    /// ([`Bus::first_seq`]), on a new thread. The label comes from the bus header ([`label_for`]) and
     /// replaces `cfg.label`. Fails only when the thread cannot be started.
     pub fn spawn(bus: Bus, cfg: SagaConfig) -> std::io::Result<SagaDriver> {
         let cfg = SagaConfig {
@@ -479,7 +482,11 @@ impl Drop for SagaDriver {
 /// The local driver's loop. See the module comment.
 fn run_local(bus: &Bus, cfg: SagaConfig, shared: &Shared) {
     let mut f = Feeder::new(cfg, 1);
-    let mut next = 1;
+    // This bus instance's first record. A bus reopened on a directory that
+    // holds earlier sessions continues their numbers and can still read
+    // them from disk; starting at 1 would tell those old sessions first and
+    // then run them into this one as one story (final review finding I3).
+    let mut next = bus.first_seq();
     let mut warned = false;
     while !shared.stopping() {
         match bus.read_from(next, BATCH) {

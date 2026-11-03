@@ -293,6 +293,9 @@ struct Inner {
     header_tags: std::collections::BTreeMap<String, String>,
     /// Random id chosen when the bus was opened. See [`Bus::instance`].
     instance: u64,
+    /// The sequence number of this instance's first record. See
+    /// [`Bus::first_seq`].
+    first_seq: u64,
 }
 
 /// How long dropping the last `Bus` handle waits for the writer to finish.
@@ -525,6 +528,7 @@ impl Bus {
             header_kind: cfg.header_kind,
             header_tags: cfg.header_tags,
             instance: new_instance(),
+            first_seq: head + 1,
         });
         let bus = Bus {
             _writer: Arc::new(WriterGuard {
@@ -594,6 +598,16 @@ impl Bus {
     /// that the server's bus changed.
     pub fn instance(&self) -> u64 {
         self.inner.instance
+    }
+
+    /// The sequence number of the first record this bus instance assigns:
+    /// one after the newest record found in the log directory at open, or
+    /// 1 for a new directory or a memory-only bus. Records below it belong
+    /// to earlier sessions in the same directory, which a reader can still
+    /// fetch from the segment files. A reader that wants only this
+    /// session's records starts here.
+    pub fn first_seq(&self) -> u64 {
+        self.inner.first_seq
     }
 
     /// The log directory, or `None` for a memory-only bus.
@@ -1848,6 +1862,7 @@ mod tests {
             ..disk_cfg(dir.path(), &clock)
         };
         let bus = Bus::open(cfg.clone()).unwrap();
+        assert_eq!(bus.first_seq(), 1, "a new directory starts at 1");
         for i in 0..10 {
             bus.publish("t", sample(i));
         }
@@ -1855,7 +1870,10 @@ mod tests {
         drop(bus);
         let bus = Bus::open(cfg).unwrap();
         assert_eq!(bus.head(), 10);
+        // This instance's first record is the one after the old head.
+        assert_eq!(bus.first_seq(), 11);
         assert_eq!(bus.publish("t", sample(10)), 11);
+        assert_eq!(bus.first_seq(), 11, "publishing does not move it");
         assert_eq!(
             seqs(&bus.read_from(1, 100).unwrap()),
             (1..=11).collect::<Vec<_>>()

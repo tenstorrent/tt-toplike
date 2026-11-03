@@ -111,6 +111,52 @@ fn the_driver_feeds_every_record_in_order() {
     d.stop();
 }
 
+/// A bus reopened on a directory that holds earlier sessions continues
+/// their sequence numbers and reads their records back from the segment
+/// files. A local saga starts at this bus instance's first record, so the
+/// old sessions are not fed (final review finding I3).
+#[test]
+fn a_reused_bus_dir_feeds_only_this_sessions_records() {
+    let tmp = tempfile::tempdir().unwrap();
+    let records = busy_records();
+    let (old, new) = records.split_at(records.len() / 2);
+    let open = |clock: &Arc<ManualClock>| {
+        Bus::open(BusConfig {
+            dir: Some(tmp.path().to_path_buf()),
+            clock: clock.clone(),
+            ..BusConfig::default()
+        })
+        .unwrap()
+    };
+    // An earlier session, flushed to disk and closed.
+    let earlier = open(&ManualClock::new(0));
+    publish_all(&earlier, old);
+    assert!(earlier.flush(WAIT));
+    let old_head = earlier.head();
+    assert_eq!(old_head, old.len() as u64);
+    drop(earlier);
+
+    let clock = ManualClock::new(0);
+    let bus = open(&clock);
+    assert_eq!(bus.first_seq(), old_head + 1);
+    // The old records are still readable through the new bus, so a driver
+    // that started at 1 would feed them.
+    assert_eq!(bus.read_from(1, 1).unwrap()[0].seq, 1);
+    publish_all(&bus, new);
+    let head = bus.head();
+    let d = SagaDriver::spawn(bus.clone(), cfg()).unwrap();
+    assert!(
+        wait_published(&d, &clock, |p| p.through == head),
+        "the driver never caught up: {:?}",
+        d.published()
+    );
+    let p = d.published();
+    assert_eq!(p.fed, new.len() as u64, "only this session's records");
+    assert_eq!(p.feeds, 1, "no restart");
+    assert_eq!(p.digest, reference_digest_from(&bus, old_head + 1, cfg()));
+    d.stop();
+}
+
 #[test]
 fn the_driver_stops_on_stop() {
     let clock = ManualClock::new(0);
