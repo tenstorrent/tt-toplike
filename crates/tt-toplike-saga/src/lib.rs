@@ -25,4 +25,5 @@
 
 pub mod observe;
 pub mod rng;
+pub mod seed;
 pub mod stats;
