@@ -186,7 +186,7 @@ pub struct Cli {
             crate::die3d_mode_alias!(),
             ", the ",
             crate::die3d_display_name!(),
-            ")"
+            "), saga"
         )
     )]
     pub mode: Option<VisualizationMode>,
@@ -197,8 +197,8 @@ pub struct Cli {
         help = "Rotate through every view unattended (kiosk / wall-display mode)",
         long_help = concat!(
             "Rotate through every view unattended (kiosk / wall-display mode)\n\n",
-            "Cycles every view except Grid, including the ones reachable only by ",
-            "their own key (`i`, `~`, `t`, `3`), 30s on each and 45s on arcade. ",
+            "Cycles every view except Grid and Saga, including the ones reachable ",
+            "only by their own key (`i`, `~`, `t`, `3`), 30s on each and 45s on arcade. ",
             "Training and the inference monitor are visited only while a training ",
             "run exists or a model server is starting or running. The ",
             crate::die3d_display_name!(),
@@ -702,6 +702,11 @@ pub enum VisualizationMode {
         )
     )]
     Die3d,
+
+    /// Saga: a hero's quest through a dungeon built from the machine's own
+    /// signals, with a chronicle of what happens. Also reachable in-app with
+    /// `S`. Needs `[saga] enabled` (on by default).
+    Saga,
 }
 
 impl Cli {
@@ -1702,6 +1707,14 @@ mod tests {
                 "--mode {spelling}"
             );
         }
+    }
+
+    /// `--mode saga` selects the Saga view.
+    #[test]
+    fn mode_saga_parses() {
+        let cli = Cli::try_parse_from(["tt-toplike", "--mode", "saga"])
+            .unwrap_or_else(|e| panic!("`--mode saga` must parse: {e}"));
+        assert_eq!(cli.mode, Some(VisualizationMode::Saga));
     }
 
     /// The neighbouring modes must keep their own spellings — an alias list is

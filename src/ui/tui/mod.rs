@@ -48,6 +48,7 @@ mod hivemind_bus;
 mod hivemind_view;
 pub(crate) mod inference_bus;
 pub(crate) mod inference_panel;
+mod saga_view;
 
 use crate::animation::{
     ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis, TrainView,
@@ -134,7 +135,30 @@ enum DisplayMode {
     /// While active it also takes `[ ] m c C B T X W H L` (see
     /// `die3d_key_for`).
     Die3d,
+    /// Saga: a hero's quest through a dungeon the machine's signals build
+    /// (`saga_view`). Entered with `S` only (`saga_view::ENTRY_KEY`;
+    /// excluded from the `v` cycle like Die 3D, and not in `--rotate` yet);
+    /// `S` toggles back out to `prev_mode`, as does Esc. While active it
+    /// also takes `y` for "why" (see `saga_key_for`).
+    Saga,
 }
+
+/// Every mode, for tests that must cover each one.
+#[cfg(test)]
+const ALL_DISPLAY_MODES: [DisplayMode; 12] = [
+    DisplayMode::Insights,
+    DisplayMode::Grid,
+    DisplayMode::Starfield,
+    DisplayMode::MemoryCastle,
+    DisplayMode::MemoryFlow,
+    DisplayMode::Arcade,
+    DisplayMode::Defrag,
+    DisplayMode::InferenceMonitor,
+    DisplayMode::HivemindSweeper,
+    DisplayMode::Training,
+    DisplayMode::Die3d,
+    DisplayMode::Saga,
+];
 
 /// The `v` rotation. `InferenceMonitor`, `HivemindSweeper`, `Training` and
 /// `Die3d` are entry-key-only modes and are never cycled into; a `v` pressed while
@@ -160,6 +184,8 @@ fn next_display_mode(m: DisplayMode) -> DisplayMode {
         DisplayMode::Training => DisplayMode::Insights,
         // Die3d is entered with `3` only, so `v` from it leaves the same way.
         DisplayMode::Die3d => DisplayMode::Insights,
+        // Saga too, with `S`.
+        DisplayMode::Saga => DisplayMode::Insights,
     }
 }
 
@@ -237,6 +263,25 @@ fn die3d_toggle(mode: DisplayMode, prev_mode: DisplayMode) -> (DisplayMode, Disp
     } else {
         (DisplayMode::Die3d, mode)
     }
+}
+
+/// The mode an `S` press (`saga_view::ENTRY_KEY`) leads to, and the
+/// `prev_mode` to keep: the same toggle as [`die3d_toggle`], for Saga.
+fn saga_toggle(mode: DisplayMode, prev_mode: DisplayMode) -> (DisplayMode, DisplayMode) {
+    if mode == DisplayMode::Saga {
+        let back = back_target(mode, prev_mode);
+        (back, back)
+    } else {
+        (DisplayMode::Saga, mode)
+    }
+}
+
+/// Whether `c` is a Saga key in `mode`: only `y` (`saga_view::WHY_KEY`,
+/// which shows each chronicle line's cause), and only in Saga. Elsewhere `y`
+/// keeps its meaning (Insights confirms a kill with it). The handler checks
+/// this before its general character arms.
+fn saga_key_for(mode: DisplayMode, c: char) -> bool {
+    mode == DisplayMode::Saga && c == saga_view::WHY_KEY
 }
 
 /// The Die 3D key `c` stands for in `mode`, if the view takes it. Outside
@@ -405,6 +450,7 @@ fn view_name(mode: DisplayMode) -> &'static str {
         DisplayMode::HivemindSweeper => "hivemind",
         DisplayMode::Training => "training",
         DisplayMode::Die3d => "die3d",
+        DisplayMode::Saga => "saga",
     }
 }
 
@@ -418,12 +464,12 @@ fn bus_status_hint(bus: &crate::bus::tui_bus::TuiBus) -> Option<&str> {
 }
 
 /// Name shown in the global status bar for a mode that adds a hint there.
-/// Only `Die3d` does today (the view's own footer lists the keys too, so the
-/// status bar repeats `3 leave` next to the view's name); every other mode
-/// has none.
+/// `Die3d` and `Saga` do (the status bar shows `3 leave` or `S leave` next
+/// to the view's name); every other mode has none.
 fn statusbar_mode_name(mode: DisplayMode) -> &'static str {
     match mode {
         DisplayMode::Die3d => crate::animation::DIE3D_DISPLAY_NAME,
+        DisplayMode::Saga => saga_view::DISPLAY_NAME,
         _ => "",
     }
 }
@@ -736,6 +782,7 @@ fn display_mode_for(mode: crate::cli::VisualizationMode) -> DisplayMode {
         V::Hivemind => DisplayMode::HivemindSweeper,
         V::Training => DisplayMode::Training,
         V::Die3d => DisplayMode::Die3d,
+        V::Saga => DisplayMode::Saga,
     }
 }
 
@@ -923,6 +970,7 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         cli,
         &mut tui_bus,
         &loaded_config,
+        saga.as_ref(),
     );
 
     // Stop the splash if no frame was ever drawn, before the screen is
@@ -966,6 +1014,9 @@ fn run_app(
     cli: &Cli,
     tui_bus: &mut crate::bus::tui_bus::TuiBus,
     loaded_config: &crate::config::LoadedConfig,
+    // The saga's driver, started in `run_tui`; `None` when `[saga] enabled
+    // = false` or it could not start (the Saga view says which).
+    saga: Option<&crate::saga::SagaDriver>,
 ) -> Result<(), TTTopError> {
     let update_interval = Duration::from_millis(cli.interval);
     let mut last_update = Instant::now();
@@ -1121,6 +1172,12 @@ fn run_app(
     // was made, so one `Instant` lives beside it.
     let mut die3d: Option<crate::animation::Die3dView> = None;
     let mut die3d_started = Instant::now();
+    // Saga: whether each chronicle line shows its cause (`y`), and a frame
+    // counter for the view's small animations (portals, the waiting dots),
+    // advanced once per data tick while the view is on screen. The story
+    // itself runs on the driver's thread (`saga`).
+    let mut saga_why = false;
+    let mut saga_frame: u64 = 0;
     // The Die 3D inset beside the Insights process table (see
     // `insights_inset_rect`), with its own clock. It exists only on Insights,
     // once there is room and a Blackhole chip; it is hidden but kept while
@@ -1952,6 +2009,10 @@ fn run_app(
                     let world = tui_bus.read();
                     dv.update(backend, Some(&world), die3d_started.elapsed().as_secs_f64());
                 }
+                // The story runs on the driver's thread; the view only
+                // reads its published state when it draws. Here the view's
+                // own animation clock moves on.
+                DisplayMode::Saga => saga_frame = saga_frame.wrapping_add(1),
             }
 
             // The backdrops (see `backdrop_bus`): the views' own painters
@@ -2356,6 +2417,9 @@ fn run_app(
                             if let Some(ref dv) = die3d {
                                 ui_die3d(f, dv, bus_world, die3d_started.elapsed().as_secs_f64());
                             }
+                        }
+                        DisplayMode::Saga => {
+                            ui_saga(f, saga, loaded_config.saga.enabled, saga_why, saga_frame);
                         }
                         DisplayMode::Training => {
                             // Under `--mock` the state comes from the
@@ -3096,6 +3160,23 @@ fn run_app(
                                 }
                                 force_redraw = true;
                             }
+                            // ── Saga keys ──────────────────────────────────
+                            // `y` shows or hides each chronicle line's
+                            // cause, in Saga only (`saga_key_for`), so
+                            // Insights keeps `y` for its kill dialog.
+                            KeyCode::Char(c) if saga_key_for(display_mode, c) => {
+                                saga_why = !saga_why;
+                                force_redraw = true;
+                            }
+                            KeyCode::Char(saga_view::ENTRY_KEY) => {
+                                // Toggle Saga, like `3` for Die 3D. The
+                                // story keeps running off screen (the
+                                // driver's thread), so leaving drops nothing.
+                                let (m, p) = saga_toggle(display_mode, prev_mode);
+                                display_mode = m;
+                                prev_mode = p;
+                                force_redraw = true;
+                            }
                             KeyCode::Char('3') => {
                                 // Toggle the Die 3D view, like `t` for Training. The
                                 // view is dropped at the mode-transition choke point
@@ -3189,6 +3270,9 @@ fn run_app(
                                 } else if display_mode == DisplayMode::Die3d {
                                     // Back out of Die 3D (see the `3` handler above);
                                     // `back_target` makes sure Esc always leaves.
+                                    display_mode = back_target(display_mode, prev_mode);
+                                } else if display_mode == DisplayMode::Saga {
+                                    // Back out of Saga (see the `S` handler above).
                                     display_mode = back_target(display_mode, prev_mode);
                                 } else {
                                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
@@ -4161,6 +4245,38 @@ fn ui_die3d(
     f.render_widget(widget, area);
 }
 
+/// Draw the Saga view above the global status bar: the driver's last
+/// published state, or a note when there is no driver (`enabled` is the
+/// `[saga] enabled` setting, so the note can say why). See `saga_view`.
+fn ui_saga(
+    f: &mut Frame,
+    saga: Option<&crate::saga::SagaDriver>,
+    enabled: bool,
+    why: bool,
+    frame: u64,
+) {
+    let full = f.area();
+    let area = Rect {
+        height: full.height.saturating_sub(STATUS_BAR_ROWS as u16),
+        ..full
+    };
+    let size = (area.width, area.height);
+    let lines = match saga {
+        Some(d) => {
+            // One read gives the state and the stopped flag together.
+            let p = d.published();
+            let flags = saga_view::SagaFlags {
+                stopped: p.stopped,
+                why,
+            };
+            saga_view::render_saga(&p.state, flags, size, frame)
+        }
+        None => saga_view::render_saga_off(size, enabled),
+    };
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::canvas_bg()));
+    f.render_widget(widget, area);
+}
+
 /// Render Arcade mode — uses the composite canvas so the hero `@` and trail
 /// actually appear.  The previous ratatui-Layout approach called sub-viz methods
 /// directly into separate Rects, bypassing ArcadeVisualization::render() and
@@ -4245,6 +4361,18 @@ fn render_global_statusbar(
     if mode == DisplayMode::Die3d {
         hotkeys.push(vec![
             key(" 3 "),
+            Span::styled(
+                format!(" leave {}", statusbar_mode_name(mode)),
+                Style::default().fg(label_fg),
+            ),
+        ]);
+    }
+
+    // Saga: the "why" key and the key out of it.
+    if mode == DisplayMode::Saga {
+        hotkeys.push(vec![key(" y "), lbl(" why")]);
+        hotkeys.push(vec![
+            key(" S "),
             Span::styled(
                 format!(" leave {}", statusbar_mode_name(mode)),
                 Style::default().fg(label_fg),
@@ -4965,6 +5093,7 @@ fn overlay_lines_with(
                         ("R", "rotate (kiosk)"),
                         ("w", "backdrop"),
                         ("{ }", "Arcade layout"),
+                        ("S", saga_view::DISPLAY_NAME),
                     ]),
                 ]
             };
@@ -5009,6 +5138,25 @@ fn overlay_lines_with(
                         .into_iter()
                         .enumerate()
                         .filter(|(i, _)| [0, 1, 3].contains(i))
+                        .map(|(_, l)| l),
+                );
+                return help;
+            }
+            if mode == DisplayMode::Saga {
+                // In Saga, its own keys, then the global keys most used
+                // here, as the Waffler does.
+                let mut help = vec![sep!(format!("{} keys", saga_view::DISPLAY_NAME))];
+                help.extend(
+                    saga_view::HELP_KEYS
+                        .iter()
+                        .map(|pair| cells(pair, 6, 30, key)),
+                );
+                help.push(sep!("Everywhere  (every key: ? in another view)"));
+                help.extend(
+                    keys(key)
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(i, _)| [0, 1, 3, 4].contains(i))
                         .map(|(_, l)| l),
                 );
                 return help;
@@ -5133,6 +5281,7 @@ fn overlay_lines_with(
                     v
                 }
                 DisplayMode::Die3d => die3d_legend_lines(bar, bg, dim),
+                DisplayMode::Saga => saga_view::legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => arcade_legend_lines(bar, bg, dim),
             };
             if crate::animation::backdrop::takes_backdrop(view_name(mode)) {
@@ -5316,6 +5465,9 @@ fn overlay_lines_with(
                     explain_lines(bar, bg, dim, lbl, hivemind_view::EXPLAIN_TEXT, cols)
                 }
                 DisplayMode::Die3d => explain_lines(bar, bg, dim, lbl, DIE3D_EXPLAIN_TEXT, cols),
+                DisplayMode::Saga => {
+                    explain_lines(bar, bg, dim, lbl, saga_view::EXPLAIN_TEXT, cols)
+                }
                 DisplayMode::Training => with_bus(
                     &[
                         "Training — Robot Brain Food",
@@ -6850,10 +7002,17 @@ fn execute_command(
                     false,
                 )
             }
+            // The story runs from start-up on the driver's thread, so
+            // there is nothing to start: setting the mode is the whole job.
+            saga_view::MODE_NAME => {
+                *display_mode = DisplayMode::Saga;
+                (format!("→ {}", saga_view::DISPLAY_NAME), false, false)
+            }
             _ => (
                 format!(
-                    "mode: insights|grid|starfield|castle|flow|arcade|defrag|hivemind|training|die3d|{}",
-                    crate::animation::DIE3D_MODE_ALIAS
+                    "mode: insights|grid|starfield|castle|flow|arcade|defrag|hivemind|training|die3d|{}|{}",
+                    crate::animation::DIE3D_MODE_ALIAS,
+                    saga_view::MODE_NAME
                 ),
                 true,
                 false,
@@ -6891,6 +7050,11 @@ fn execute_command(
                 false,
             ),
         },
+        // Shorthand for `/mode saga`, as `/waffler` is for the Waffler.
+        saga_view::MODE_NAME => {
+            *display_mode = DisplayMode::Saga;
+            (format!("→ {}", saga_view::DISPLAY_NAME), false, false)
+        }
         // Shorthand for `/mode die3d`, the way `/hivemind` opens its view.
         "die3d" | crate::animation::DIE3D_MODE_ALIAS => {
             *display_mode = DisplayMode::Die3d;
@@ -9623,6 +9787,8 @@ mod cmd_tests {
             ("mode waffler", DisplayMode::Die3d),
             ("/die3d", DisplayMode::Die3d),
             ("/waffler", DisplayMode::Die3d),
+            ("mode saga", DisplayMode::Saga),
+            ("/saga", DisplayMode::Saga),
         ];
         for (cmd, expected) in cases {
             let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
@@ -10059,9 +10225,40 @@ mod tests {
 mod display_mode_tests {
     use super::{
         back_target, die3d_area, die3d_key_for, die3d_pan_for, die3d_toggle, display_mode_for,
-        leaves_die3d, linger_for, next_display_mode, next_rotation_mode, resize_die3d,
+        leaves_die3d, linger_for, next_display_mode, next_rotation_mode, resize_die3d, saga_toggle,
         statusbar_mode_name, DisplayMode, ROTATE_LINGER, ROTATION,
     };
+
+    /// `S` enters Saga remembering the mode it came from, and `S` again
+    /// leaves to it; from a saved mode of Saga itself it leaves to Insights
+    /// (`back_target`, which Esc uses too).
+    #[test]
+    fn key_s_enters_saga_and_leaves_to_where_it_came_from() {
+        let (mode, prev) = saga_toggle(DisplayMode::Grid, DisplayMode::Insights);
+        assert_eq!((mode, prev), (DisplayMode::Saga, DisplayMode::Grid));
+        let (mode, prev) = saga_toggle(mode, prev);
+        assert_eq!((mode, prev), (DisplayMode::Grid, DisplayMode::Grid));
+        let (mode, _) = saga_toggle(DisplayMode::Saga, DisplayMode::Saga);
+        assert_eq!(mode, DisplayMode::Insights);
+        assert_eq!(
+            back_target(DisplayMode::Saga, DisplayMode::Training),
+            DisplayMode::Training
+        );
+    }
+
+    /// Saga is outside the `v` cycle and, until phase 3 decides, outside
+    /// `--rotate`; `v` from it goes to Insights. The status bar names it.
+    #[test]
+    fn saga_is_out_of_the_v_cycle_and_the_rotation() {
+        assert_eq!(next_display_mode(DisplayMode::Saga), DisplayMode::Insights);
+        let mut m = DisplayMode::Insights;
+        for _ in 0..30 {
+            assert_ne!(m, DisplayMode::Saga, "`v` must not cycle into Saga");
+            m = next_display_mode(m);
+        }
+        assert!(!ROTATION.contains(&DisplayMode::Saga));
+        assert_eq!(statusbar_mode_name(DisplayMode::Saga), "Saga");
+    }
 
     #[test]
     fn t_key_enters_training_mode_and_esc_leaves_it() {
@@ -10958,6 +11155,7 @@ mod display_mode_tests {
             (V::Hivemind, DisplayMode::HivemindSweeper),
             (V::Training, DisplayMode::Training),
             (V::Die3d, DisplayMode::Die3d),
+            (V::Saga, DisplayMode::Saga),
         ];
         for (cli_mode, want) in pairs {
             assert_eq!(
@@ -11947,19 +12145,7 @@ mod host_default_screen_tests {
     }
 
     /// Every mode, for the overlay size tests.
-    const ALL_MODES: [super::DisplayMode; 11] = [
-        super::DisplayMode::Insights,
-        super::DisplayMode::Grid,
-        super::DisplayMode::Starfield,
-        super::DisplayMode::MemoryCastle,
-        super::DisplayMode::MemoryFlow,
-        super::DisplayMode::Arcade,
-        super::DisplayMode::Defrag,
-        super::DisplayMode::InferenceMonitor,
-        super::DisplayMode::HivemindSweeper,
-        super::DisplayMode::Training,
-        super::DisplayMode::Die3d,
-    ];
+    const ALL_MODES: [super::DisplayMode; 12] = super::ALL_DISPLAY_MODES;
 
     /// The overlays do not scroll, so a panel taller than the terminal loses
     /// its last lines. Every overlay for every mode must fit its row target
@@ -12308,6 +12494,10 @@ mod host_default_screen_tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
+        // Saga's help lists its keys, and every other help lists `S`.
+        let saga = text(DisplayMode::Saga);
+        assert!(saga.contains("why: each line's cause"), "{saga}");
+        assert!(text(DisplayMode::Insights).contains("Saga"));
         let in_view = text(DisplayMode::Die3d);
         for c in crate::animation::die3d::commands::COMMANDS {
             let usage = crate::animation::die3d::commands::usage(c);
@@ -14306,6 +14496,7 @@ mod bus_wiring_tests {
             (DisplayMode::HivemindSweeper, "hivemind"),
             (DisplayMode::Training, "training"),
             (DisplayMode::Die3d, "die3d"),
+            (DisplayMode::Saga, "saga"),
         ];
         for (m, name) in all {
             assert_eq!(view_name(m), name);
