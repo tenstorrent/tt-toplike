@@ -183,8 +183,8 @@ impl Palette {
     }
 }
 
-/// The characters the map is drawn with. This is the one place a map role
-/// is given its character; the view never spells a map glyph of its own.
+/// The characters the map is drawn with. Every map role takes its character
+/// from here, and the view spells no map glyph of its own.
 ///
 /// Every glyph is a single terminal column wide. The role glyphs (`hero` to
 /// `trail`) are never a right-edge border glyph (`│`, `┐`, `┘`, `┤`, `║`,
@@ -243,9 +243,9 @@ pub const ARM_W: u8 = 8;
 pub enum WallKind {
     /// Inside the floor.
     Inner,
-    /// On the floor's top or bottom row, not a corner.
+    /// On the floor's top or bottom row, corners aside.
     ShellRow,
-    /// On the floor's west or east column, not a corner.
+    /// On the floor's west or east column, corners aside.
     ShellCol,
     /// One of the floor's four corners.
     ShellCorner,

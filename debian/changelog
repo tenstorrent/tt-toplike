@@ -1,3 +1,18 @@
+tt-toplike (0.16.1) noble; urgency=medium
+
+  * Saga has a new look; the story and its digests are unchanged. Walls are
+    drawn as box-drawing lines (thin inside a floor, double on the outer
+    shell) and solid rock is blank. The hero's light shows what it can see,
+    the map keeps what it has seen at a low brightness, and unexplored cells
+    stay dark; the memory starts over on a new world or floor. The hero
+    glows and leaves a fading trail, and the goal and a visited sage pulse.
+    New glyphs: sage, goal, vault, gate, portal, door, exit, floor and
+    ruin. Biomes have their own brand colours, a hot chip warms its floor,
+    the chronicle marks each line's tone and puts names in bold, and the
+    status row shows a vitality bar, the mapped share and the tick.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 09:00:00 -0800
+
 tt-toplike (0.16.0) noble; urgency=medium
 
   * Saga, phase 1: a view where a hero quests through a dungeon built from

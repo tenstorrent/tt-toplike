@@ -17,6 +17,18 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.16.1
+- Saga has a new look. Walls are drawn as lines: thin inside a floor, double on its outer shell, with
+  solid rock left blank, so rooms and corridors stand out. The hero carries a light: the map shows what
+  it can see, keeps what it has seen at a low brightness, and leaves the rest dark until it is explored.
+  The memory starts over on a new world or floor. The hero glows and leaves a fading trail, the quest's
+  goal pulses and shows through the dark, and a sage pulses while the hero visits it. New glyphs: sage
+  `Ψ`, goal `◈`, vault `▣`, gate `⌂`, portal `◎`, door `▯`, exit `▼`, floor `·`, ruin `░`. Each biome
+  has its own colours from the brand palette, and a hot chip warms its floor's colour. The chronicle marks
+  each line's tone (`·` calm, `▲` tense, `★` triumphant), fades older lines and puts names in bold. The
+  status row has a `▰▱` vitality bar, how much of the floor is mapped, and the tick. The story is
+  unchanged: the saga digests are the same as in 0.16.0.
+
 ### 0.16.0
 - The `v` cycle now ends at the Wafer Waffler (Die 3D) before it wraps to Insights; `3` still opens it directly.
 - Saga, phase 1: a view where a hero quests through a dungeon built from the machine's own signals.

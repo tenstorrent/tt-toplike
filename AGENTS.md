@@ -1485,6 +1485,27 @@ the point (and still fun!)", plus renaming Die 3D to a fun name the user liked, 
   speed and density drivers, docs/bus.md's "the other views read what they read before", README's
   "the arcade hero duel reads the local monitor".
 
+### Version history: 0.16.1 (Nov 3 2026)
+
+0.16.1 restyles the Saga view; the core and its digests are unchanged. Prompt (Taylor): "saga mode
+right now could be better. it seems very random right now. the colors aren't quite right. we could
+be more creative with our symbology and character choice for ASCII art." Decisions:
+
+* Walls autotile from an N/E/S/W arm mask into box-drawing tiles (`Glyphs::wall_tile`, four tables
+  in `pack.rs`); a wall face joins a neighbour only when the pair borders open space, so a wall two
+  cells thick draws two parallel lines and no ladder. Doors, vaults, portals and the gate count as
+  set in the wall, so lines run up to them. Rock is blank.
+* Fog lives view-side in `saga_view::SagaMemory`, keyed by world id, seed and floor, fed by the TUI
+  loop on every update in every view (one `published()` clone per update). Gaps between
+  observations are filled with the core's `astar`. A memory for another floor draws as empty.
+* The right-border rule is kept by never drawing in the map pane's last column (the tiles include
+  `┐ ┤ ╗`). `the_map_keeps_its_last_column_blank` and the extended `no_row_ends_in_a_right_side_border`
+  (every cell seen, hero at each corner) fail if the inset goes.
+* The floor's heat comes from the backend's temperature for the hero's chip, matched by
+  `EntityKey::chip(bus_id)`; no match means the biome's own colour.
+* The eight view goldens were re-pinned; the three digest goldens in
+  `crates/tt-toplike-saga/tests/determinism.rs` did not move.
+
 ### Version history: 0.16.0 (Nov 2 2026)
 
 0.16.0 adds Saga, phase 1: the `tt-toplike-saga` crate, its driver thread, the view (`S`) and

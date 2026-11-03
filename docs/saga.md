@@ -60,7 +60,7 @@ Ordinary samples do not count, because a quiet machine's readings still wobble. 
   its quests on its own: visit the sage of a ready model, explore a room, or rest. Its vitality
   comes from its chip's heartbeat, clock and temperature. Below half, it is drawn orange and its
   next quest is a rest. After reaching a goal it waits 30 sweeps before it plans the next quest.
-* **Sages (`&`).** One for each model that is ready when the world is born. The sage is drawn at the
+* **Sages (`Ψ`).** One for each model that is ready when the world is born. The sage is drawn at the
   goal while the hero is on its way to visit it.
 * **Beats.** Each chronicle line is a beat, written from the pack's sentence shapes in one of three
   tones: calm, tense or triumphant. The tone follows the machine's state: tense when the hero is
@@ -70,9 +70,49 @@ Ordinary samples do not count, because a quiet machine's readings still wobble. 
 Monsters (from ECC errors, link changes, resets, thermal trips and stalls), other characters and
 treasure come in phase 2.
 
+## What the map shows
+
+| Glyph | What it is |
+|---|---|
+| `@` | The hero, bold on yellow, or on orange when its vitality is below half. The cells around it glow. |
+| `•` | The hero's trail over its last 12 steps. It fades with age, and the oldest steps show as floor. |
+| `Ψ` | A sage, at the goal while the hero is on its way to visit it. It pulses from teal to green. |
+| `◈` `◆` | The goal of any other quest. The two glyphs take turns as it pulses. |
+| `─ │ ┌ ┬ ┼ …` | Walls inside a floor, drawn as thin lines that join the walls beside them. |
+| `═ ║ ╔ ╤ ╟ …` | The floor's outer shell, in double lines. `╤`, `╧`, `╟` and `╢` mark where an inner wall meets it. |
+| `▪` | A pillar: a wall cell that joins no other wall. |
+| blank | Solid rock (a wall no walkable cell touches), or a cell the hero has not seen yet. |
+| `·` | Floor: rooms and corridors. |
+| `░` | A ruin: a fallen wall over a harvested Tensix column or row. The hero can walk across it. |
+| `▯` | A door, where a corridor meets a room. The wall lines run up to it. |
+| `▣` | A GDDR vault, on the west or east edge. |
+| `◎` | A portal for a live Ethernet link, on the north edge. Portals shimmer. |
+| `⌂` | The PCIe gate on the south edge, where the hero enters. |
+| `▼` | The exit: the centre of the room farthest from the gate. |
+
+### The light and the memory
+
+The hero carries a light. A cell is lit when it lies within about nine columns and four rows of the
+hero (an ellipse, because a terminal cell is twice as tall as it is wide) and no wall stands on the
+straight line between them. The whole room the hero stands in is lit too, walls included. Lit cells
+are brightest next to the hero.
+
+The view remembers every cell that has been lit and draws it in the same colour at a low
+brightness. A cell that has never been lit is blank, so the map fills in as the hero explores, and
+the status row says how much of the floor's walkable cells are mapped. The quest's goal is always
+drawn, so the hero's destination shows through the dark.
+
+The memory belongs to the view, and the saga core never sees it, so it cannot change a digest. The
+TUI updates it on every backend update in every view, so the map is still there when you come back
+to Saga. If updates were missed and the hero moved more than one cell, the view fills in the walk
+with the core's own shortest path. The memory starts over when a new world is born or the hero moves
+to another floor.
+
 ## The chronicle and the why key
 
-The chronicle keeps the last 500 lines. Each line starts with the sweep it was written at (`t42`).
+The chronicle keeps the last 500 lines. Each line starts with the sweep it was written at (`t42`)
+and a mark for its tone: `·` calm in teal, `▲` tense in orange, `★` triumphant in yellow. The
+names of heroes, places, sages and monsters are bold. Older lines are drawn a little dimmer.
 Press `y` to show each line's cause under it: the entity, the signal, and the record's position in
 the stream (`why: chip:0000:01:00.0 · tt_asic_temperature_celsius · #1234`). A hero resting with
 nothing to do has no signal behind its rest, and its line says `no signal`.
@@ -132,7 +172,7 @@ backend's readings are estimates. A saga fed by a replayed log writes "(replay)"
 | `y` | Shows or hides each chronicle line's cause. |
 | `Esc` | Leaves Saga for the view you came from. |
 | `/saga`, `/mode saga` | Opens Saga from the command bar. |
-| `l`, `?`, `!` | The legend, the help and the explain text, as in every view. |
+| `l`, `?`, `!` | The legend (every map glyph, the light and the chronicle's marks), the help and the explain text, as in every view. |
 
 Saga is not in the `v` cycle and not in `--rotate`.
 
@@ -209,6 +249,22 @@ words come from:
 The colours are the Tenstorrent brand palette: dark forest teal `#092221`, blue accent `#1B8EB1`,
 teal `#74C5DF`, green `#6FABA0`, yellow `#F6BC42` and orange `#FA512E`.
 
+* **Biomes.** A dungeon has teal floors and blue walls, a forge yellow floors and orange walls, and a
+  dream green floors and teal walls. The outer shell is bold.
+* **Heat.** The TUI reads the temperature of the hero's chip from its backend, matched by bus
+  address. Above 45 °C the floor's colour moves towards yellow at 65 °C and orange at 85 °C. A
+  replay or an attached TUI whose backend has no matching chip draws the biome's own colour.
+* **Colour depth.** Every colour goes through the app's colour function, so a terminal without
+  truecolor (and every tmux session) gets the nearest 256-colour shade, as the other views do. The
+  remembered colours are chosen so they do not fall to black there. The glyph shapes alone still
+  tell walls, floors, doors and the hero apart on a 16-colour terminal.
+* **Glyphs.** `Glyphs` in `pack.rs` holds every map role's character and the four wall tile
+  tables. Every glyph is one column wide. The role glyphs are never a right-edge
+  border shape. The wall tiles include some (`┐`, `┤`, `╗`), so the map leaves its pane's last
+  column blank, and no row of the view can end in a border on the right.
+* **Animation.** The goal's pulse, the sage's pulse and the portals' shimmer follow the view's own
+  frame counter, which moves once per update while Saga is on screen. No clock is read.
+
 ## Architecture
 
 * `crates/tt-toplike-saga`: the pure core. `Saga::feed` takes records in order. No clock, no I/O.
@@ -216,4 +272,5 @@ teal `#74C5DF`, green `#6FABA0`, yellow `#F6BC42` and orange `#FA512E`.
 * `src/saga/driver.rs`: a background thread that feeds the core from the bus, local or attached.
 * The driver publishes a snapshot of the state at most 10 times a second.
 * `src/saga/config.rs`: the `[saga]` section as the core's config. `src/saga/digest.rs`: `--saga-digest`.
-* `src/ui/tui/saga_view.rs`: the view draws the snapshot and never feeds the core.
+* `src/ui/tui/saga_view.rs`: the view draws the snapshot and never feeds the core. Its
+  `SagaMemory` (the lit cells, the trail and the heat) lives in the TUI's loop.

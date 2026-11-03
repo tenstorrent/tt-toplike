@@ -343,8 +343,8 @@ impl Row {
 ///
 /// The memory belongs to one floor of one world. It starts empty when a new
 /// world is born (a new id or seed) and when the hero moves to another
-/// floor. A memory that belongs to another floor than the one drawn is
-/// treated as empty, so a stale memory can never paint the wrong map.
+/// floor. A memory kept for a different floor draws as empty, so a stale
+/// memory can never paint the wrong map.
 #[derive(Debug, Clone, Default)]
 pub struct SagaMemory {
     /// World id, world seed and floor index the memory belongs to.
@@ -478,8 +478,8 @@ fn floor_key(state: &SagaState) -> Option<((u64, u64, usize), &Floor)> {
     Some(((state.world.id, state.world.seed, i), floor))
 }
 
-/// The chip of the floor the hero is on, the one whose temperature tints
-/// the floor ([`SagaMemory::set_heat`]).
+/// The chip of the floor the hero is on. Its temperature tints the floor
+/// ([`SagaMemory::set_heat`]).
 pub fn hero_chip(state: &SagaState) -> Option<&tt_toplike_bus::EntityKey> {
     if !state.has_world() {
         return None;
