@@ -22,3 +22,5 @@
 //! `pub mod` line here.
 
 #![forbid(unsafe_code)]
+
+pub mod rng;
