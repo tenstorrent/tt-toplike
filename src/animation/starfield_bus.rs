@@ -87,9 +87,7 @@
 use crate::animation::arcade_bus::{
     gauge_of, left, slot_cols, stepped_secs, Gauge, Particle, MAX_HIT_GLYPHS,
 };
-use crate::animation::bus_intake::{
-    ecc_rose, fresh_tps, one_column, smooth_tps, EventIntake, PhaseBook,
-};
+use crate::animation::bus_intake::{fresh_tps, one_column, smooth_tps, EventIntake, PhaseBook};
 use crate::animation::die3d::overlay::{
     flag_of, lerp, spark_rgb, ModelFlag, ALARM_RED, BAND_HALF, DOWN_GREY, FLASH_NS, LOAD_PURPLE,
     MAX_PULSES, MAX_SPARKS, SERVE_TEAL, SETTLE_NS, SPARK_NS, SWEEP_PERIOD_NS,
@@ -318,7 +316,7 @@ impl StarfieldFx {
             // ECC: a total that rose flares the channel's planet.
             for ch in 0..c.channels {
                 let dk = EntityKey::dram_channel(&c.key, ch);
-                if ecc_rose(world, &dk, &mut prev.ecc) && intake.live {
+                if intake.ecc_flashes(world, &dk, &mut prev.ecc) {
                     prev.ecc_flares.insert(dk.clone(), now);
                 }
                 if let Some(t) = prev.ecc_flares.get(&dk) {

@@ -68,10 +68,11 @@
 //!
 //! Events already in the world at the first read are history and draw
 //! nothing. So do events that arrived while the arcade was away (off screen
-//! or another mode shown): an update more than [`PULSE_NS`] after the last
-//! one, and more than four times the usual gap between updates, records the
-//! newest event and draws nothing for it. This is Die 3D's rule, with its
-//! constants.
+//! or another mode shown): an update more than a pulse lifetime after the
+//! last one, and more than four times the usual gap between updates, records
+//! the newest event and draws nothing for it. The rule, the phase memo and
+//! the tokens-per-second smoothing are the shared ones in `bus_intake`
+//! ([`EventIntake`], [`PhaseBook`], [`fresh_tps`], [`smooth_tps`]).
 //!
 //! # Provenance
 //!
@@ -84,6 +85,7 @@
 //! growth and fade of the hit ring and of the particles, where in the slot a
 //! particle starts, and the length of the settle, fade and flash.
 
+use crate::animation::bus_intake::{fresh_tps, smooth_tps, EventIntake, PhaseBook};
 use crate::animation::die3d::overlay::{
     lerp, model_text_is_estimated, phase_rgb, spark_rgb, ModelFlag, BAND_HALF, DOWN_GREY, FLASH_NS,
     LOAD_PURPLE, MAX_PULSES, MAX_SPARKS, PULSE_NS, SERVE_TEAL, SETTLE_NS, SPARK_NS,
@@ -235,15 +237,12 @@ pub(crate) struct PhaseMemo {
 /// world, so the next world is a first sight.
 #[derive(Debug, Clone, Default)]
 pub struct ArcadeBusState {
-    /// The highest event sequence number handled. `None` before the first
-    /// world.
-    seen_seq: Option<u64>,
-    /// Bus time of the last update.
-    last_now: Option<u64>,
-    /// The time between the last two updates.
-    last_gap: Option<u64>,
-    /// By model key.
-    phases: HashMap<EntityKey, PhaseMemo>,
+    /// Which events are new, and whether this update is live (the shared
+    /// rule). The arcade reads no ECC counters, so its ECC policy is never
+    /// consulted; it keeps the default.
+    intake: EventIntake,
+    /// The phase each model was last seen in.
+    phases: PhaseBook,
     hits: Vec<Hit>,
     /// By chip key.
     particles: HashMap<EntityKey, Vec<Particle>>,
@@ -280,70 +279,48 @@ impl ArcadeFx {
         let ours = |m: &ModelView| m.chips.iter().any(&drawn);
         let models = world.models();
 
-        // Die 3D's first-sight rule: the first world, a world whose head went
-        // backwards, and an update after the arcade was away handle no event.
-        let first = prev.seen_seq.is_none();
-        let head = world.seq();
-        let gap = prev.last_now.map(|t| now.saturating_sub(t));
-        let away = gap.is_some_and(|g| {
-            g > PULSE_NS
-                && prev
-                    .last_gap
-                    .is_none_or(|usual| g > usual.saturating_mul(4))
-        });
-        prev.last_now = Some(now);
-        if gap.is_some() {
-            prev.last_gap = gap;
-        }
-        let since = prev.seen_seq.filter(|s| *s <= head && !away);
-        let mut seen = head;
+        // The shared first-sight rule: the first world, a world whose head
+        // went backwards, and an update after the arcade was away hand out
+        // no event (`intake.live` is false).
+        let intake = prev.intake.take(world, now);
         let mut new_requests = 0u32;
-        if let Some(s) = since {
-            for (q, e) in world.events_since(s) {
-                seen = seen.max(q);
-                match e {
-                    Event::RequestsCompleted { model, n } => {
-                        // A count of 0 completed nothing and draws nothing.
-                        if let Some(m) = models.iter().find(|m| m.key == model && ours(m)) {
-                            if n > 0 {
-                                new_requests = new_requests.saturating_add(n);
-                                add_hit(&mut prev.hits, now, n, q);
-                                for c in m.chips.iter().filter(|c| drawn(c)) {
-                                    add_hit(
-                                        prev.chip_hits.entry(c.clone()).or_default(),
-                                        now,
-                                        n,
-                                        q,
-                                    );
-                                }
+        for (q, e) in intake.events {
+            match e {
+                Event::RequestsCompleted { model, n } => {
+                    // A count of 0 completed nothing and draws nothing.
+                    if let Some(m) = models.iter().find(|m| m.key == model && ours(m)) {
+                        if n > 0 {
+                            new_requests = new_requests.saturating_add(n);
+                            add_hit(&mut prev.hits, now, n, q);
+                            for c in m.chips.iter().filter(|c| drawn(c)) {
+                                add_hit(prev.chip_hits.entry(c.clone()).or_default(), now, n, q);
                             }
                         }
                     }
-                    Event::EccTick { chip, channel } if drawn(&chip) => {
-                        let list = prev.cracks.entry(chip).or_default();
-                        list.retain(|k| now.saturating_sub(k.start_ns) < SETTLE_NS);
-                        if list.len() >= MAX_SPARKS {
-                            list.remove(0);
-                        }
-                        list.push(Crack {
-                            start_ns: now,
-                            channel,
-                        });
-                    }
-                    Event::Spark {
-                        chip: Some(c),
-                        kind,
-                    } if drawn(&c) => add_particle(prev, c, now, q, spark_rgb(&kind)),
-                    Event::KernelCompiled { chip: Some(c), .. } if drawn(&c) => {
-                        add_particle(prev, c, now, q, LOAD_PURPLE)
-                    }
-                    // Model events are announcements: the phase is read from
-                    // the model below. Resets are read from `reset_seq`.
-                    _ => {}
                 }
+                Event::EccTick { chip, channel } if drawn(&chip) => {
+                    let list = prev.cracks.entry(chip).or_default();
+                    list.retain(|k| now.saturating_sub(k.start_ns) < SETTLE_NS);
+                    if list.len() >= MAX_SPARKS {
+                        list.remove(0);
+                    }
+                    list.push(Crack {
+                        start_ns: now,
+                        channel,
+                    });
+                }
+                Event::Spark {
+                    chip: Some(c),
+                    kind,
+                } if drawn(&c) => add_particle(prev, c, now, q, spark_rgb(&kind)),
+                Event::KernelCompiled { chip: Some(c), .. } if drawn(&c) => {
+                    add_particle(prev, c, now, q, LOAD_PURPLE)
+                }
+                // Model events are announcements: the phase is read from
+                // the model below. Resets are read from `reset_seq`.
+                _ => {}
             }
         }
-        prev.seen_seq = Some(seen);
 
         // Resets: a `reset_seq` that moved since the last update flashes the
         // chip. The first sight of a chip, and an update after being away,
@@ -352,7 +329,7 @@ impl ArcadeFx {
             let latest = world.reset_seq(key);
             let before = prev.resets.insert(key.clone(), latest);
             if let Some(before) = before {
-                if latest.is_some() && latest != before && !first && since.is_some() {
+                if latest.is_some() && latest != before && intake.live {
                     prev.flashes.insert(key.clone(), now);
                 }
             }
@@ -360,48 +337,22 @@ impl ArcadeFx {
         prev.resets.retain(|k, _| drawn(k));
 
         // Phases: a change against the last phase seen is timed from now.
-        prev.phases
-            .retain(|k, _| models.iter().any(|m| m.key == *k));
-        for m in &models {
-            let memo = prev.phases.entry(m.key.clone()).or_insert(PhaseMemo {
-                phase: m.phase,
-                since_ns: None,
-            });
-            if memo.phase != m.phase {
-                *memo = PhaseMemo {
-                    phase: m.phase,
-                    since_ns: Some(now),
-                };
-            }
-        }
+        prev.phases.update(&models, now);
 
         // Tokens per second: the ready models on these chips with a fresh
-        // reading, smoothed. No fresh reading drops the smoothing.
+        // reading, summed and smoothed. No fresh reading drops the smoothing.
         let raw: Option<f64> = models
             .iter()
-            .filter(|m| m.phase == ModelPhase::Ready && ours(m))
-            .filter_map(|m| {
-                let r = world.reading(&m.key, tt_toplike_bus::signals::MODEL_TOKENS_PER_S)?;
-                if world.age_ms(&r, now) > TPS_STALE_MS {
-                    return None;
-                }
-                m.tokens_per_s.filter(|t| t.is_finite() && *t >= 0.0)
-            })
+            .filter(|m| ours(m))
+            .filter_map(|m| fresh_tps(world, m, now))
             .fold(None, |sum, t| Some(sum.unwrap_or(0.0) + t));
-        prev.tps = match (raw, prev.tps, gap) {
-            (None, _, _) => None,
-            (Some(r), Some(s), Some(g)) => {
-                let alpha = 1.0 - (-(g as f64 / NS_PER_S as f64) / TPS_TAU_S).exp();
-                Some(s + (r - s) * alpha)
-            }
-            (Some(r), _, _) => Some(r),
-        };
+        prev.tps = smooth_tps(raw, prev.tps, intake.gap);
 
         let mut out = ArcadeFx {
             slots,
             new_requests,
             tokens_per_s: prev.tps,
-            fresh: since.is_some(),
+            fresh: intake.live,
             ..ArcadeFx::default()
         };
         for (slot, key) in chips {

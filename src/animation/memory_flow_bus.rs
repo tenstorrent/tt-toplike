@@ -80,7 +80,7 @@
 use crate::animation::arcade_bus::{
     gauge_of, left, restyle, slot_cols, splice_str, stepped_secs, tint, Gauge, Particle,
 };
-use crate::animation::bus_intake::{ecc_rose, number, EventIntake, PhaseBook};
+use crate::animation::bus_intake::{number, EventIntake, PhaseBook};
 use crate::animation::die3d::overlay::{
     flag_of, lerp, spark_rgb, strength, ModelFlag, Pulse, ALARM_RED, BAND_HALF, DOWN_GREY,
     FLASH_NS, LOAD_PURPLE, MAX_PULSES, MAX_SPARKS, PULSE_NS, SERVE_TEAL, SETTLE_NS, SPARK_NS,
@@ -255,7 +255,7 @@ impl MemoryFlowFx {
             }
             for ch in 0..c.channels {
                 let dk = EntityKey::dram_channel(&c.key, ch);
-                if ecc_rose(world, &dk, &mut prev.ecc) && intake.live {
+                if intake.ecc_flashes(world, &dk, &mut prev.ecc) {
                     prev.ecc_flashes.insert(ch, now);
                 }
             }

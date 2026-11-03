@@ -1,35 +1,38 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
-//! The bookkeeping the Starfield and MemoryFlow bus ports share: which
-//! events are new, which phase each model was last seen in, how the ECC
-//! counters of a DRAM channel add up, and the smoothing of tokens per
-//! second.
+//! The bookkeeping every bus view shares: which events are new, which phase
+//! each model was last seen in, how the ECC counters of a DRAM channel add
+//! up, and the smoothing of tokens per second.
 //!
-//! These rules are copied from the arcade's (`arcade_bus`, which Memory
-//! Castle and Defrag also use), which in turn copies Die 3D's
-//! (`die3d::overlay`), with the same constants. The code is a copy: the
-//! arcade and Die 3D keep their own. A test at the end of this file feeds
-//! one sequence of worlds to this module and to the arcade and asserts the
-//! same decisions, so a change to one copy alone fails it. The rules:
+//! This is the one copy of these rules. The arcade (`arcade_bus`, which
+//! Memory Castle and Defrag also read through), the Starfield and MemoryFlow
+//! call [`EventIntake::take`] and [`PhaseBook`]. Die 3D (`die3d::overlay`)
+//! still has its own copy. The tests in `bus_intake_tests.rs` feed one
+//! sequence of worlds to the arcade and to these pieces and assert the same
+//! decisions. The rules:
 //!
 //! * The first world, a world whose head went backwards, and an update after
 //!   the view was away hand out no event. "Away" is an update more than
-//!   [`PULSE_NS`] after the last one and more than four times the usual gap
-//!   between updates. The newest event is recorded, so the next update
-//!   starts after it.
+//!   [`AWAY_MIN_NS`] after the last one and more than [`AWAY_USUAL_GAPS`]
+//!   times the usual gap between updates, so a slow data tick
+//!   (`--interval 2000`) is not away. The newest event is recorded, so the
+//!   next update starts after it.
 //! * A phase change is a change against the phase last seen. The first sight
-//!   of a model is not a change.
+//!   of a model is not a change, and a re-announcement with the same phase
+//!   changes nothing.
 //! * A tokens-per-second reading older than [`TPS_STALE_MS`] is ignored, and
 //!   fresh readings are smoothed over [`TPS_TAU_S`].
 //!
-//! ECC is where the copies differ. Die 3D flashes any rise of a channel's
-//! ECC total since its last read, including the first read after being
-//! away. The arcade draws no counter rises. These modes record a rise first
-//! seen after being away (or on the first sight of the channel) and draw
-//! nothing for it ([`ecc_rose`], gated on [`Intake::live`] by the callers).
+//! The views apply the ECC rule differently, on purpose, and the intake
+//! carries the choice as an [`EccPolicy`]. Die 3D flashes any rise of
+//! a channel's ECC total since its last read, including the first read after
+//! being away ([`EccPolicy::FlashAnyRise`]). The other views record a rise
+//! first seen after being away and draw nothing for it
+//! ([`EccPolicy::SuppressAfterAway`], the default). The first sight of a
+//! channel never flashes under either. See [`Intake::ecc_flashes`].
 //!
-//! All of this runs at the data rate, in each view's `set_bus`.
+//! All of this runs at the data rate, in each view's `set_bus` or `update`.
 
 use crate::animation::arcade_bus::{PhaseMemo, TPS_STALE_MS, TPS_TAU_S};
 use crate::animation::die3d::overlay::PULSE_NS;
@@ -38,6 +41,29 @@ use std::collections::HashMap;
 use tt_toplike_bus::{EntityKey, Event, ModelPhase, ModelView, Value, WorldRead};
 
 const NS_PER_S: u64 = 1_000_000_000;
+
+/// An update at least this long after the last one may be away: Die 3D's
+/// pulse lifetime, so a pulse drawn for an event that arrived while away
+/// would already have ended.
+pub(crate) const AWAY_MIN_NS: u64 = PULSE_NS;
+
+/// An update more than this many usual gaps after the last one (and more
+/// than [`AWAY_MIN_NS`]) is away.
+pub(crate) const AWAY_USUAL_GAPS: u64 = 4;
+
+/// How a view treats a rise of a DRAM channel's ECC total. See the module
+/// doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum EccPolicy {
+    /// Any rise since the last read flashes, also on the first read after
+    /// being away. Die 3D's policy.
+    FlashAnyRise,
+    /// A rise first seen on an update that is not live (after being away,
+    /// or after the head went backwards) is recorded and draws nothing.
+    /// Every view but Die 3D.
+    #[default]
+    SuppressAfterAway,
+}
 
 /// What one update may draw from the events.
 #[derive(Debug, Clone, Default)]
@@ -51,6 +77,26 @@ pub(crate) struct Intake {
     pub(crate) live: bool,
     /// Time since the last update, `None` on the first.
     pub(crate) gap: Option<u64>,
+    /// The ECC policy of the intake that handed this out.
+    ecc: EccPolicy,
+}
+
+impl Intake {
+    /// Record the ECC total of DRAM channel `dk` in `book`, and whether this
+    /// update draws a flash for it: a rise since the last read
+    /// ([`ecc_rose`]), drawn on a live update, and under
+    /// [`EccPolicy::FlashAnyRise`] also on one that is not.
+    pub(crate) fn ecc_flashes(
+        &self,
+        world: &dyn WorldRead,
+        dk: &EntityKey,
+        book: &mut HashMap<EntityKey, u64>,
+    ) -> bool {
+        // The total is recorded whatever the policy decides, so the next
+        // update compares against it.
+        let rose = ecc_rose(world, dk, book);
+        rose && (self.live || self.ecc == EccPolicy::FlashAnyRise)
+    }
 }
 
 /// Where the last update left off. Start with the default; set a new default
@@ -62,8 +108,11 @@ pub(crate) struct EventIntake {
     seen_seq: Option<u64>,
     /// Bus time of the last update.
     last_now: Option<u64>,
-    /// The time between the last two updates.
+    /// The time between the last two updates: the usual spacing (the data
+    /// tick, 100 ms by default).
     last_gap: Option<u64>,
+    /// How the [`Intake`]s handed out treat an ECC rise.
+    ecc: EccPolicy,
 }
 
 impl EventIntake {
@@ -72,10 +121,10 @@ impl EventIntake {
         let head = world.seq();
         let gap = self.last_now.map(|t| now.saturating_sub(t));
         let away = gap.is_some_and(|g| {
-            g > PULSE_NS
+            g > AWAY_MIN_NS
                 && self
                     .last_gap
-                    .is_none_or(|usual| g > usual.saturating_mul(4))
+                    .is_none_or(|usual| g > usual.saturating_mul(AWAY_USUAL_GAPS))
         });
         self.last_now = Some(now);
         if gap.is_some() {
@@ -95,6 +144,7 @@ impl EventIntake {
             events,
             live: since.is_some(),
             gap,
+            ecc: self.ecc,
         }
     }
 }
@@ -159,7 +209,8 @@ pub(crate) fn ecc_total(world: &dyn WorldRead, dk: &EntityKey) -> Option<u64> {
 
 /// Record the ECC total of `dk` in `book`. Whether it rose since the last
 /// update: never on the first sight of the channel, and a total that went
-/// down (a counter reset) is only recorded.
+/// down (a counter reset) is only recorded. Views call it through
+/// [`Intake::ecc_flashes`], which applies their [`EccPolicy`].
 pub(crate) fn ecc_rose(
     world: &dyn WorldRead,
     dk: &EntityKey,
@@ -207,129 +258,6 @@ pub(crate) fn one_column(text: &str) -> String {
         .collect()
 }
 
-/// The rules here are a copy of the arcade's. This test feeds one sequence
-/// of worlds to both and asserts they make the same decisions, so a change
-/// to one copy that is not made to the other fails here.
 #[cfg(test)]
-mod same_rules_as_the_arcade {
-    use super::*;
-    use crate::animation::arcade_bus::{gauge_of, ArcadeBusState, ArcadeFx};
-    use crate::animation::bus_test_support::{chip, Bus, SEC, TICK};
-    use tt_toplike_bus::LocalView;
-
-    /// What one update decided: whether it was live, the requests it handed
-    /// out for models on the drawn chip, chip 0's gauge (from the phase
-    /// change memo), and the smoothed tokens per second.
-    type Decision = (
-        bool,
-        u32,
-        Option<crate::animation::arcade_bus::Gauge>,
-        Option<f64>,
-    );
-
-    /// The arcade's decisions over `worlds`.
-    fn arcade(worlds: &[LocalView]) -> Vec<Decision> {
-        let chips = [(0usize, chip(0))];
-        let mut prev = ArcadeBusState::default();
-        worlds
-            .iter()
-            .map(|w| {
-                let fx = ArcadeFx::from_world(w, &chips, 1, w.now_mono_ns(), &mut prev);
-                let gauge = fx.chips.iter().find(|c| c.slot == 0).and_then(|c| c.gauge);
-                (fx.fresh, fx.new_requests, gauge, fx.tokens_per_s)
-            })
-            .collect()
-    }
-
-    /// The same decisions made with this module's pieces, the way the
-    /// Starfield and MemoryFlow use them.
-    fn intake(worlds: &[LocalView]) -> Vec<Decision> {
-        let key = chip(0);
-        let mut events = EventIntake::default();
-        let mut book = PhaseBook::default();
-        let mut tps: Option<f64> = None;
-        worlds
-            .iter()
-            .map(|w| {
-                let now = w.now_mono_ns();
-                let models = w.models();
-                let ours = |m: &ModelView| m.chips.contains(&key);
-                let it = events.take(w, now);
-                let n: u32 = it
-                    .events
-                    .iter()
-                    .filter_map(|(_, e)| match e {
-                        Event::RequestsCompleted { model, n } if *n > 0 => models
-                            .iter()
-                            .any(|m| m.key == *model && ours(m))
-                            .then_some(*n),
-                        _ => None,
-                    })
-                    .sum();
-                book.update(&models, now);
-                let gauge = w
-                    .model_on_chip(&key)
-                    .filter(|m| !m.chips.is_empty())
-                    .and_then(|m| gauge_of(&m, book.get(&m.key), now));
-                let raw = models
-                    .iter()
-                    .filter(|m| ours(m))
-                    .filter_map(|m| fresh_tps(w, m, now))
-                    .fold(None, |s: Option<f64>, t| Some(s.unwrap_or(0.0) + t));
-                tps = smooth_tps(raw, tps, it.gap);
-                (it.live, n, gauge, tps)
-            })
-            .collect()
-    }
-
-    #[test]
-    fn the_intake_and_the_arcade_decide_alike() {
-        let t0 = 5 * SEC;
-        // History: a load and a request already in the first world.
-        let mut a = Bus::new();
-        a.loading("m", &[0], Some(0.3)).requests("m", 2);
-        // A new request while loading.
-        let mut b = a.clone();
-        b.requests("m", 3);
-        // Ready, with tokens per second: a phase change.
-        let mut c = b.clone();
-        c.ready("m", &[0], Some(40.0)).requests("m", 1);
-        let mut d = c.clone();
-        d.ready("m", &[0], Some(80.0));
-        // A request while the view is away (a long gap).
-        let mut e = d.clone();
-        e.requests("m", 5);
-        // A request a tick later: live again.
-        let mut f = e.clone();
-        f.requests("m", 4);
-        // A reconnect: a new world whose head is behind, with the model down.
-        let mut g = Bus::new();
-        g.ready("m", &[0], Some(10.0)).phase("m", "down");
-        let mut h = g.clone();
-        h.requests("m", 6);
-        let worlds = [
-            a.view(t0),
-            b.view(t0 + TICK),
-            c.view(t0 + 2 * TICK),
-            d.view(t0 + 3 * TICK),
-            e.view(t0 + 3 * TICK + 10 * SEC),
-            f.view(t0 + 4 * TICK + 10 * SEC),
-            g.view(t0 + 5 * TICK + 10 * SEC),
-            h.view(t0 + 6 * TICK + 10 * SEC),
-            // The tokens-per-second reading goes stale.
-            h.view(t0 + 6 * TICK + 70 * SEC),
-        ];
-        let want = arcade(&worlds);
-        // The sequence reaches every rule: history, live, a change, away,
-        // a reconnect, smoothing and a stale reading.
-        let live: Vec<bool> = want.iter().map(|d| d.0).collect();
-        assert_eq!(
-            live,
-            [false, true, true, true, false, true, false, true, false]
-        );
-        assert!(want.iter().any(|d| d.1 > 0));
-        assert!(want.iter().any(|d| d.2.is_some()));
-        assert!(want.iter().any(|d| d.3.is_some()));
-        assert_eq!(intake(&worlds), want);
-    }
-}
+#[path = "bus_intake_tests.rs"]
+mod tests;
