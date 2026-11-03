@@ -2,7 +2,8 @@
 //!
 //! The core does not read bus records directly. A [`Feed`] turns each record
 //! into zero or more [`Observation`]s. It looks only at the record's source
-//! and payload. `seq`, `t_mono_ns` and `t_wall_ms` are never read, so the same
+//! and payload. It skips the saga's own records and the records that
+//! describe the host process (`ViewChanged` events and gaps). `seq`, `t_mono_ns` and `t_wall_ms` are never read, so the same
 //! ordered stream of record contents gives the same observations however the
 //! records were numbered or timed (a live run and its replay agree).
 //!
@@ -143,6 +144,29 @@ fn spoofed(payload: &Payload) -> bool {
     }
 }
 
+/// Whether a record describes the process that hosts the bus and not the
+/// machine: a `ViewChanged` event, or a gap.
+///
+/// A TUI that hosts its bus publishes `ViewChanged` on its first frame and
+/// on every view key. A replay host publishes a gap at each hole it finds
+/// in the log it plays, and any bus publishes one when its disk fails.
+/// None of these is in the recorded log at the same place, or at all: a
+/// replaying TUI adds them at moments set by thread timing and key presses,
+/// and `--saga-digest` reads the log file and sees none of the replay
+/// host's. If they took ordinals, the ordinal in every later world seed and
+/// beat cause would move, and two replays of one log would tell two
+/// stories (final review finding C1). So the feed skips them the way it
+/// skips the saga's own records: no ordinal and no observation.
+///
+/// The world lifecycle already ignored `ViewChanged` as activity, so the
+/// saga loses nothing by not seeing it.
+fn about_the_host(payload: &Payload) -> bool {
+    matches!(
+        payload,
+        Payload::Event(Event::ViewChanged { .. }) | Payload::Gap(_)
+    )
+}
+
 impl Feed {
     /// A feed that has seen nothing.
     pub fn new() -> Feed {
@@ -151,8 +175,10 @@ impl Feed {
 
     /// The number of records the feed has accepted. Records from source
     /// "saga" are not counted, so a replayed log that carries the saga's own
-    /// events gives the same ordinals the live run had. Every payload kind
-    /// counts, including raw frames and gaps.
+    /// events gives the same ordinals the live run had. Nor are `ViewChanged`
+    /// events and gaps, which describe the host process (see
+    /// `about_the_host`). Every other payload kind counts, raw frames
+    /// included.
     ///
     /// A record dropped as oversized or rejected is not counted either. The
     /// ordinal feeds world seeds and every beat's cause, so a dropped record
@@ -189,6 +215,11 @@ impl Feed {
             self.rejected += 1;
             return;
         }
+        // Records about the host process carry no machine signal and take
+        // no ordinal (see `about_the_host`).
+        if about_the_host(&rec.payload) {
+            return;
+        }
         self.ordinal += 1;
         match &rec.payload {
             Payload::Sample(s) => {
@@ -215,6 +246,7 @@ impl Feed {
                 }
             }
             Payload::Event(e) => out.push(Observation::Event(e.clone())),
+            // A gap never gets here (`about_the_host`).
             Payload::Raw(_) | Payload::Gap(_) => {}
         }
     }

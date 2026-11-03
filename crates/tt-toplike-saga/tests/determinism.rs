@@ -105,6 +105,65 @@ fn renumbered_and_retimed_records_give_the_same_digest() {
     }
 }
 
+/// A TUI that hosts its bus publishes records about itself into it: a
+/// `ViewChanged` on its first frame and on every view key, and a replay host
+/// a gap at each hole it finds in the log (the bus adds one for a disk
+/// outage too). Their positions depend on thread timing and key presses, so
+/// two replays of one log would tell two stories if they counted (final
+/// review finding C1). Inserting them anywhere leaves every digest as it was.
+#[test]
+fn records_a_tui_adds_about_itself_do_not_change_the_digest() {
+    use tt_toplike_bus::{Event, Gap, Payload};
+    use tt_toplike_saga::rng::Pcg32;
+    let host_record = |k: u32| {
+        let (source, payload) = match k % 3 {
+            0 => (
+                "view",
+                Payload::Event(Event::ViewChanged {
+                    view: "saga".into(),
+                }),
+            ),
+            1 => (
+                "replay",
+                Payload::Gap(Gap {
+                    reason: "a hole in the log".into(),
+                }),
+            ),
+            _ => (
+                "tt-toplike-bus",
+                Payload::Gap(Gap {
+                    reason: "disk outage".into(),
+                }),
+            ),
+        };
+        Record {
+            seq: 0,
+            t_mono_ns: 0,
+            t_wall_ms: 0,
+            source: source.into(),
+            payload,
+        }
+    };
+    for (i, name) in FIXTURES.iter().enumerate() {
+        let records = support::read_fixture(name);
+        let mut rng = Pcg32::new(0x5a6a + i as u64, 7);
+        for trial in 0..4u32 {
+            let mut mixed = records.clone();
+            for k in 0..12u32 {
+                let at = rng.next_u32() as usize % (mixed.len() + 1);
+                mixed.insert(at, host_record(k + trial));
+            }
+            for names in [NameMode::Real, NameMode::Generated] {
+                assert_eq!(
+                    digest_of(&records, names),
+                    digest_of(&mixed, names),
+                    "{name} ({names:?}) trial {trial}: a host record changed the saga"
+                );
+            }
+        }
+    }
+}
+
 /// Golden digests for the three fixtures, one per name mode.
 ///
 /// These pin the current behaviour: the seed rule, the maze, the hero's walk,
@@ -118,7 +177,7 @@ fn a_snapshot_of_the_digests_matches() {
     let golden: [(&str, u64, u64); 3] = [
         ("quiet.jsonl", 0x631b150c250d83cf, 0x631b150c250d83cf),
         ("bringup.jsonl", 0xffa0c7d46fb3aae2, 0xffa0c7d46fb3aae2),
-        ("busy.jsonl", 0xdadaf6bc34cc12cc, 0xc6b86da5892118a4),
+        ("busy.jsonl", 0x04fb624bd019382f, 0x3bb88b64147f8031),
     ];
     let mut actual = Vec::new();
     for (name, _, _) in golden {

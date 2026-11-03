@@ -763,15 +763,19 @@ fn golden_frames() -> Vec<u64> {
 /// The hashes of [`golden_frames`]. They pin the drawing as it is now (Task
 /// 1.14): a change to the view's look changes them, and they are re-pinned
 /// on purpose with `golden_saga_hashes`.
+///
+/// Re-pinned in the final fix wave when the feed stopped giving `ViewChanged`
+/// events an ordinal (finding C1). `busy.jsonl` holds one, at record 1,506,
+/// before both cut points, so every later beat cause and world seed moved.
 const GOLDEN: [u64; 8] = [
-    17747875752450834049,
-    8173874115476919137,
-    9729913553127627753,
-    3579161061891527866,
-    15336144298665871893,
-    4379483890101020010,
-    10166685013815897719,
-    14900404724890073878,
+    991252112290121886,
+    7444727144124849148,
+    11796575328698881339,
+    2946838148291251047,
+    16411108666189216491,
+    8860606528844513835,
+    4329748885091748084,
+    12498724061817311013,
 ];
 
 /// Prints the hashes for [`GOLDEN`]. Run with

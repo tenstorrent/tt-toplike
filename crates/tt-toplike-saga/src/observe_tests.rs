@@ -35,6 +35,12 @@ fn sample(entity: EntityKey, name: &str, value: Value) -> Payload {
     })
 }
 
+/// A record that is neither a sweep nor about the host: it takes an
+/// ordinal and nothing else.
+fn filler() -> Payload {
+    sample(EntityKey::model("m"), "filler", Value::U64(0))
+}
+
 fn gap() -> Payload {
     Payload::Gap(Gap {
         reason: "filler".into(),
@@ -92,7 +98,8 @@ fn renumbered_and_retimed_records_give_the_same_observations() {
     let (zeroed, n3) = run(&payloads, |_| (0, 0));
     assert_eq!(plain, shifted);
     assert_eq!(plain, zeroed);
-    assert_eq!((n1, n2, n3), (6, 6, 6));
+    // Six records; the gap takes no ordinal.
+    assert_eq!((n1, n2, n3), (5, 5, 5));
     // Flattening: three numeric pairs and one sample, text and NaN skipped,
     // the event, and a tick after each pacemaker sweep.
     let want = vec![
@@ -165,6 +172,50 @@ fn a_saga_record_is_skipped() {
     assert_eq!(ticks(&out), 1);
 }
 
+/// A `ViewChanged` event and a gap describe the process that hosts the bus
+/// (a person switching views, a log hole a replay host found, a disk
+/// outage). A replaying TUI adds them at moments set by key presses and
+/// thread timing, so they take no ordinal and give no observation
+/// (final-review finding C1).
+#[test]
+fn view_changes_and_gaps_take_no_ordinal() {
+    let base = vec![
+        ("tt-smi", sweep(chip(1), vec![("a", Value::U64(1))])),
+        ("tt-smi", sample(chip(2), "s", Value::U64(9))),
+        ("tt-smi", sweep(chip(1), vec![("a", Value::U64(2))])),
+    ];
+    let (want, want_ordinal) = run(&base, |i| (i, i));
+    assert_eq!(want_ordinal, 3);
+    let view = Payload::Event(Event::ViewChanged {
+        view: "saga".into(),
+    });
+    // Each kind of host record, at the front, in the middle and at the end.
+    for (source, extra) in [
+        ("view", view.clone()),
+        ("tt-smi", view),
+        ("replay", gap()),
+        ("tt-toplike-bus", gap()),
+    ] {
+        for at in [0, 1, 3] {
+            let mut payloads = base.clone();
+            payloads.insert(at, (source, extra.clone()));
+            let (out, ordinal) = run(&payloads, |i| (i, i));
+            assert_eq!(out, want, "{source} at {at} changed the observations");
+            assert_eq!(ordinal, want_ordinal, "{source} at {at} took an ordinal");
+        }
+    }
+    // The ordinal a later record gets is unchanged too: a beat's cause
+    // carries it.
+    let mut feed = Feed::new();
+    let mut out = Vec::new();
+    feed.push(&record(1, 0, "view", gap()), &mut out);
+    feed.push(
+        &record(2, 0, "tt-smi", sample(chip(1), "a", Value::U64(1))),
+        &mut out,
+    );
+    assert_eq!(feed.ordinal(), 1);
+}
+
 fn is_signal(o: &Observation, name: &str) -> bool {
     matches!(o, Observation::Sample { signal, .. } if signal == name)
 }
@@ -198,10 +249,10 @@ fn the_first_sweep_entity_is_the_pacemaker() {
 
 #[test]
 fn the_fallback_tick_fires_when_the_pacemaker_goes_quiet() {
-    let quiet_then_other = |filler: u64| {
+    let quiet_then_other = |quiet: u64| {
         let mut payloads = vec![("tt-smi", sweep(chip(1), vec![("a", Value::U64(1))]))];
-        for _ in 0..filler {
-            payloads.push(("tt-smi", gap()));
+        for _ in 0..quiet {
+            payloads.push(("tt-smi", filler()));
         }
         payloads.push(("tt-smi", sweep(chip(2), vec![("a", Value::U64(1))])));
         run(&payloads, |i| (i, i)).0
@@ -214,7 +265,7 @@ fn the_fallback_tick_fires_when_the_pacemaker_goes_quiet() {
     // again the others stop ticking.
     let mut payloads = vec![("tt-smi", sweep(chip(1), vec![("a", Value::U64(1))]))];
     for _ in 0..2000 {
-        payloads.push(("tt-smi", gap()));
+        payloads.push(("tt-smi", filler()));
     }
     payloads.push(("tt-smi", sweep(chip(2), vec![("a", Value::U64(1))])));
     payloads.push(("tt-smi", sweep(chip(3), vec![("a", Value::U64(1))])));
