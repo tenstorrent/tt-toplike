@@ -7,7 +7,11 @@
 //!
 //! * [`config`] turns the `[saga]` config section into the core's
 //!   [`tt_toplike_saga::SagaConfig`] ([`saga_config`]).
+//! * [`driver`] runs the core on a background thread fed from the bus and
+//!   publishes its state for the view ([`SagaDriver`]).
 
 pub mod config;
+pub mod driver;
 
 pub use config::saga_config;
+pub use driver::{label_for, Published, SagaDriver};
