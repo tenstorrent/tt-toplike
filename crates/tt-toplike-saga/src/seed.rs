@@ -26,8 +26,9 @@ const FNV_PRIME: u64 = 1_099_511_628_211;
 
 /// FNV-1a 64 over `bytes`: for each byte, XOR it into the hash, then multiply
 /// by the prime (wrapping). Kept separate from the pool so it can be checked
-/// against the published test vectors.
-fn fnv1a64(bytes: &[u8]) -> u64 {
+/// against the published test vectors. The world lifecycle also uses it to
+/// hash a chip key into that chip's floor seed.
+pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash = FNV_OFFSET;
     for &b in bytes {
         hash ^= u64::from(b);
@@ -45,6 +46,9 @@ pub struct SeedPool {
     /// Where the next byte goes. It is also where the oldest byte sits, so
     /// reading the ring from `next` onward goes oldest to newest.
     next: usize,
+    /// Sample observations pushed so far. It keeps counting after the ring
+    /// is full, so `pushed() >= 64` means every slot holds a real byte.
+    pushed: u64,
 }
 
 impl Default for SeedPool {
@@ -59,6 +63,7 @@ impl SeedPool {
         SeedPool {
             ring: [0; RING_LEN],
             next: 0,
+            pushed: 0,
         }
     }
 
@@ -71,7 +76,16 @@ impl SeedPool {
             // Truncation to the low byte is the point.
             self.ring[self.next] = (value.to_bits() & 0xff) as u8;
             self.next = (self.next + 1) % RING_LEN;
+            self.pushed += 1;
         }
+    }
+
+    /// The number of sample observations pushed so far. Events and ticks are
+    /// not counted. The world lifecycle waits for 64 (a full ring) before it
+    /// draws the first world's seed, so a fresh start does not seed from a
+    /// ring that is still mostly zeros.
+    pub fn pushed(&self) -> u64 {
+        self.pushed
     }
 
     /// The seed for `ordinal`: FNV-1a 64 over the 64 ring bytes, oldest to

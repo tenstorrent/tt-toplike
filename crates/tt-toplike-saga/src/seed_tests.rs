@@ -87,3 +87,19 @@ fn the_seed_ignores_everything_but_the_ring_and_the_ordinal() {
     }
     assert_eq!(p.draw(5), want);
 }
+
+#[test]
+fn pushed_counts_only_samples() {
+    let mut p = SeedPool::new();
+    assert_eq!(p.pushed(), 0);
+    for i in 0..70u8 {
+        p.push(&sample("0000:01:00.0", "temp", 0x3ff0_0000_0000_0000, i));
+        // Ticks and events are not counted.
+        p.push(&Observation::Tick);
+        p.push(&Observation::Event(Event::ModelGone {
+            model: EntityKey::model("m"),
+        }));
+    }
+    // The count keeps going past the ring's length.
+    assert_eq!(p.pushed(), 70);
+}
