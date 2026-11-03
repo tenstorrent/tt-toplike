@@ -76,6 +76,19 @@ pub const ASIC_TEMPERATURE: &str = "tt_asic_temperature_celsius";
 /// it once the temperature has settled.
 pub const TEMPERATURE_BASELINE: &str = "saga.temperature_baseline";
 
+/// The series [`vitality`] reads. They are pushed with
+/// [`TrailBook::push_reserved`], so a chip that reports many other signal
+/// names still has a trail for each of them (ledger ruling R20).
+pub const VITALITY_SIGNALS: [&str; 4] = [
+    AI_CLOCK,
+    ASIC_TEMPERATURE,
+    TEMPERATURE_BASELINE,
+    HEARTBEAT_ALIVE,
+];
+
+// The trail book reserves one slot per vitality series.
+const _: () = assert!(VITALITY_SIGNALS.len() == crate::stats::RESERVED_TRAILS);
+
 /// Weight of the clock term in [`vitality`]. The temperature term gets the
 /// rest.
 const CLOCK_WEIGHT: f64 = 0.6;
@@ -269,9 +282,9 @@ pub fn push_temperature(trails: &mut TrailBook, chip: &EntityKey, celsius: f64) 
     if !celsius.is_finite() {
         return;
     }
-    trails.push(chip, ASIC_TEMPERATURE, celsius);
+    trails.push_reserved(chip, ASIC_TEMPERATURE, celsius);
     if let Some(mean) = trails.get(chip, ASIC_TEMPERATURE).map(Trail::mean) {
-        trails.push(chip, TEMPERATURE_BASELINE, mean);
+        trails.push_reserved(chip, TEMPERATURE_BASELINE, mean);
     }
 }
 
@@ -387,6 +400,8 @@ pub fn astar(floor: &Floor, from: (u8, u8), to: (u8, u8)) -> Option<Vec<(u8, u8)
     g[idx(from)] = 0;
     open.insert((manhattan(from, to), from.1, from.0));
     while let Some((_, y, x)) = open.pop_first() {
+        #[cfg(test)]
+        crate::cost::expansion();
         let here = (x, y);
         let k = idx(here);
         if here == to {

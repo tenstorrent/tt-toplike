@@ -95,10 +95,29 @@ impl Trail {
     }
 }
 
-/// Trails for many series, keyed by entity and series name.
+/// Distinct series names a [`TrailBook`] keeps for one entity through
+/// [`TrailBook::push`] (ledger ruling R20). A value for a further name is not
+/// trailed. A noisy or hostile local writer can send any number of signal
+/// names; this keeps one chip's trails to a fixed size.
+pub const MAX_TRAILS_PER_ENTITY: usize = 128;
+
+/// Extra names per entity that only [`TrailBook::push_reserved`] may open.
+/// The hero's vitality reads four series (the AI clock, the temperature, its
+/// baseline and the heartbeat series, see [`crate::hero::vitality`]); they
+/// are pushed with `push_reserved`, so a flood of other names cannot crowd
+/// them out. One entity therefore holds at most
+/// `MAX_TRAILS_PER_ENTITY + RESERVED_TRAILS` trails.
+pub const RESERVED_TRAILS: usize = 4;
+
+/// Trails for many series, keyed by entity and then by series name.
+///
+/// The book does not limit the number of entities: its callers decide which
+/// entities get trails (the front door keeps trails only for the chips it
+/// keeps, see `MAX_CHIPS` in [`crate::world`]). It does limit the names per
+/// entity: see [`MAX_TRAILS_PER_ENTITY`] and [`RESERVED_TRAILS`].
 #[derive(Debug, Clone, Default)]
 pub struct TrailBook {
-    trails: BTreeMap<(EntityKey, String), Trail>,
+    trails: BTreeMap<EntityKey, BTreeMap<String, Trail>>,
 }
 
 impl TrailBook {
@@ -107,17 +126,56 @@ impl TrailBook {
         Self::default()
     }
 
-    /// Pushes `v` onto the trail for `(e, s)`, creating it on first use.
+    /// Pushes `v` onto the trail for `(e, s)`, creating it on first use while
+    /// `e` has fewer than [`MAX_TRAILS_PER_ENTITY`] trails. A value for a new
+    /// name beyond that is dropped. An existing trail always takes the push.
     pub fn push(&mut self, e: &EntityKey, s: &str, v: f64) {
-        self.trails
-            .entry((e.clone(), s.to_string()))
-            .or_default()
-            .push(v);
+        self.push_within(e, s, v, MAX_TRAILS_PER_ENTITY);
+    }
+
+    /// Pushes `v` as [`TrailBook::push`] does, but may also open one of the
+    /// [`RESERVED_TRAILS`] extra slots. Only the vitality inputs use it.
+    pub fn push_reserved(&mut self, e: &EntityKey, s: &str, v: f64) {
+        self.push_within(e, s, v, MAX_TRAILS_PER_ENTITY + RESERVED_TRAILS);
+    }
+
+    /// The push: an existing trail takes the value; a new one is made only
+    /// while the entity has fewer than `limit` trails. The entity key and
+    /// the name are cloned only when a trail is made.
+    fn push_within(&mut self, e: &EntityKey, s: &str, v: f64, limit: usize) {
+        #[cfg(test)]
+        crate::cost::push();
+        let names = match self.trails.get_mut(e) {
+            Some(names) => names,
+            None => self.trails.entry(e.clone()).or_default(),
+        };
+        if let Some(trail) = names.get_mut(s) {
+            trail.push(v);
+            return;
+        }
+        if names.len() >= limit {
+            return;
+        }
+        let mut trail = Trail::new();
+        trail.push(v);
+        names.insert(s.to_string(), trail);
     }
 
     /// The trail for `(e, s)`, if anything was ever pushed to it.
     pub fn get(&self, e: &EntityKey, s: &str) -> Option<&Trail> {
-        self.trails.get(&(e.clone(), s.to_string()))
+        self.trails.get(e)?.get(s)
+    }
+
+    /// Entities with at least one trail (for the bounds tests).
+    #[cfg(test)]
+    pub(crate) fn entities(&self) -> usize {
+        self.trails.len()
+    }
+
+    /// The number of trails `e` has (for the bounds tests).
+    #[cfg(test)]
+    pub(crate) fn names(&self, e: &EntityKey) -> usize {
+        self.trails.get(e).map_or(0, BTreeMap::len)
     }
 }
 

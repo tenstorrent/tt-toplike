@@ -340,6 +340,12 @@ impl Chronicle {
         self.ring.is_empty()
     }
 
+    /// Entries in the generated-name table (for the bounds tests).
+    #[cfg(test)]
+    pub(crate) fn alias_count(&self) -> usize {
+        self.aliases.len()
+    }
+
     /// Fills `text`'s placeholders in order. See the module comment.
     fn expand(
         &mut self,

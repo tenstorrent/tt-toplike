@@ -23,7 +23,14 @@
 
 #![forbid(unsafe_code)]
 
+// The crate's own unit tests share `tests/support/fuzz.rs` with the
+// integration tests, and that file names the crate `tt_toplike_saga`.
+#[cfg(test)]
+extern crate self as tt_toplike_saga;
+
 pub mod chronicle;
+#[cfg(test)]
+pub(crate) mod cost;
 pub mod event;
 pub mod hero;
 pub mod maze;

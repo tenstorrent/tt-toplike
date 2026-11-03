@@ -398,6 +398,8 @@ pub fn generate(spec: &FloorSpec, seed: u64, traffic: f32) -> Floor {
     let w = (spec.cols as u16 * scale as u16 + 2).clamp(MIN_W as u16, MAX_COLS as u16) as u8;
     let h = (spec.rows as u16 * scale as u16 + 2).clamp(MIN_H as u16, MAX_ROWS as u16) as u8;
     let n = w as usize * h as usize;
+    #[cfg(test)]
+    crate::cost::cells(n as u64);
     let mut c = Carver {
         w,
         h,

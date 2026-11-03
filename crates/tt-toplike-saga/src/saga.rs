@@ -18,16 +18,19 @@
 //!
 //! 1. The observation goes into the [`SeedPool`].
 //! 2. A sample on a chip (or on a chip's tile, DRAM channel or Ethernet port)
-//!    records the chip as seen. A topology reading
+//!    records the chip as seen, while fewer than [`MAX_CHIPS`] chips are kept
+//!    (a chip beyond the cap stops here). A topology reading
 //!    (`toplike.harvesting_state`, `toplike.enabled_tensix_col`,
 //!    `toplike.eth.live_mask`) updates that chip's floor spec. A sample on
 //!    the chip itself goes into the [`TrailBook`]: temperatures through
 //!    [`push_temperature`], so the baseline series exists (ledger ruling R15),
-//!    and every other number as it is. A `toplike.heartbeat` value that
+//!    and every other number as it is (the vitality inputs through
+//!    [`TrailBook::push_reserved`], see "Bounds"). A `toplike.heartbeat` value that
 //!    differs from the last one marks the chip's heartbeat as advanced at
 //!    this tick.
-//! 3. An event updates the list of ready models (a `ModelReady` adds one, a
-//!    `ModelGone` removes it). A tick counts one more tick.
+//! 3. An event updates the list of ready models (a `ModelReady` adds one
+//!    while fewer than [`MAX_READY_MODELS`] are listed, a `ModelGone` removes
+//!    it). A tick counts one more tick.
 //! 4. On a tick, every chip that has ever reported a heartbeat gets one push
 //!    of the [`HEARTBEAT_ALIVE`] series: 1.0 if its heartbeat advanced within
 //!    the last [`HEARTBEAT_GRACE_TICKS`] ticks (the tick of the change and
@@ -116,6 +119,45 @@
 //! appends "(replay)" (spec 3.9). [`SagaState::label`] carries the label for
 //! the view's title.
 //!
+//! # Bounds
+//!
+//! Any local process can write to the bus, so a noisy or hostile writer can
+//! send any number of chips, signal names and models (ledger ruling R20).
+//! Every collection the saga keeps has a fixed bound:
+//!
+//! | Collection | Bound | Where the cap lives |
+//! |---|---|---|
+//! | chips seen (and their floor specs, heartbeats and topology) | [`MAX_CHIPS`] (64); a further chip feeds the seed pool and nothing else | [`crate::world`] |
+//! | a world's chips and floors | [`MAX_CHIPS`] (64), the first in key order | [`crate::world`] |
+//! | entities with trails | [`MAX_CHIPS`] (64): only kept chips get trails | here |
+//! | trails per chip | [`crate::stats::MAX_TRAILS_PER_ENTITY`] (128) names, plus [`crate::stats::RESERVED_TRAILS`] (4) for the vitality inputs | [`crate::stats`] |
+//! | ready models | [`MAX_READY_MODELS`] (64) | here |
+//! | a world's hooks | [`MAX_READY_MODELS`] sage hooks (they come from the ready list), plus explore and rest | here |
+//! | undrained events | [`MAX_PENDING_EVENTS`] (4096); the oldest is dropped and counted in [`Saga::dropped_events`] | here |
+//! | chronicle lines | [`CAPACITY`] (500) | [`crate::chronicle`] |
+//! | generated names | [`crate::chronicle::ALIAS_LIMIT`] (256) | [`crate::chronicle`] |
+//! | seed pool | 64 bytes | [`crate::seed`] |
+//! | one floor | [`crate::topology::MAX_COLS`] x [`crate::topology::MAX_ROWS`] (120 x 60) cells | [`crate::topology`] |
+//! | the hero's path | one floor's cells | [`crate::hero`] |
+//!
+//! The scratch buffers (`obs`, `enc`, `world_events`) keep the capacity of
+//! the largest record or event seen so far.
+//!
+//! The entities the saga holds at once are at most 64 kept chips, 64 ready
+//! models and 64 world chips that need not be kept chips: 192, under the
+//! spec's 500 (spec 9).
+//!
+//! **Cost of one record.** At most one world is born per record: an event
+//! births at most once, and a sweep's samples can start one training run,
+//! after which its tick finds the run fresh and the world newly active. A
+//! birth generates one maze per world chip, so it costs at most 64 mazes of
+//! at most 120 x 60 cells. The hero searches at most once per tick, and A*
+//! expands each cell at most once. Today's floors are 53 x 38 (Blackhole) and
+//! 50 x 32 (generic), so the widest birth generates about 129,000 cells. The
+//! test-only work counter (`src/cost.rs`) checks this against the budget of
+//! a million units per record. Trail pushes grow with the record's own
+//! size: one per sweep value, plus one per kept chip on a tick.
+//!
 //! # The digest
 //!
 //! [`Saga::digest`] is FNV-1a 64 over one byte stream, written by hand so
@@ -156,7 +198,7 @@
 //! themselves carry none: without it, a hero that walked one tick slower
 //! would give the same digest. Draining events does not change the digest.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use tt_toplike_bus::{EntityKey, Event, Payload, Record};
 
@@ -166,7 +208,7 @@ use crate::chronicle::{
 use crate::event::{Biome, EndWhy, SagaEvent};
 use crate::hero::{
     push_temperature, vitality, Cause, Hero, ASIC_TEMPERATURE, HEARTBEAT_ALIVE,
-    HEARTBEAT_GRACE_TICKS,
+    HEARTBEAT_GRACE_TICKS, VITALITY_SIGNALS,
 };
 use crate::maze;
 use crate::observe::{Feed, Observation};
@@ -176,7 +218,7 @@ use crate::rng::Pcg32;
 use crate::seed::{fnv1a64, fnv1a64_extend, SeedPool};
 use crate::stats::TrailBook;
 use crate::topology::{Arch, FloorSpec};
-use crate::world::{Lifecycle, World, NO_CHIP};
+use crate::world::{Lifecycle, World, MAX_CHIPS, NO_CHIP};
 
 /// Stream selector of the generator that names heroes and plans quests.
 pub const PLAN_STREAM: u64 = 1;
@@ -187,6 +229,18 @@ pub const CHRONICLE_STREAM: u64 = 2;
 /// Ticks the hero waits after finishing a quest before it plans the next
 /// one (3 s at 10 Hz).
 pub const DWELL_TICKS: u64 = 30;
+
+/// Ready models the saga keeps (ledger ruling R20). A `ModelReady` for a new
+/// model while this many are ready is not added to the list; its world is
+/// still born. Each world's sage hooks come from this list, so a world has at
+/// most this many sage hooks, plus one explore and one rest hook.
+pub const MAX_READY_MODELS: usize = 64;
+
+/// Events kept until a host drains them (ledger ruling R20). When the buffer
+/// is full the oldest event is dropped and counted in
+/// [`Saga::dropped_events`]. A host that drains after each batch never
+/// reaches it.
+pub const MAX_PENDING_EVENTS: usize = 4096;
 
 /// The ARC heartbeat counter on a chip.
 const HEARTBEAT: &str = "toplike.heartbeat";
@@ -251,6 +305,15 @@ pub struct SagaState {
     pub tick: u64,
 }
 
+impl SagaState {
+    /// Whether a real world has been born. Before the first world (at most
+    /// five ticks) the state holds the placeholder world with id 0, and a
+    /// view shows a waiting state.
+    pub fn has_world(&self) -> bool {
+        self.world.id > 0
+    }
+}
+
 /// What the saga has seen of one chip.
 #[derive(Debug, Clone, Default)]
 struct ChipSeen {
@@ -286,8 +349,11 @@ pub struct Saga {
     dwell_until: Option<u64>,
     /// Whether the first chronicle line has been written (and marked).
     wrote_first: bool,
-    /// Events raised and not yet drained.
-    events: Vec<SagaEvent>,
+    /// Events raised and not yet drained, oldest first, at most
+    /// [`MAX_PENDING_EVENTS`].
+    events: VecDeque<SagaEvent>,
+    /// Events dropped from a full buffer before they were drained.
+    dropped_events: u64,
     /// The FNV-1a 64 state after the digest stream so far: world seeds and
     /// events (see "The digest" in the module comment).
     trace: u64,
@@ -338,7 +404,8 @@ impl Saga {
             story_rng: Pcg32::new(0, CHRONICLE_STREAM),
             dwell_until: None,
             wrote_first: false,
-            events: Vec::new(),
+            events: VecDeque::new(),
+            dropped_events: 0,
             trace: fnv1a64(&[]),
             enc: Vec::new(),
             obs: Vec::new(),
@@ -382,10 +449,17 @@ impl Saga {
     }
 
     /// The events raised since the last call, oldest first. The saga keeps
-    /// every event until it is drained, so a host drains after each batch of
-    /// records it feeds.
+    /// at most [`MAX_PENDING_EVENTS`] undrained events, so a host drains
+    /// after each batch of records it feeds.
     pub fn drain_events(&mut self) -> Vec<SagaEvent> {
-        std::mem::take(&mut self.events)
+        self.events.drain(..).collect()
+    }
+
+    /// Events dropped, oldest first, because the buffer already held
+    /// [`MAX_PENDING_EVENTS`] undrained events. It counts up for the saga's
+    /// life. Dropped events still count in the digest.
+    pub fn dropped_events(&self) -> u64 {
+        self.dropped_events
     }
 
     /// A hash of everything the saga has told: every world seed, every event
@@ -487,8 +561,13 @@ impl Saga {
         };
         let on_chip = &chip == entity;
         let tick = self.state.tick;
-        // A new chip changes the topology. The key is cloned only then.
+        // A new chip changes the topology. The key is cloned only then. A
+        // chip beyond MAX_CHIPS has fed the seed pool already and gets
+        // nothing more: no floor, no trails, no heartbeat.
         if !self.chips.contains_key(&chip) {
+            if self.chips.len() >= MAX_CHIPS {
+                return;
+            }
             self.topo_dirty = true;
             self.chips.insert(chip.clone(), ChipSeen::default());
         }
@@ -522,6 +601,8 @@ impl Saga {
         }
         if signal == ASIC_TEMPERATURE {
             push_temperature(&mut self.trails, entity, value);
+        } else if VITALITY_SIGNALS.contains(&signal) {
+            self.trails.push_reserved(entity, signal, value);
         } else {
             self.trails.push(entity, signal, value);
         }
@@ -531,6 +612,11 @@ impl Saga {
     fn on_event(&mut self, e: &Event, ordinal: u64) {
         match e {
             Event::ModelReady { model, .. } => {
+                // A model already listed takes the new cause; a new one is
+                // listed only below MAX_READY_MODELS.
+                if !self.ready.contains_key(model) && self.ready.len() >= MAX_READY_MODELS {
+                    return;
+                }
                 let cause = Cause {
                     entity: model.clone(),
                     signal: "ModelReady".to_string(),
@@ -555,7 +641,7 @@ impl Saga {
             if let Some((_, changed)) = seen.heartbeat {
                 let alive = tick.saturating_sub(changed) < HEARTBEAT_GRACE_TICKS;
                 self.trails
-                    .push(chip, HEARTBEAT_ALIVE, if alive { 1.0 } else { 0.0 });
+                    .push_reserved(chip, HEARTBEAT_ALIVE, if alive { 1.0 } else { 0.0 });
             }
         }
     }
@@ -870,12 +956,18 @@ impl Saga {
 
     /// Raises an event and folds it into the digest.
     fn emit(&mut self, ev: SagaEvent) {
+        #[cfg(test)]
+        crate::cost::event();
         let mut buf = std::mem::take(&mut self.enc);
         buf.clear();
         encode_event(&mut buf, self.state.tick, &ev);
         self.trace = fnv1a64_extend(self.trace, &buf);
         self.enc = buf;
-        self.events.push(ev);
+        if self.events.len() >= MAX_PENDING_EVENTS {
+            self.events.pop_front();
+            self.dropped_events += 1;
+        }
+        self.events.push_back(ev);
     }
 }
 
@@ -1047,3 +1139,7 @@ fn event_cause(e: &Event) -> (Option<EntityKey>, &'static str) {
 #[cfg(test)]
 #[path = "saga_tests.rs"]
 mod saga_tests;
+
+#[cfg(test)]
+#[path = "fuzz_tests.rs"]
+mod fuzz_tests;

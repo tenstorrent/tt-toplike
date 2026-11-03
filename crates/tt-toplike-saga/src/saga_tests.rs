@@ -720,3 +720,23 @@ fn the_digest_encoding_matches_a_hand_written_byte_string() {
     hand.extend_from_slice(&[saga.state.hero.floor, x, y]);
     assert_eq!(saga.digest(), crate::seed::fnv1a64(&hand));
 }
+
+#[test]
+fn has_world_is_false_until_the_first_world_is_born() {
+    let mut saga = Saga::new(config(NameMode::Real, Label::Live));
+    assert!(
+        !saga.state().has_world(),
+        "a fresh saga holds the placeholder"
+    );
+    // Four ticks of a one-chip machine: the seed pool has seen only eight
+    // samples, so the gate is still closed (it opens at tick 5).
+    run_ticks(&mut saga, 4);
+    assert_eq!(saga.state().world.id, 0);
+    assert!(!saga.state().has_world(), "no world before the gate opens");
+    run_ticks(&mut saga, 1);
+    assert_eq!(saga.state().world.id, 1);
+    assert!(
+        saga.state().has_world(),
+        "the first world is born by tick 5"
+    );
+}

@@ -125,3 +125,33 @@ fn the_bits_after_a_short_series_match_hand_computed_constants() {
     assert_eq!(f64::from_bits(0x40AF_FC00_2000_0000), 4094.0 + 1.0 / 4096.0);
     assert_eq!(f64::from_bits(0x40AC_2140_0000_0000), 3600.625);
 }
+
+#[test]
+fn the_book_keeps_128_names_per_entity_and_four_reserved_slots() {
+    let a = EntityKey::chip("0000:01:00.0");
+    let b = EntityKey::chip("0000:02:00.0");
+    let mut book = TrailBook::new();
+    for k in 0..200 {
+        book.push(&a, &format!("s{k}"), 1.0);
+    }
+    assert_eq!(book.names(&a), 128);
+    assert!(book.get(&a, "s127").is_some());
+    assert!(
+        book.get(&a, "s128").is_none(),
+        "the 129th name is not trailed"
+    );
+    // An existing trail still takes pushes once the entity is full.
+    book.push(&a, "s0", 9.0);
+    assert_eq!(book.get(&a, "s0").unwrap().max(), 9.0);
+    // The reserved slots: four more names, and no fifth.
+    for k in 0..5 {
+        book.push_reserved(&a, &format!("r{k}"), 1.0);
+    }
+    assert_eq!(book.names(&a), 132);
+    assert!(book.get(&a, "r3").is_some());
+    assert!(book.get(&a, "r4").is_none());
+    // The cap is per entity: another chip starts empty.
+    book.push(&b, "s200", 1.0);
+    assert_eq!(book.names(&b), 1);
+    assert_eq!(book.entities(), 2);
+}

@@ -7,10 +7,13 @@
 //!   segment reader, which skips the header line.
 //! * [`renumber`] gives a log new sequence numbers and new times, the way a
 //!   replay host does.
+//! * [`fuzz`] holds the seeded random streams and the adversarial flood of
+//!   the fuzz and bounds tests.
 
 #![allow(dead_code)]
 
 pub mod busy;
+pub mod fuzz;
 
 use std::path::PathBuf;
 

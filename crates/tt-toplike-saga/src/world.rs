@@ -65,8 +65,9 @@
 //! seed from one pool. Each chip's floor is
 //! `maze::generate(spec, world_seed ^ fnv1a64(chip key bytes), 0.0)`, so two
 //! chips of one shape still get different floors (ledger ruling R12).
-//! Floors are listed in chip-key order. A chip that the topology does not
-//! list gets the generic spec. A world with no chips at all gets one generic
+//! Floors are listed in chip-key order, at most [`MAX_CHIPS`] of them: a
+//! world asked for on more chips keeps the first [`MAX_CHIPS`] keys. A chip
+//! that the topology does not list gets the generic spec. A world with no chips at all gets one generic
 //! floor for the placeholder chip [`NO_CHIP`], so later tasks always have a
 //! floor to put the hero on.
 //!
@@ -103,6 +104,12 @@ pub const FULL_POOL: u64 = 64;
 
 /// The chip id of the placeholder floor in a world with no chips.
 pub const NO_CHIP: &str = "none";
+
+/// Chips one world has floors for, and chips the front door keeps (ledger
+/// ruling R20). A world asked for on more chips (a `ModelReady` naming many)
+/// gets floors for the first [`MAX_CHIPS`] in key order. Birth cost is one
+/// maze per chip, so this bounds it: see "Bounds" in [`crate::saga`].
+pub const MAX_CHIPS: usize = 64;
 
 /// The signal whose first appearance starts a training run.
 const TRAIN_STEP: &str = "toplike.train.step";
@@ -334,6 +341,7 @@ impl Lifecycle {
         let mut chips = chips;
         chips.sort();
         chips.dedup();
+        chips.truncate(MAX_CHIPS);
         if chips.is_empty() {
             chips.push(EntityKey::chip(NO_CHIP));
         }
