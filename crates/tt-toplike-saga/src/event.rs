@@ -6,8 +6,8 @@
 //!
 //! The world events come from Task 1.8 and the hero and quest events
 //! (`HeroBorn`, `QuestStarted`, `QuestDone`) from Task 1.9. Later tasks add
-//! variants to the same enum: the chronicle's `Beat` (Task 1.10), and
-//! monster and treasure events (phase 2). To add one, add a
+//! variants to the same enum: the chronicle's `Beat` (Task 1.10, now
+//! here), and monster and treasure events (phase 2). To add one, add a
 //! variant with named fields, starting with `world: u64` so every event says
 //! which world it belongs to. The enum derives only `Debug`, `Clone` and
 //! `PartialEq`, so a later variant may carry an `f32` intensity without
@@ -15,6 +15,7 @@
 
 use tt_toplike_bus::EntityKey;
 
+use crate::chronicle::Tone;
 use crate::hero::Cause;
 use crate::quest::Verb;
 
@@ -72,4 +73,12 @@ pub enum SagaEvent {
     },
     /// The hero reached the goal of its `verb` quest.
     QuestDone { world: u64, verb: Verb },
+    /// The chronicle wrote a line (`saga.beat`): its tone, its text, and
+    /// the signal behind it. See [`crate::chronicle`].
+    Beat {
+        world: u64,
+        tone: Tone,
+        text: String,
+        cause: Cause,
+    },
 }
