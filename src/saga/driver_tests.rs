@@ -426,3 +426,143 @@ fn only_a_driver_thread_is_a_saga_thread() {
         .unwrap();
     assert!(!off);
 }
+
+/// A TUI that attaches to a host whose model is already serving gets that
+/// model's world: the snapshot's ready models are fed as `ModelReady`
+/// records after its readings. The test compares with a saga fed by hand
+/// the records a TUI present from the start would have seen.
+#[cfg(unix)]
+#[test]
+fn a_remote_driver_attached_after_a_model_is_ready_gets_its_world() {
+    use tt_toplike_bus::{Event, SocketClient, SocketServer, Sweep};
+    let tmp = tempfile::tempdir().unwrap();
+    let sock = tmp.path().join("run").join("bus.sock");
+    let bus = Bus::open_with_world(BusConfig::default()).unwrap();
+    let chip = EntityKey::chip("0000:01:00.0");
+    let model = EntityKey::model("meta-llama/Llama-3.1-8B-Instruct");
+    let down = EntityKey::model("Qwen3-8B");
+    // Two models announced before the TUI attaches: one ready, one gone.
+    for m in [&model, &down] {
+        bus.publish(
+            "inference",
+            Payload::Event(Event::ModelReady {
+                model: m.clone(),
+                chips: vec![chip.clone()],
+            }),
+        );
+    }
+    bus.publish(
+        "inference",
+        Payload::Event(Event::ModelGone {
+            model: down.clone(),
+        }),
+    );
+    let server = SocketServer::spawn(bus.clone(), &sock).unwrap();
+    let d = SagaDriver::spawn_remote(SocketClient::connect(&sock).unwrap(), &sock, cfg()).unwrap();
+    assert!(d.wait_for(WAIT, |p| p.feeds == 1));
+    // Ticks after the attach open the seed gate, and the world is born.
+    let sweep = |t: f64| {
+        Payload::Sweep(Sweep {
+            entity: chip.clone(),
+            signals: vec!["tt_asic_temperature_celsius".into()],
+            values: vec![Value::F64(t)],
+            prov: Provenance::Measured,
+        })
+    };
+    for i in 0..20 {
+        bus.publish("backend", sweep(50.0 + f64::from(i) * 0.37));
+    }
+    let head = bus.head();
+    assert!(d.wait_for(WAIT, |p| p.through == head));
+    let p = d.published();
+    assert!(p.state.has_world(), "a world was born");
+
+    // The same story by hand: the ready model, then the records after the
+    // snapshot. The snapshot world holds no readings here.
+    let mut want = Saga::new(cfg());
+    want.feed(&Record {
+        seq: 0,
+        t_mono_ns: 0,
+        t_wall_ms: 0,
+        source: SNAPSHOT_SOURCE.into(),
+        payload: Payload::Event(Event::ModelReady {
+            model: model.clone(),
+            chips: vec![chip.clone()],
+        }),
+    });
+    for r in bus.read_from(4, usize::MAX).unwrap() {
+        want.feed(&r);
+    }
+    assert_eq!(p.digest, want.digest(), "the ready model's world was born");
+    // Without the ready model the story differs, so the check above can
+    // tell the two apart.
+    let mut without = Saga::new(cfg());
+    for r in bus.read_from(4, usize::MAX).unwrap() {
+        without.feed(&r);
+    }
+    assert_ne!(p.digest, without.digest());
+    d.stop();
+    drop(server);
+}
+
+/// A driver that stops for any reason says so: after `stop`, and after a
+/// panic in its thread (caught there), the published snapshot is marked
+/// stopped and keeps the last state.
+#[test]
+fn the_driver_reports_when_it_stops() {
+    let clock = ManualClock::new(0);
+    let bus = manual_bus(&clock);
+    let sample = |i: u64| {
+        Payload::Sample(Sample {
+            entity: EntityKey::chip("0000:01:00.0"),
+            signal: "toplike.test".into(),
+            value: Value::U64(i),
+            prov: Provenance::Measured,
+        })
+    };
+    bus.publish("backend", sample(1));
+    let d = SagaDriver::spawn(bus.clone(), cfg()).unwrap();
+    assert!(d.wait_for(WAIT, |p| p.fed == 1));
+    assert!(!d.stopped());
+    // A panic in the thread: the driver ends, and says so.
+    d.panic_on_next_read();
+    bus.publish("backend", sample(2));
+    assert!(
+        d.wait_for(WAIT, |p| p.stopped),
+        "a driver that panicked does not say it stopped"
+    );
+    assert!(d.stopped());
+    assert_eq!(d.published().fed, 1, "the last state stays");
+    d.stop();
+
+    // `stop`: the last snapshot is marked stopped too.
+    let d = SagaDriver::spawn(bus, cfg()).unwrap();
+    let shared = d.thread_handle().upgrade().unwrap();
+    d.stop();
+    assert!(shared.lock().stopped);
+}
+
+/// The driver thread starts no programs, so it runs at the lowered
+/// priority of `crate::workload::background`.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_driver_thread_runs_at_lowered_priority() {
+    use crate::workload::background::{thread_nice, NICE_STEP};
+    let clock = ManualClock::new(0);
+    let bus = manual_bus(&clock);
+    let d = SagaDriver::spawn(bus.clone(), cfg()).unwrap();
+    bus.publish(
+        "backend",
+        Payload::Sample(Sample {
+            entity: EntityKey::chip("0000:01:00.0"),
+            signal: "toplike.test".into(),
+            value: Value::U64(1),
+            prov: Provenance::Measured,
+        }),
+    );
+    // Its first publish comes after its start, where it reads its nice value.
+    assert!(d.wait_for(WAIT, |p| p.fed == 1));
+    let want = (thread_nice() + NICE_STEP).min(19);
+    assert_eq!(d.thread_nice(), Some(want));
+    d.stop();
+}

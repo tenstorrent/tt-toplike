@@ -25,6 +25,8 @@
 //! * the process scan worker (`tt-toplike-proc-scan`): `/proc` and sysinfo
 //!   reads, and HTTP probes of local serving endpoints;
 //! * the liveness prober (`tt-liveness-probe`): HTTP probes only.
+//! * the saga drivers (`tt-toplike-saga`, `tt-toplike-saga-remote`): bus
+//!   reads and the saga core, and a Unix socket for an attached TUI.
 //!
 //! The tt-smi reader, the inference-server monitor, the catalog refresher and
 //! the gozer poll run at normal priority.

@@ -16,10 +16,11 @@
 //! * [`SagaDriver::spawn_remote`] (Unix only) reads another process's bus
 //!   over its socket: a snapshot, then `subscribe_from` the snapshot's
 //!   sequence number. The saga starts from the snapshot's readings (each
-//!   becomes one sample record, see [`snapshot_records`]) plus the records
-//!   after it, so floors get their chips' topology at once (spec 3.5: "A TUI
-//!   that starts mid-run begins its saga from the world snapshot plus the
-//!   records after it").
+//!   becomes one sample record) and its ready models (each becomes one
+//!   `ModelReady`, see [`snapshot_records`]), plus the records after it, so
+//!   floors get their chips' topology and a serving model gets its world at
+//!   once (spec 3.5: "A TUI that starts mid-run begins its saga from the
+//!   world snapshot plus the records after it").
 //!
 //! # Restarts
 //!
@@ -71,19 +72,36 @@
 //! which keeps the core's buffer empty. Publishing them as `saga.*` events
 //! on the bus (spec 6) is not done here.
 //!
+//! # Stopping
+//!
+//! The thread ends when [`SagaDriver::stop`] is called or the handle is
+//! dropped, and also after a panic in the core, which it catches. Either
+//! way it sets [`Published::stopped`] as its last act, so a view can say
+//! that the story has stopped. Without it the view would show a frozen
+//! state with no reason given.
+//!
+//! The thread starts no programs, so it lowers its own scheduling priority
+//! ([`crate::workload::background::lower_priority`]) and yields the CPU to
+//! the thread that draws the frames.
+//!
 //! # Batch cost
 //!
-//! A batch of [`BATCH`] records costs about 0.2 ms to feed on a quiet box,
-//! and about 0.9 ms (1.3 ms at worst over 30 runs) when it holds a 32-floor
-//! birth, the largest world the core builds (ruling R22). Both are under
-//! the 2 ms that would need a per-batch work limit, so a batch is fed whole.
+//! Measured in release mode on the shared development box while it was
+//! loaded (ruling R22): a batch of [`BATCH`] records that holds a 32-floor
+//! birth, the largest world the core builds, took 0.94 ms on average and
+//! 1.30 ms at worst over 30 runs; a batch of 512 sweeps with no birth took
+//! 0.16 ms on average. A batch is fed whole. The controller accepted the
+//! 1.30 ms worst case for phase 1; lazy floors or a birth rate limit are
+//! deferred to phase 2.6.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use tt_toplike_bus::{Bus, HeaderKind, Payload, ReadError, Record, Sample, WorldSummary};
+use tt_toplike_bus::{
+    Bus, Event, HeaderKind, ModelPhase, ModelView, Payload, ReadError, Record, Sample, WorldSummary,
+};
 use tt_toplike_saga::{Label, Saga, SagaConfig, SagaState};
 
 /// Records read from a local bus per [`Bus::read_from`] call.
@@ -144,6 +162,10 @@ pub struct Published {
     /// "Restarts" in the module comment). 0 until a remote driver has its
     /// first snapshot.
     pub feeds: u64,
+    /// The driver thread has ended: after [`SagaDriver::stop`], or after a
+    /// panic it caught. The state is the last one published and will not
+    /// change again.
+    pub stopped: bool,
 }
 
 /// What the driver thread and the [`SagaDriver`] handle share.
@@ -152,6 +174,12 @@ struct Shared {
     /// Notified on every publish ([`SagaDriver::wait_for`]).
     cond: Condvar,
     stop: AtomicBool,
+    /// Test hook: the local driver panics after its next non-empty read.
+    #[cfg(test)]
+    panic_on_read: AtomicBool,
+    /// Test hook: the driver thread's nice value, read at its start.
+    #[cfg(test)]
+    nice: Mutex<Option<i32>>,
 }
 
 impl Shared {
@@ -160,6 +188,10 @@ impl Shared {
             published: Mutex::new(p),
             cond: Condvar::new(),
             stop: AtomicBool::new(false),
+            #[cfg(test)]
+            panic_on_read: AtomicBool::new(false),
+            #[cfg(test)]
+            nice: Mutex::new(None),
         }
     }
 
@@ -220,6 +252,7 @@ impl Feeder {
             fed: self.fed,
             through: self.through,
             feeds: self.feeds,
+            stopped: false,
         }
     }
 
@@ -265,12 +298,21 @@ pub fn is_saga_thread() -> bool {
     matches!(thread::current().name(), Some(LOCAL_THREAD | REMOTE_THREAD))
 }
 
-/// Runs a driver loop and catches a panic in it, so the thread ends
-/// quietly and the last published state stays readable.
-fn guarded(f: impl FnOnce()) {
+/// The body of a driver thread: lowers its priority, runs the loop `f`,
+/// catches a panic in it, and marks the published snapshot stopped when
+/// the loop ends for any reason (see "Stopping" in the module comment).
+fn guarded(shared: &Shared, f: impl FnOnce()) {
+    crate::workload::background::lower_priority();
+    #[cfg(all(test, target_os = "linux"))]
+    {
+        *shared.nice.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(crate::workload::background::thread_nice());
+    }
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
         log::warn!("saga: the driver stopped after a panic; the view keeps its last state");
     }
+    shared.lock().stopped = true;
+    shared.cond.notify_all();
 }
 
 /// A saga fed on a background thread. See the module comment.
@@ -308,7 +350,7 @@ impl SagaDriver {
         let s = shared.clone();
         let thread = thread::Builder::new()
             .name(LOCAL_THREAD.into())
-            .spawn(move || guarded(|| run_local(&bus, cfg, &s)))?;
+            .spawn(move || guarded(&s, || run_local(&bus, cfg, &s)))?;
         Ok(SagaDriver {
             shared,
             thread: Some(thread),
@@ -333,7 +375,7 @@ impl SagaDriver {
         let path = path.to_path_buf();
         let thread = thread::Builder::new()
             .name(REMOTE_THREAD.into())
-            .spawn(move || guarded(|| remote::run(client, &path, cfg, &s)))?;
+            .spawn(move || guarded(&s, || remote::run(client, &path, cfg, &s)))?;
         Ok(SagaDriver {
             shared,
             thread: Some(thread),
@@ -345,6 +387,11 @@ impl SagaDriver {
     /// of a saga that has seen nothing (the placeholder world).
     pub fn state(&self) -> Arc<SagaState> {
         self.shared.lock().state.clone()
+    }
+
+    /// Whether the driver thread has ended (see [`Published::stopped`]).
+    pub fn stopped(&self) -> bool {
+        self.shared.lock().stopped
     }
 
     /// The newest published snapshot with its counters.
@@ -404,6 +451,23 @@ impl SagaDriver {
     fn hold_publishing(&self) -> MutexGuard<'_, Published> {
         self.shared.lock()
     }
+
+    /// Makes a local driver panic after its next non-empty read.
+    #[cfg(test)]
+    fn panic_on_next_read(&self) {
+        self.shared.panic_on_read.store(true, Ordering::SeqCst);
+    }
+
+    /// The driver thread's nice value as it read it at its start, once it
+    /// has started (Linux).
+    #[cfg(all(test, target_os = "linux"))]
+    fn thread_nice(&self) -> Option<i32> {
+        *self
+            .shared
+            .nice
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 impl Drop for SagaDriver {
@@ -426,6 +490,10 @@ fn run_local(bus: &Bus, cfg: SagaConfig, shared: &Shared) {
                     continue;
                 };
                 next = last.seq + 1;
+                #[cfg(test)]
+                if shared.panic_on_read.load(Ordering::SeqCst) {
+                    panic!("test hook: the saga driver panics");
+                }
                 for r in &batch {
                     f.feed(r);
                 }
@@ -453,27 +521,52 @@ fn run_local(bus: &Bus, cfg: SagaConfig, shared: &Shared) {
     }
 }
 
-/// The records a remote saga starts from: one sample per reading in a
-/// snapshot's world, in the summary's order, from source
-/// [`SNAPSHOT_SOURCE`]. Sequence numbers and times are 0; the core reads
-/// neither.
+/// The records a remote saga starts from, all from source
+/// [`SNAPSHOT_SOURCE`], with sequence numbers and times of 0 (the core reads
+/// neither):
+///
+/// 1. one sample per reading in the snapshot's world, in the summary's
+///    order;
+/// 2. one `ModelReady` per model whose phase is `Ready`, in key order. The
+///    core births dungeons and sage hooks only from `ModelReady`, so without
+///    these a TUI attached to a host that is already serving would show no
+///    world for that model until it reloads.
+///
+/// The snapshot's events are left out: they are only the newest 64, and
+/// already past.
 pub fn snapshot_records(world: &WorldSummary) -> Vec<Record> {
-    world
+    let record = |payload: Payload| Record {
+        seq: 0,
+        t_mono_ns: 0,
+        t_wall_ms: 0,
+        source: SNAPSHOT_SOURCE.to_string(),
+        payload,
+    };
+    let mut out: Vec<Record> = world
         .readings
         .iter()
-        .map(|r| Record {
-            seq: 0,
-            t_mono_ns: 0,
-            t_wall_ms: 0,
-            source: SNAPSHOT_SOURCE.to_string(),
-            payload: Payload::Sample(Sample {
+        .map(|r| {
+            record(Payload::Sample(Sample {
                 entity: r.entity.clone(),
                 signal: r.signal.clone(),
                 value: r.value.clone(),
                 prov: r.prov,
-            }),
+            }))
         })
-        .collect()
+        .collect();
+    let mut ready: Vec<&ModelView> = world
+        .models
+        .iter()
+        .filter(|m| m.phase == ModelPhase::Ready)
+        .collect();
+    ready.sort_by(|a, b| a.key.cmp(&b.key));
+    for m in ready {
+        out.push(record(Payload::Event(Event::ModelReady {
+            model: m.key.clone(),
+            chips: m.chips.clone(),
+        })));
+    }
+    out
 }
 
 /// The remote driver (Unix sockets only).
