@@ -8,7 +8,7 @@
 use super::*;
 use crate::event::Biome;
 use crate::maze::{generate, Cell, Floor, Rect};
-use crate::quest::{plan, Hook, Quest, Verb};
+use crate::quest::{plan, Hook, Quest, Verb, REST_BELOW};
 use crate::rng::Pcg32;
 use crate::stats::TrailBook;
 use crate::topology::{Arch, FloorSpec};
@@ -400,7 +400,7 @@ fn vitality_rises_with_a_good_heartbeat_and_falls_on_a_stall() {
     for _ in 0..50 {
         book.push(&c, HEARTBEAT_ALIVE, 1.0);
         book.push(&c, AI_CLOCK, 1000.0);
-        book.push(&c, ASIC_TEMPERATURE, 45.0);
+        push_temperature(&mut book, &c, 45.0);
     }
     let healthy = vitality(&book, &c);
     assert!(healthy > 0.99, "healthy chip: {healthy}");
@@ -424,28 +424,122 @@ fn vitality_rises_with_a_good_heartbeat_and_falls_on_a_stall() {
     }
     assert!(last > 0.9, "recovered: {last}");
 
-    // A throttle (the clock falls to 60% of its trailing maximum) costs
-    // vitality but does not kill.
-    for _ in 0..80 {
-        book.push(&c, HEARTBEAT_ALIVE, 1.0);
-        book.push(&c, AI_CLOCK, 600.0);
-    }
-    let throttled = vitality(&book, &c);
-    assert!(
-        throttled < 0.85 && throttled > 0.3,
-        "throttled: {throttled}"
-    );
-
-    // A sharp temperature rise costs vitality too.
+    // A sharp temperature rise costs vitality even with a steady clock.
     let mut hot = book.clone();
-    for _ in 0..3 {
-        hot.push(&c, ASIC_TEMPERATURE, 90.0);
+    for _ in 0..10 {
+        push_temperature(&mut hot, &c, 90.0);
     }
     let v = vitality(&hot, &c);
-    assert!(v < throttled, "hot: {v} vs {throttled}");
+    assert!(v < last, "hot: {v} vs {last}");
 
     // Another chip's readings never count.
     assert_eq!(vitality(&book, &EntityKey::chip("0000:02:00.0")), 1.0);
+}
+
+/// Feeds one tick of readings for `chip`: a live heartbeat, a clock and a
+/// temperature.
+fn tick(book: &mut TrailBook, chip: &EntityKey, clock: f64, celsius: f64) {
+    book.push(chip, HEARTBEAT_ALIVE, 1.0);
+    book.push(chip, AI_CLOCK, clock);
+    push_temperature(book, chip, celsius);
+}
+
+/// Explore and rest hooks, as every world offers them.
+fn everyday_hooks() -> [Hook; 2] {
+    [
+        Hook {
+            verb: Verb::Explore,
+            target: None,
+            reason: cause(),
+        },
+        Hook {
+            verb: Verb::Rest,
+            target: None,
+            reason: cause(),
+        },
+    ]
+}
+
+/// A one-floor world for planning tests.
+fn world_of(floor: Floor) -> World {
+    World {
+        id: 1,
+        seed: 9,
+        born_tick: 5,
+        chips: vec![chip()],
+        floors: vec![floor],
+        biome: Biome::Dungeon,
+    }
+}
+
+#[test]
+fn a_workload_ending_costs_no_vitality() {
+    // A busy Blackhole: 1350 MHz at 70 degrees. The job ends. Over 30 ticks
+    // the clock falls to its idle 800 MHz and the chip cools to 45 degrees,
+    // then it idles for 2,000 ticks (longer than the 1,700 the clock's
+    // trailing maximum needs to decay to within 90% of 800).
+    let c = chip();
+    let world = world_of(floor_for(0));
+    let mut hero = Hero::new("Tensix".to_string(), 0, world.floors[0].entrance, 0);
+    let mut book = TrailBook::new();
+    for _ in 0..200 {
+        tick(&mut book, &c, 1350.0, 70.0);
+    }
+    let mut lowest = 1.0f32;
+    for i in 1..=2030u32 {
+        let k = i.min(30) as f64 / 30.0;
+        tick(&mut book, &c, 1350.0 - 550.0 * k, 70.0 - 25.0 * k);
+        let v = vitality(&book, &c);
+        lowest = lowest.min(v);
+        assert!(
+            v >= REST_BELOW,
+            "tick {i}: an idle chip made the hero weak ({v})"
+        );
+        if i % 100 == 0 {
+            hero.vitality = v;
+            let q = plan(
+                &world,
+                &hero,
+                &everyday_hooks(),
+                &mut Pcg32::from_seed(i as u64),
+            );
+            assert_eq!(q.verb, Verb::Explore, "tick {i}: the hero rested at {v}");
+        }
+    }
+    // Idling and cooling cost nothing at all.
+    assert!(lowest > 0.999, "lowest vitality after the job: {lowest}");
+}
+
+#[test]
+fn a_throttle_lowers_vitality_below_the_rest_line() {
+    // A warm, steady chip: 1350 MHz at 60 degrees. Then the derived throttle
+    // of spec 3.8: over 30 ticks the temperature climbs to 90 degrees while
+    // the clock drops to 900 MHz, under 90% of its trailing maximum.
+    let c = chip();
+    let world = world_of(floor_for(0));
+    let mut hero = Hero::new("Tensix".to_string(), 0, world.floors[0].entrance, 0);
+    let mut book = TrailBook::new();
+    for _ in 0..200 {
+        tick(&mut book, &c, 1350.0, 60.0);
+    }
+    assert!(vitality(&book, &c) > 0.999);
+    for i in 1..=30 {
+        tick(&mut book, &c, 900.0, 60.0 + i as f64);
+    }
+    let v = vitality(&book, &c);
+    assert!(v < REST_BELOW, "a throttle left vitality at {v}");
+    hero.vitality = v;
+    let q = plan(&world, &hero, &everyday_hooks(), &mut Pcg32::from_seed(1));
+    assert_eq!(q.verb, Verb::Rest);
+
+    // Held at 90 degrees, the rise passes: within about 50 ticks of the
+    // temperature settling the hero is well again, though the clock stays
+    // low and the chip stays hot.
+    for _ in 0..80 {
+        tick(&mut book, &c, 900.0, 90.0);
+    }
+    let v = vitality(&book, &c);
+    assert!(v > 0.999, "a chip settled hot is healthy: {v}");
 }
 
 #[test]

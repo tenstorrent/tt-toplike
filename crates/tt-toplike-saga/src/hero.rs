@@ -65,21 +65,36 @@ pub const HEARTBEAT_GRACE_TICKS: u64 = 20;
 /// The AI clock in MHz, pushed as each bus sample arrives.
 pub const AI_CLOCK: &str = "tt_ai_clock_mhz";
 
-/// The ASIC temperature in degrees Celsius, pushed as each bus sample
-/// arrives.
+/// The ASIC temperature in degrees Celsius. Push each bus sample with
+/// [`push_temperature`], which also keeps [`TEMPERATURE_BASELINE`].
 pub const ASIC_TEMPERATURE: &str = "tt_asic_temperature_celsius";
+
+/// The temperature's slow baseline: a series the saga keeps. Each
+/// [`push_temperature`] pushes the [`ASIC_TEMPERATURE`] trail's mean (after
+/// the new sample) onto this trail, so its mean is the fast mean smoothed a
+/// second time. It lags the fast mean while the temperature moves and equals
+/// it once the temperature has settled.
+pub const TEMPERATURE_BASELINE: &str = "saga.temperature_baseline";
 
 /// Weight of the clock term in [`vitality`]. The temperature term gets the
 /// rest.
 const CLOCK_WEIGHT: f64 = 0.6;
 
-/// A ratio at or above this counts as full health in [`vitality`]. 0.9 is
-/// the spec's throttle line (spec 3.8: a clock below 90% of its own trailing
-/// maximum).
+/// A clock ratio at or above this counts as full health in [`vitality`].
+/// 0.9 is the spec's throttle line (spec 3.8: a clock below 90% of its own
+/// trailing maximum).
 const BAND_TOP: f64 = 0.9;
 
-/// A ratio at or below this counts as no health in [`vitality`].
+/// A clock ratio at or below this counts as no health in [`vitality`].
 const BAND_BOTTOM: f64 = 0.5;
+
+/// The temperature counts as rising when its fast mean is more than 2%
+/// above its baseline. The margin keeps low-bit wobble on a quiet chip from
+/// counting as a rise.
+const RISE_LINE: f64 = 1.02;
+
+/// A fast mean 20% or more above the baseline gives no heat health.
+const RISE_TOP: f64 = 1.2;
 
 /// Why something happened in the story: the entity, the bus signal, and the
 /// record's ordinal in the stream the core was fed (spec 3.5). Every quest
@@ -234,8 +249,8 @@ fn manhattan(a: (u8, u8), b: (u8, u8)) -> u32 {
     a.0.abs_diff(b.0) as u32 + a.1.abs_diff(b.1) as u32
 }
 
-/// Maps a ratio onto 0 to 1: [`BAND_TOP`] or more gives 1, [`BAND_BOTTOM`]
-/// or less gives 0, linear between.
+/// Maps a clock ratio onto 0 to 1: [`BAND_TOP`] or more gives 1,
+/// [`BAND_BOTTOM`] or less gives 0, linear between.
 fn band(r: f64) -> f64 {
     if r >= BAND_TOP {
         1.0
@@ -246,41 +261,99 @@ fn band(r: f64) -> f64 {
     }
 }
 
-/// A trail's smoothed level against its own trailing maximum, banded. A
-/// series with no trail is at full health.
-fn level(trail: Option<&Trail>) -> f64 {
-    trail.map_or(1.0, |t| band(t.ratio(t.mean())))
+/// Pushes one temperature sample for `chip`: the raw value onto the
+/// [`ASIC_TEMPERATURE`] trail, then that trail's new mean onto the
+/// [`TEMPERATURE_BASELINE`] trail. A NaN or infinite sample changes neither.
+/// The driver calls this for every `tt_asic_temperature_celsius` sample.
+pub fn push_temperature(trails: &mut TrailBook, chip: &EntityKey, celsius: f64) {
+    if !celsius.is_finite() {
+        return;
+    }
+    trails.push(chip, ASIC_TEMPERATURE, celsius);
+    if let Some(mean) = trails.get(chip, ASIC_TEMPERATURE).map(Trail::mean) {
+        trails.push(chip, TEMPERATURE_BASELINE, mean);
+    }
+}
+
+/// The temperature's fast mean divided by its baseline's mean: above 1 while
+/// the temperature rises, below 1 while it falls, 1 once it has settled.
+/// 1.0 when either trail is missing or the baseline is not positive.
+fn temperature_rise(trails: &TrailBook, chip: &EntityKey) -> f64 {
+    match (
+        trails.get(chip, ASIC_TEMPERATURE),
+        trails.get(chip, TEMPERATURE_BASELINE),
+    ) {
+        (Some(fast), Some(base)) if base.mean() > 0.0 => fast.mean() / base.mean(),
+        _ => 1.0,
+    }
 }
 
 /// The hero's vitality on `chip`, from 0.0 to 1.0, read from `trails`.
 ///
 /// ```text
 /// vitality = alive * (0.6 * clock + 0.4 * heat)
+/// rise     = temperature fast mean / temperature baseline mean
+/// ratio    = clock mean / clock trailing max
+/// clock    = band(ratio)   if ratio < 0.9 and rise > 1.02, else 1
+/// heat     = 1 if rise <= 1.02, 0 if rise >= 1.2, linear between
 /// ```
 ///
 /// * `alive` is the mean of the [`HEARTBEAT_ALIVE`] trail, clamped to 0..1:
 ///   the recent fraction of ticks with a live heartbeat. Its mean moves 1/16
 ///   of the way on each tick, so a stall drains vitality within a few dozen
 ///   ticks and a restart restores it as fast.
-/// * `clock` is the [`AI_CLOCK`] trail's mean divided by its trailing
-///   maximum, banded: 90% or more is full health, 50% or less is none,
-///   linear between. A throttle lowers it.
-/// * `heat` is the same banded ratio for [`ASIC_TEMPERATURE`]. A sharp rise
-///   lifts the trailing maximum at once while the mean follows slowly, so
-///   the ratio drops until the mean catches up. A sharp fall of more than
-///   10% also lowers the ratio until the trailing maximum decays (a few
-///   hundred samples). The weight keeps that cost small.
+/// * `rise` compares the [`ASIC_TEMPERATURE`] trail's mean (it moves 1/16 of
+///   the way per sample) with the [`TEMPERATURE_BASELINE`] trail's mean (the
+///   same smoothing applied a second time, see [`push_temperature`]).
+/// * `clock` is the derived throttle of spec 3.8: the [`AI_CLOCK`] trail's
+///   mean below 90% of its trailing maximum while the temperature rises. The
+///   penalty is the band: 90% or more is full health, 50% or less is none,
+///   linear between. A clock that falls while the temperature falls or stays
+///   level is a chip going idle, and costs nothing.
+/// * `heat` is the temperature margin against the chip's own trailing
+///   behaviour (spec 3.10). Only a temperature climbing above its own
+///   baseline costs heat health. Cooling costs nothing. A chip that has
+///   settled at any temperature, hot or cool, has full heat health: the margin
+///   is measured against the chip's own recent past, and a chip held steady
+///   at a high temperature is a working chip. An absolute thermal danger is a
+///   thermal trip, which phase 2 turns into a dragon.
+///
+/// How long a penalty lasts, from the constants. The rise needs both means to
+/// meet again: after a step from 60 to 90 degrees, the rise falls back under
+/// 1.02 about 50 samples after the step. The clock's trailing maximum loses
+/// 1/4096 per sample, so a clock that settles at a fraction `f` of its old
+/// maximum stays under the 90% line for about `4096 * ln(0.9 / f)` samples:
+/// about 1,700 samples for an idle Blackhole (800 of 1350 MHz). That only
+/// matters if the temperature rises during that time.
 ///
 /// A series with no trail counts as full health, so a chip with no readings
-/// has vitality 1.0. All three series are positive quantities. Faults, ECC
+/// has vitality 1.0. All the series are positive quantities. Faults, ECC
 /// errors and link count (spec 3.10) join the formula when the cast that
 /// uses them arrives in phase 2. Only `+ - * /` and comparisons are used.
 pub fn vitality(trails: &TrailBook, chip: &EntityKey) -> f32 {
     let alive = trails
         .get(chip, HEARTBEAT_ALIVE)
         .map_or(1.0, |t| t.mean().clamp(0.0, 1.0));
-    let clock = level(trails.get(chip, AI_CLOCK));
-    let heat = level(trails.get(chip, ASIC_TEMPERATURE));
+    let rise = temperature_rise(trails, chip);
+    let rising = rise > RISE_LINE;
+    let clock = match trails.get(chip, AI_CLOCK) {
+        Some(t) => {
+            let ratio = t.ratio(t.mean());
+            if rising && ratio < BAND_TOP {
+                band(ratio)
+            } else {
+                1.0
+            }
+        }
+        None => 1.0,
+    };
+    let heat = if rise <= RISE_LINE {
+        1.0
+    } else if rise >= RISE_TOP {
+        0.0
+    } else {
+        (RISE_TOP - rise) / (RISE_TOP - RISE_LINE)
+    };
     let v = alive * (CLOCK_WEIGHT * clock + (1.0 - CLOCK_WEIGHT) * heat);
     v.clamp(0.0, 1.0) as f32
 }
