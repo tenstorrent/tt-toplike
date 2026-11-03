@@ -15,8 +15,10 @@ What it prints:
   * alt screen: when the binary entered the alternate screen (ESC [?1049h).
   * first frame: when the first ratatui frame finished. ratatui writes
     ESC [?25l (hide cursor) at the end of every `Terminal::draw`, so each one
-    is counted as one frame. The splash screen does not use ratatui, so its
-    redraws are not counted as frames.
+    is counted as one frame. The splash screen does not use ratatui. Its
+    first draw also hides the cursor, right after entering the alternate
+    screen (ESC [?1049h ESC [?25l); a mark right after ESC [?1049h is not
+    counted, so the splash's draws are not frames.
   * frames per half second, in buckets of 0.5 s counted from the first frame.
   * bytes per half second, counted from the start.
 
@@ -82,10 +84,11 @@ def main():
             i = buf.find(FRAME_MARK, start)
             if i < 0:
                 break
-            if i + len(FRAME_MARK) > len(tail):
+            after_alt = buf[max(0, i - len(ALT_MARK)):i] == ALT_MARK
+            if i + len(FRAME_MARK) > len(tail) and not after_alt:
                 frames.append(now)
             start = i + 1
-        tail = buf[-(len(FRAME_MARK) - 1):]
+        tail = buf[-(len(ALT_MARK) + len(FRAME_MARK) - 1):]
     os.kill(pid, signal.SIGTERM)
     try:
         os.waitpid(pid, 0)

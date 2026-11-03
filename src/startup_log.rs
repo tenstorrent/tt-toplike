@@ -12,8 +12,12 @@
 //!
 //! Without the variable every call is one relaxed atomic load and returns.
 //! The file is opened once, on the first call that finds the variable set.
-//! A file that cannot be opened turns the log off; the TUI never fails
-//! because of it.
+//! A file that cannot be opened, or a path that is not a regular file (a
+//! FIFO, a device), turns the log off; the TUI never fails because of it.
+//!
+//! Nothing is written after the window closes: [`FRAME_WINDOW`] after the
+//! first frame, or 30 s after start when no frame is drawn (`--headless`), so
+//! a variable left set does not grow the file for the whole session.
 //!
 //! The clock starts at [`begin`]. Calls made before it count from the first
 //! call. It lives at the crate root, outside the TUI, so the backend and the
@@ -52,13 +56,7 @@ fn enabled() -> bool {
         1 => false,
         2 => true,
         _ => {
-            let file = std::env::var_os(ENV).and_then(|p| {
-                std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(p)
-                    .ok()
-            });
+            let file = std::env::var_os(ENV).and_then(|p| open_log(p.as_ref()));
             let on = file.is_some();
             if let Ok(mut g) = FILE.lock() {
                 *g = file;
@@ -66,6 +64,34 @@ fn enabled() -> bool {
             STATE.store(if on { 2 } else { 1 }, Ordering::Relaxed);
             on
         }
+    }
+}
+
+/// Open the log for appending: a regular file only. The open does not block
+/// (a FIFO with no reader would otherwise hold start-up), and anything that
+/// is not a regular file is refused.
+fn open_log(path: &std::path::Path) -> Option<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NONBLOCK);
+    }
+    let f = opts.open(path).ok()?;
+    f.metadata().ok()?.is_file().then_some(f)
+}
+
+/// How long after start the log is written when no frame is ever drawn
+/// (`--headless` runs the same backend code).
+const NO_FRAME_WINDOW: Duration = Duration::from_secs(30);
+
+/// Whether `now` is still inside the logging window: [`FRAME_WINDOW`] after
+/// the first frame, or [`NO_FRAME_WINDOW`] after start when there is none.
+fn in_window(now: Instant, start: Instant, first_frame: Option<Instant>) -> bool {
+    match first_frame {
+        Some(f) => now.saturating_duration_since(f) <= FRAME_WINDOW,
+        None => now.saturating_duration_since(start) <= NO_FRAME_WINDOW,
     }
 }
 
@@ -79,7 +105,7 @@ fn write_line(line: std::fmt::Arguments<'_>) {
 
 /// Note that a start-up phase was reached.
 pub fn phase(name: &str) {
-    if !enabled() {
+    if !enabled() || !in_window(Instant::now(), started(), FIRST_FRAME.get().copied()) {
         return;
     }
     let ms = started().elapsed().as_secs_f64() * 1000.0;
@@ -106,4 +132,37 @@ pub fn frame(draw: Duration, work: Duration) {
         draw.as_secs_f64() * 1000.0,
         work.as_secs_f64() * 1000.0
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_closes_after_the_first_frame_or_after_start() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        assert!(in_window(t0 + s(10), t0, None));
+        assert!(!in_window(t0 + s(31), t0, None), "no frame: 30 s");
+        assert!(in_window(t0 + s(6), t0, Some(t0 + s(2))));
+        assert!(
+            !in_window(t0 + s(8), t0, Some(t0 + s(2))),
+            "5 s after the first frame"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_without_blocking() {
+        let td = tempfile::tempdir().unwrap();
+        let fifo = td.path().join("log");
+        let ok = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        // Without O_NONBLOCK this open would wait for a reader for ever.
+        assert!(open_log(&fifo).is_none());
+        assert!(open_log(&td.path().join("plain")).is_some());
+    }
 }

@@ -513,7 +513,6 @@ impl InferenceServerMonitor {
         let _ = std::thread::Builder::new()
             .name("tt-inference-monitor".into())
             .spawn(move || {
-                crate::workload::background::lower_priority();
                 let mut detected: Vec<InferenceServer> = Vec::new();
                 let mut prev_snapshot: Vec<ServiceState> = Vec::new();
                 let mut last_tick: Option<Instant> = None;

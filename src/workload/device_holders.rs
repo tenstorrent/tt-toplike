@@ -20,9 +20,11 @@
 //! index with [`DeviceMap`]: `/sys/class/tenstorrent/tenstorrent!<N>/device`
 //! names the PCI address, and the backend's device with that `bus_id` gives
 //! the index. That is the key the sysfs backend orders its devices by, so the
-//! two agree even when the driver numbers the cards in another order. A number
-//! with no mapping (no class directory, or a backend that does not know the
-//! address) is used as the index itself, which is what the scan did before.
+//! two agree even when the driver numbers the cards in another order. When
+//! no number maps (no class directory, or a backend that knows none of the
+//! addresses), each number is used as the index itself, which is what the
+//! scan did before. When some numbers map, a number that does not is left
+//! out, so two cards never share an index.
 //!
 //! # Blend rules
 //!
@@ -66,8 +68,11 @@ pub struct Holder {
     pub devices: Vec<usize>,
     /// Process name (`comm`), or tt-smi's command line when `/proc` had none.
     pub name: String,
-    /// Command line, when known. Empty otherwise.
+    /// Command line, when known. Empty otherwise. It may be cut for display.
     pub cmdline: String,
+    /// A tt-smi snapshot run, decided on the full command line before any
+    /// cut ([`is_snapshot_tool`]).
+    pub snapshot_tool: bool,
     pub source: HolderSource,
 }
 
@@ -113,14 +118,21 @@ impl DeviceMap {
         Self { by_number }
     }
 
-    /// The backend index for device number `n`; `n` itself when unmapped.
-    pub fn index_for(&self, n: u32) -> usize {
-        self.by_number.get(&n).copied().unwrap_or(n as usize)
+    /// The backend index for device number `n`. An empty map (no class
+    /// directory, or a backend that knows none of the addresses) uses `n`
+    /// itself. A map that names some numbers gives `None` for the others: `n`
+    /// could be another card's mapped index, and two cards must not share one.
+    pub fn index_for(&self, n: u32) -> Option<usize> {
+        if self.by_number.is_empty() {
+            return Some(n as usize);
+        }
+        self.by_number.get(&n).copied()
     }
 
-    /// Map a list of device numbers to sorted, unique indices.
+    /// Map a list of device numbers to sorted, unique indices, leaving out
+    /// numbers [`Self::index_for`] cannot place.
     pub fn indices_for(&self, numbers: &[u32]) -> Vec<usize> {
-        let mut v: Vec<usize> = numbers.iter().map(|&n| self.index_for(n)).collect();
+        let mut v: Vec<usize> = numbers.iter().filter_map(|&n| self.index_for(n)).collect();
         v.sort_unstable();
         v.dedup();
         v
@@ -179,6 +191,7 @@ pub fn blend(proc: &ProcHolders, tt_smi: &[DeviceProcess]) -> Vec<Holder> {
             // Seen by both: one holder, `/proc`'s devices. tt-smi only fills
             // text `/proc` did not have.
             Some(h) => {
+                h.snapshot_tool |= is_snapshot_tool(&h.name, &cmdline);
                 if h.cmdline.is_empty() {
                     h.cmdline = cmdline.clone();
                 }
@@ -196,6 +209,7 @@ pub fn blend(proc: &ProcHolders, tt_smi: &[DeviceProcess]) -> Vec<Holder> {
                         pid,
                         devices: proc.map.indices_for(&numbers),
                         name: cmdline.clone(),
+                        snapshot_tool: is_snapshot_tool("", &cmdline),
                         cmdline,
                         source: HolderSource::TtSmi,
                     },
@@ -211,7 +225,7 @@ pub fn blend(proc: &ProcHolders, tt_smi: &[DeviceProcess]) -> Vec<Holder> {
 pub fn opened_pairs(holders: &[Holder]) -> Vec<(i64, usize)> {
     holders
         .iter()
-        .filter(|h| !is_snapshot_tool(&h.name, &h.cmdline))
+        .filter(|h| !h.snapshot_tool)
         .flat_map(|h| h.devices.iter().map(move |&d| (h.pid, d)))
         .collect()
 }
@@ -226,6 +240,58 @@ pub const MAX_PIDS_PER_DEVICE: usize = 4096;
 /// the bound and counted in [`ScanCounts::fd_truncated`].
 #[cfg(target_os = "linux")]
 pub const MAX_FDS_PER_PROCESS: usize = 16384;
+
+/// Most processes one scan looks at. The rest are counted in
+/// [`ScanCounts::proc_truncated`] and not read.
+#[cfg(target_os = "linux")]
+pub const MAX_PROCESSES: usize = 32768;
+
+/// Most bytes read from one driver `pids` file (64 KiB holds over 8,000
+/// pids). A line the bound cuts is dropped.
+#[cfg(target_os = "linux")]
+pub const MAX_PIDS_FILE_BYTES: usize = 64 * 1024;
+
+/// The scan's bounds. [`Limits::default`] gives the constants above; tests
+/// make them small.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub processes: usize,
+    pub fds_per_process: usize,
+    pub pids_per_device: usize,
+    pub pids_file_bytes: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            processes: MAX_PROCESSES,
+            fds_per_process: MAX_FDS_PER_PROCESS,
+            pids_per_device: MAX_PIDS_PER_DEVICE,
+            pids_file_bytes: MAX_PIDS_FILE_BYTES,
+        }
+    }
+}
+
+/// Read at most `limit` bytes of `path` as text. When the file is longer,
+/// the last, cut line is dropped.
+#[cfg(target_os = "linux")]
+fn read_bounded(path: &std::path::Path, limit: usize) -> Option<String> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(limit as u64 + 1)
+        .read_to_end(&mut buf)
+        .ok()?;
+    if buf.len() > limit {
+        buf.truncate(limit);
+        let keep = buf.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
+        buf.truncate(keep);
+    }
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
 
 /// The driver's device numbers and the PCI address of each, from
 /// `<sys_root>/class/tenstorrent/tenstorrent!<N>/device`. Empty when the
@@ -259,9 +325,19 @@ pub fn read_number_bus(sys_root: &std::path::Path) -> BTreeMap<u32, String> {
 /// The driver's holder lists: pid to the device numbers it holds, from
 /// `<proc_root>/driver/tenstorrent/<N>/pids`. `None` when the driver has no
 /// such directory (an older tt-kmd), so the caller knows the answer is not
-/// complete. At most [`MAX_PIDS_PER_DEVICE`] pids are read per device.
+/// complete. At most [`MAX_PIDS_PER_DEVICE`] pids and
+/// [`MAX_PIDS_FILE_BYTES`] bytes are read per device.
 #[cfg(target_os = "linux")]
 pub fn read_driver_pids(proc_root: &std::path::Path) -> Option<BTreeMap<i32, Vec<u32>>> {
+    read_driver_pids_with(proc_root, &Limits::default())
+}
+
+/// [`read_driver_pids`] with the given bounds.
+#[cfg(target_os = "linux")]
+pub fn read_driver_pids_with(
+    proc_root: &std::path::Path,
+    limits: &Limits,
+) -> Option<BTreeMap<i32, Vec<u32>>> {
     let dir = std::fs::read_dir(proc_root.join("driver/tenstorrent")).ok()?;
     let mut out: BTreeMap<i32, Vec<u32>> = BTreeMap::new();
     let mut any = false;
@@ -269,14 +345,14 @@ pub fn read_driver_pids(proc_root: &std::path::Path) -> Option<BTreeMap<i32, Vec
         let Some(n) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
             continue;
         };
-        let Ok(text) = std::fs::read_to_string(e.path().join("pids")) else {
+        let Some(text) = read_bounded(&e.path().join("pids"), limits.pids_file_bytes) else {
             continue;
         };
         any = true;
         for pid in text
             .lines()
             .filter_map(|l| l.split_whitespace().next()?.parse::<i32>().ok())
-            .take(MAX_PIDS_PER_DEVICE)
+            .take(limits.pids_per_device)
         {
             let v = out.entry(pid).or_default();
             if !v.contains(&n) {
@@ -309,6 +385,12 @@ pub enum FdRead {
 /// (the process closed it) is skipped.
 #[cfg(target_os = "linux")]
 pub fn fd_numbers(fd_dir: &std::path::Path) -> (FdRead, bool) {
+    fd_numbers_with(fd_dir, MAX_FDS_PER_PROCESS)
+}
+
+/// [`fd_numbers`], reading at most `max_fds` links.
+#[cfg(target_os = "linux")]
+pub fn fd_numbers_with(fd_dir: &std::path::Path, max_fds: usize) -> (FdRead, bool) {
     let dir = match std::fs::read_dir(fd_dir) {
         Ok(d) => d,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -320,7 +402,7 @@ pub fn fd_numbers(fd_dir: &std::path::Path) -> (FdRead, bool) {
     let mut seen = 0usize;
     let mut truncated = false;
     for e in dir.flatten() {
-        if seen == MAX_FDS_PER_PROCESS {
+        if seen >= max_fds {
             truncated = true;
             break;
         }
@@ -363,6 +445,7 @@ mod tests {
             devices: devices.to_vec(),
             name: name.into(),
             cmdline: String::new(),
+            snapshot_tool: false,
             source: HolderSource::Proc,
         }
     }
@@ -400,19 +483,30 @@ mod tests {
     #[test]
     fn device_numbers_map_through_the_pci_address() {
         let m = bus_map();
-        assert_eq!(m.index_for(0), 3);
-        assert_eq!(m.index_for(1), 0);
+        assert_eq!(m.index_for(0), Some(3));
+        assert_eq!(m.index_for(1), Some(0));
         assert_eq!(m.indices_for(&[2, 0, 0]), vec![2, 3]);
-        // A number the class directory does not name keeps its own value.
-        assert_eq!(m.index_for(9), 9);
-        assert_eq!(DeviceMap::identity().index_for(2), 2);
+        // With no map at all a number is its own index.
+        assert_eq!(DeviceMap::identity().index_for(2), Some(2));
+    }
+
+    /// A partial map never puts two cards on one index: number 0 maps to
+    /// index 3, and number 3, which the class directory does not name, is
+    /// left out. Mapped to itself, it would land on 3 as well.
+    #[test]
+    fn an_unmapped_number_never_takes_a_mapped_index() {
+        let numbers: BTreeMap<u32, String> = [(0, "0000:04:00.0".to_string())].into();
+        let m = DeviceMap::from_parts(&numbers, &[("0000:04:00.0".into(), 3)]);
+        assert_eq!(m.index_for(0), Some(3));
+        assert_eq!(m.index_for(3), None);
+        assert_eq!(m.indices_for(&[0, 3]), vec![3]);
     }
 
     #[test]
     fn upper_case_bus_ids_still_match() {
         let numbers: BTreeMap<u32, String> = [(0, "0000:0A:00.0".to_string())].into();
         let m = DeviceMap::from_parts(&numbers, &[(" 0000:0a:00.0".into(), 5)]);
-        assert_eq!(m.index_for(0), 5);
+        assert_eq!(m.index_for(0), Some(5));
     }
 
     #[test]
@@ -508,8 +602,20 @@ mod tests {
     fn opened_pairs_leave_out_snapshot_runs() {
         let mut t = holder(30, &[0, 1, 2, 3], "tt-smi");
         t.cmdline = "python /usr/bin/tt-smi -s".into();
+        t.snapshot_tool = true;
         let pairs = opened_pairs(&[holder(10, &[0, 1], "vllm"), t]);
         assert_eq!(pairs, vec![(10, 0), (10, 1)]);
+    }
+
+    /// tt-smi's own row for its snapshot run, with a long interpreter path,
+    /// is marked as a snapshot run and makes no pair.
+    #[test]
+    fn a_tt_smi_row_for_its_own_long_snapshot_run_makes_no_pair() {
+        let proc = ProcHolders::default();
+        let cmd = "/home/ttuser/.tenstorrent-venv/bin/python /home/ttuser/.local/bin/tt-smi -s";
+        let out = blend(&proc, &[smi(77, 0, cmd), smi(77, 1, cmd)]);
+        assert!(out[0].snapshot_tool);
+        assert!(opened_pairs(&out).is_empty());
     }
 
     #[test]
@@ -553,6 +659,64 @@ mod linux_tests {
         assert_eq!(got.len(), 2);
     }
 
+    fn write_pids(root: &std::path::Path, n: u32, text: &str) {
+        let d = root.join("driver/tenstorrent").join(n.to_string());
+        fs::create_dir_all(&d).unwrap();
+        fs::write(d.join("pids"), text).unwrap();
+    }
+
+    #[test]
+    fn at_most_the_bound_of_pids_is_read_per_device() {
+        let td = tempfile::tempdir().unwrap();
+        let text: String = (100..110).map(|p| format!("{p}\n")).collect();
+        write_pids(td.path(), 0, &text);
+        let limits = Limits {
+            pids_per_device: 4,
+            ..Limits::default()
+        };
+        let got = read_driver_pids_with(td.path(), &limits).unwrap();
+        assert_eq!(
+            got.keys().copied().collect::<Vec<_>>(),
+            vec![100, 101, 102, 103]
+        );
+    }
+
+    /// A `pids` file longer than the byte bound is read up to the bound, and
+    /// the line the bound cuts is dropped, so no pid is made from half a
+    /// number.
+    #[test]
+    fn a_pids_file_past_the_byte_bound_is_cut_at_a_line() {
+        let td = tempfile::tempdir().unwrap();
+        // "123456\n" is 7 bytes; a 10-byte bound cuts the second pid.
+        write_pids(td.path(), 0, "123456\n654321\n777777\n");
+        let limits = Limits {
+            pids_file_bytes: 10,
+            ..Limits::default()
+        };
+        let got = read_driver_pids_with(td.path(), &limits).unwrap();
+        assert_eq!(got.keys().copied().collect::<Vec<_>>(), vec![123456]);
+    }
+
+    #[test]
+    fn at_most_the_bound_of_fd_links_is_read() {
+        let td = tempfile::tempdir().unwrap();
+        let fd = td.path().join("fd");
+        fs::create_dir_all(&fd).unwrap();
+        for i in 0..5 {
+            symlink(format!("/dev/tenstorrent/{i}"), fd.join(i.to_string())).unwrap();
+        }
+        let (got, truncated) = fd_numbers_with(&fd, 3);
+        let FdRead::Numbers(n) = got else {
+            panic!("{got:?}")
+        };
+        assert_eq!(n.len(), 3, "three links read");
+        assert!(truncated);
+        assert_eq!(
+            fd_numbers_with(&fd, 5),
+            (FdRead::Numbers(vec![0, 1, 2, 3, 4]), false)
+        );
+    }
+
     #[test]
     fn no_driver_directory_means_no_complete_answer() {
         let td = tempfile::tempdir().unwrap();
@@ -592,13 +756,13 @@ mod linux_tests {
     }
 
     #[test]
-    fn a_vanished_process_reads_as_gone() {
+    fn a_vanished_process_is_gone() {
         let td = tempfile::tempdir().unwrap();
         assert_eq!(fd_numbers(&td.path().join("no-such/fd")).0, FdRead::Gone);
     }
 
     #[test]
-    fn a_refused_fd_directory_reads_as_denied() {
+    fn a_refused_fd_directory_is_denied() {
         let td = tempfile::tempdir().unwrap();
         let fd = td.path().join("fd");
         fs::create_dir_all(&fd).unwrap();

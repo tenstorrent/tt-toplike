@@ -837,6 +837,10 @@ fn proc_holders(list: &[(i64, &[usize], &str)]) -> crate::workload::device_holde
                 devices: devs.to_vec(),
                 name: cmd.split_whitespace().next().unwrap_or("").to_string(),
                 cmdline: cmd.to_string(),
+                snapshot_tool: crate::workload::device_holders::is_snapshot_tool(
+                    cmd.split_whitespace().next().unwrap_or(""),
+                    cmd,
+                ),
                 source: HolderSource::Proc,
             })
             .collect(),

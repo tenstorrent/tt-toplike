@@ -138,6 +138,9 @@ struct State {
     handed_over: bool,
     /// Set to end the thread.
     stop: bool,
+    /// Set with `stop` when a panic ends the splash: the thread then
+    /// writes nothing on its way out, so the panic message stays readable.
+    silent: bool,
     /// The Unix signal handlers are installed.
     handlers: bool,
 }
@@ -164,13 +167,15 @@ impl Drop for Guard {
     }
 }
 
-/// Start the splash thread. It draws nothing for [`SHOW_AFTER`].
+/// Start the splash thread. It draws nothing for [`SHOW_AFTER`]. The first
+/// call also installs [`install_panic_restore`].
 pub fn start() -> Guard {
+    install_panic_restore();
     let shared = Arc::new(Shared::default());
     let started = Instant::now();
     let s2 = Arc::clone(&shared);
     let thread = std::thread::Builder::new()
-        .name("tt-toplike-splash".into())
+        .name(THREAD_NAME.into())
         .spawn(move || run(&s2, started));
     if let Ok(thread) = thread {
         if let Ok(mut g) = ACTIVE.lock() {
@@ -222,20 +227,97 @@ fn stop() {
 /// alternate screen, show the cursor.
 const RESTORE: &[u8] = b"\x1b[2J\x1b[?1049l\x1b[?25h";
 
+/// Leave the alternate screen and show the cursor, without clearing: what a
+/// panic writes, so the text printed after it stays on the screen.
+const LEAVE: &[u8] = b"\x1b[?1049l\x1b[?25h";
+
+/// Name of the splash thread.
+const THREAD_NAME: &str = "tt-toplike-splash";
+
+/// True while a splash thread exists.
+pub fn is_running() -> bool {
+    RUNNING.load(Ordering::Acquire)
+}
+
+/// What the splash thread writes as it ends. Pure, for tests.
+fn exit_bytes(drew: bool, handed_over: bool, silent: bool) -> &'static [u8] {
+    match (drew, handed_over, silent) {
+        (false, _, _) | (_, _, true) => b"",
+        (true, true, false) => b"\x1b[2J",
+        (true, false, false) => RESTORE,
+    }
+}
+
+/// What a panic writes after stopping the splash. Before the hand-over the
+/// splash owns the alternate screen, so the panic leaves it; after it, the
+/// TUI's own panic hook does. It never clears. Pure, for tests.
+fn panic_bytes(drew: bool, handed_over: bool) -> &'static [u8] {
+    if drew && !handed_over {
+        LEAVE
+    } else {
+        b""
+    }
+}
+
+/// Stop the splash for a panic: no clear, no restore sequence from the
+/// thread. Returns `(drew, handed_over)`. Safe to call from a panic hook: it
+/// never blocks on a lock another thread holds, and does not join the thread
+/// when the splash thread itself panicked.
+pub fn abandon() -> (bool, bool) {
+    let Ok(mut g) = ACTIVE.try_lock() else {
+        return (false, true);
+    };
+    let Some(a) = g.take() else {
+        return (false, true);
+    };
+    drop(g);
+    RUNNING.store(false, Ordering::Release);
+    let seen = {
+        let mut st = a.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.stop = true;
+        st.silent = true;
+        (st.drew, st.handed_over)
+    };
+    a.shared.wake.notify_all();
+    if std::thread::current().name() != Some(THREAD_NAME) {
+        let _ = a.thread.join();
+    }
+    seen
+}
+
+/// Install, once, a panic hook that stops the splash before the panic
+/// message is printed (see [`abandon`]), leaves the alternate screen if the
+/// splash owned it, then calls the hook that was there before. The TUI's
+/// own hook, installed later, wraps this one and calls [`abandon`] first.
+pub fn install_panic_restore() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let (drew, handed_over) = abandon();
+            let bytes = panic_bytes(drew, handed_over);
+            if !bytes.is_empty() {
+                let mut out = std::io::stdout().lock();
+                let _ = out.write_all(bytes);
+                let _ = out.flush();
+            }
+            prev(info);
+        }));
+    });
+}
+
 fn run(shared: &Shared, started: Instant) {
     let version = env!("CARGO_PKG_VERSION");
     let mut st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
     loop {
         if st.stop {
-            if st.drew {
+            // After hand-over: clear for the first frame (ratatui's buffer is
+            // empty, so it writes every cell it uses). Before: give the
+            // terminal back. After a panic: nothing.
+            let bytes = exit_bytes(st.drew, st.handed_over, st.silent);
+            if !bytes.is_empty() {
                 let mut out = std::io::stdout().lock();
-                if st.handed_over {
-                    // Clear for the first frame (ratatui's buffer is empty, so
-                    // it writes every cell it uses).
-                    let _ = out.write_all(b"\x1b[2J");
-                } else {
-                    let _ = out.write_all(RESTORE);
-                }
+                let _ = out.write_all(bytes);
                 let _ = out.flush();
             }
             if st.handlers {
@@ -328,7 +410,13 @@ mod signals {
                 libc::sigemptyset(&mut new.sa_mask);
                 let mut prev: libc::sigaction = std::mem::zeroed();
                 if libc::sigaction(sig, &new, &mut prev) == 0 {
-                    old.push((sig, prev));
+                    if prev.sa_sigaction == libc::SIG_IGN {
+                        // The signal was ignored (a background job, `trap ''`):
+                        // keep it ignored, so the splash never makes it fatal.
+                        libc::sigaction(sig, &prev, std::ptr::null_mut());
+                    } else {
+                        old.push((sig, prev));
+                    }
                 }
             }
         }
@@ -411,6 +499,49 @@ mod tests {
             let s = Step::from_u8(v);
             assert_eq!(s as u8, v);
             assert!(!s.words().is_empty());
+        }
+    }
+
+    /// A panic never clears the screen: the message printed after it must
+    /// stay. Only a normal hand-over clears.
+    #[test]
+    fn a_panic_writes_no_clear() {
+        for drew in [false, true] {
+            for handed in [false, true] {
+                assert!(!panic_bytes(drew, handed)
+                    .windows(4)
+                    .any(|w| w == b"\x1b[2J"));
+                assert_eq!(exit_bytes(drew, handed, true), b"", "silent exit");
+            }
+        }
+        assert_eq!(panic_bytes(true, false), LEAVE, "leave the splash's screen");
+        assert_eq!(panic_bytes(true, true), b"", "the TUI hook leaves it");
+        assert_eq!(exit_bytes(true, true, false), b"\x1b[2J");
+        assert_eq!(exit_bytes(true, false, false), RESTORE);
+    }
+
+    /// A signal that was ignored stays ignored while the splash is up; one
+    /// that was not gets the restore handler.
+    #[cfg(unix)]
+    #[test]
+    fn an_ignored_signal_stays_ignored() {
+        // SAFETY: reading and setting dispositions; restored below.
+        unsafe {
+            let disp = |sig| {
+                let mut cur: libc::sigaction = std::mem::zeroed();
+                libc::sigaction(sig, std::ptr::null(), &mut cur);
+                cur.sa_sigaction
+            };
+            let before_int = libc::signal(libc::SIGINT, libc::SIG_IGN);
+            assert!(install_signals());
+            assert_eq!(disp(libc::SIGINT), libc::SIG_IGN, "SIGINT made fatal");
+            assert_ne!(
+                disp(libc::SIGTERM),
+                libc::SIG_DFL,
+                "SIGTERM got the handler"
+            );
+            restore_signals();
+            libc::signal(libc::SIGINT, before_int);
         }
     }
 

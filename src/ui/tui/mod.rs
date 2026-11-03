@@ -39,7 +39,7 @@ pub use perf::PerfMeter;
 mod arcade_traffic;
 pub(crate) mod proc_scan;
 pub(crate) mod reset_status;
-pub(crate) mod splash;
+pub mod splash;
 pub mod throttle;
 pub use throttle::ThrottleState;
 mod backdrop_bus;
@@ -779,6 +779,9 @@ pub fn install_panic_hook() {
             log::warn!("process scan thread panicked: {info}");
             return;
         }
+        // Stop the start-up splash first, without letting it clear the
+        // screen, so it cannot draw over or erase the message below.
+        splash::abandon();
         let _ = disable_raw_mode();
         let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableFocusChange);
         crate::logging::enable_stderr();
@@ -1009,7 +1012,8 @@ fn run_app(
     // runs on a worker thread (`scan_handle`) from the start, so the first
     // frame does not wait for it: the first scan is asked for here and its
     // result is applied by the loop like every later one, a few hundred
-    // milliseconds in (see `startup` for the measurements).
+    // milliseconds in (`TT_TOPLIKE_STARTUP_LOG` writes the timeline; see
+    // `crate::startup_log`).
     crate::ui::tui::splash::set_step(crate::ui::tui::splash::Step::ScanningProcesses);
     let mut scan_handle = proc_scan::ScannerHandle::spawn_with(proc_scan::Scanner::new);
     scan_handle.request(proc_scan::ScanRequest {
@@ -7956,6 +7960,12 @@ fn bar_color(frac: f32) -> ratatui::style::Color {
     }
 }
 
+/// The process panel's note before the first process scan has landed. It
+/// travels in the `remote_note` slot and is not added to the header. With no
+/// rows, the panel shows it as the empty-state line, so the panel does not
+/// say "No processes ..." before any scan has run.
+const SCANNING_NOTE: &str = "scanning processes";
+
 /// Render the process panel over cross-platform `ProcRow`s.
 ///
 /// Always shows PID / CPU% / MEM / NAME and an inference tag. When a row carries
@@ -7965,12 +7975,6 @@ fn bar_color(frac: f32) -> ratatui::style::Color {
 /// is attached (`chip_flags`, see `grid_bus::ChipFlags::process_row`), so a
 /// headless host's model shows; otherwise, on Linux, from a matching
 /// `serving_metrics` entry (port / health / model / tok-s).
-/// The process panel's note before the first process scan has landed. It
-/// travels in the `remote_note` slot and is not added to the header. With no
-/// rows, the panel shows it as the empty-state line, so the panel does not
-/// say "No processes ..." before any scan has run.
-const SCANNING_NOTE: &str = "scanning processes";
-
 fn render_process_panel(
     f: &mut Frame,
     area: Rect,

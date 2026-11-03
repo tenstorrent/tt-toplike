@@ -384,7 +384,6 @@ impl GozerSource {
             let spawned = std::thread::Builder::new()
                 .name("gozer-status".into())
                 .spawn(move || {
-                    crate::workload::background::lower_priority();
                     let _ = tx.send(runner.status_json(COMMAND_TIMEOUT));
                 });
             self.last_start = Some(now);

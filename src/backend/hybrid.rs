@@ -499,8 +499,6 @@ impl HybridBackend {
         let handle = thread::Builder::new()
             .name("hybrid-smbus-reader".to_string())
             .spawn(move || {
-                // tt-smi is enrichment; it waits for the render thread.
-                crate::workload::background::lower_priority();
                 log::debug!("HybridBackend: SMBUS reader thread started");
 
                 if resolved_path.is_empty() {
@@ -1782,12 +1780,16 @@ mod slow_tt_smi_tests {
     use super::*;
     use crate::models::{Device, Telemetry};
     use std::os::unix::fs::PermissionsExt;
-    use std::sync::mpsc;
-    use std::time::Instant;
 
-    /// Upper bound for waiting on an event; each wait ends as soon as the
-    /// event happens. It guards against a deadlock and asserts no timing.
-    const DEADLINE: Duration = Duration::from_secs(20);
+    /// Wait until the reader has deposited a snapshot. No deadline: each
+    /// step is a handshake with the fake (it answers once the gate opens),
+    /// so a broken reader shows as a hung test under the CI job timeout, and
+    /// no wall-clock bound can fail on a loaded box.
+    fn wait_for_deposit(b: &HybridBackend) {
+        while b.smbus_generation.load(Ordering::Acquire) == 0 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 
     fn backend_with_one_chip() -> HybridBackend {
         let mut b = HybridBackend::new("unused");
@@ -1814,7 +1816,8 @@ mod slow_tt_smi_tests {
         b
     }
 
-    /// Write the fake: it waits until `gate` exists, then prints `json`.
+    /// Write the fake: it records its nice value in `nice`, waits until
+    /// `gate` exists, then prints `json`.
     fn fake_tt_smi(dir: &std::path::Path, json: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let gate = dir.join("gate");
         let doc = dir.join("snapshot.json");
@@ -1823,7 +1826,9 @@ mod slow_tt_smi_tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nwhile [ ! -e '{}' ]; do sleep 0.02; done\ncat '{}'\n",
+                "#!/bin/sh\ncut -d' ' -f19 /proc/$$/stat > '{}'\n\
+                 while [ ! -e '{}' ]; do sleep 0.02; done\ncat '{}'\n",
+                dir.join("nice").display(),
                 gate.display(),
                 doc.display()
             ),
@@ -1844,18 +1849,10 @@ mod slow_tt_smi_tests {
         }]}"#;
         let (script, gate) = fake_tt_smi(td.path(), json);
 
-        // Start the reader on a helper thread, so a reader that waited for
-        // tt-smi fails this test at the deadline and does not hang it.
+        // The gate is closed, so tt-smi cannot answer: a reader that waited
+        // for the first answer would never return from here.
         let mut b = backend_with_one_chip();
-        let (tx, rx) = mpsc::channel();
-        let path = script.to_string_lossy().into_owned();
-        std::thread::spawn(move || {
-            b.start_reader(path);
-            let _ = tx.send(b);
-        });
-        let mut b = rx
-            .recv_timeout(DEADLINE)
-            .expect("start_reader returned while tt-smi was still silent");
+        b.start_reader(script.to_string_lossy().into_owned());
 
         // tt-smi has not answered (the gate is closed): the first update
         // serves sysfs alone.
@@ -1867,15 +1864,17 @@ mod slow_tt_smi_tests {
 
         // Let tt-smi answer and wait for the deposit.
         std::fs::write(&gate, "").unwrap();
-        let t = Instant::now();
-        while b.smbus_generation.load(Ordering::Acquire) == 0 && t.elapsed() < DEADLINE {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert!(
-            b.smbus_generation.load(Ordering::Acquire) > 0,
-            "tt-smi answered"
-        );
+        wait_for_deposit(&b);
         b.update().unwrap();
+
+        // tt-smi ran at this thread's priority: a child must not inherit a
+        // lowered nice value (see `workload::background`).
+        let nice: i32 = std::fs::read_to_string(td.path().join("nice"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(nice, crate::workload::background::thread_nice());
 
         // Its fields joined; what sysfs showed is still there and the same.
         assert_eq!(b.devices().len(), 1);

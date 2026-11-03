@@ -106,7 +106,6 @@ impl CatalogRefresher {
         let _ = std::thread::Builder::new()
             .name("tt-catalog-refresh".into())
             .spawn(move || {
-                crate::workload::background::lower_priority();
                 loop {
                     if let Some(json) = curl_fetch(CATALOG_URL) {
                         let models = parse_catalog(&json);

@@ -22,13 +22,13 @@ Navigate the list with `↑`/`↓`; `k` silences the selected process's alerts a
 ## Detection Methods
 
 - **Driver holder lists**: Reads `/proc/driver/tenstorrent/<N>/pids`, where tt-kmd lists every pid holding device `N` open. The file is world readable, so this covers other users, root and processes in containers. It is the same file `tt-smi` reads for its `processes[]`.
-- **Device files**: Reads the `/proc/[pid]/fd/` links of processes this user owns and may read, for `/dev/tenstorrent/*` targets. Links are read with `readlink`; nothing is opened or traced. At most 16,384 links per process and 32,768 processes per scan are read.
+- **Device files**: Reads the `/proc/[pid]/fd/` links of processes this user owns and may read, for `/dev/tenstorrent/*` targets. Links are read with `readlink`; nothing is opened or traced. At most 16,384 links per process, 32,768 processes per scan, and 4,096 pids or 64 KiB per driver list are read; past the process bound the scan stops and counts the rest.
 - **Hugepages**: Reads `/proc/[pid]/maps` for 1GB (`hugepages-1G`, `pagesize-1GB`) and 2MB hugepage entries
 - **Shared resources**: Catches processes with Tenstorrent-related memory mappings but no specific device file
 
 ## Device numbers and device indices
 
-`/dev/tenstorrent/<N>` is the driver's number for a card. The backends number devices by PCI address. tt-toplike maps one to the other through `/sys/class/tenstorrent/tenstorrent!<N>/device`, which names the card's PCI address, so a process is shown on the right chip even when the driver numbers the cards in another order. A number with no class directory is used as the index itself.
+`/dev/tenstorrent/<N>` is the driver's number for a card. The backends number devices by PCI address. tt-toplike maps one to the other through `/sys/class/tenstorrent/tenstorrent!<N>/device`, which names the card's PCI address, so a process is shown on the right chip even when the driver numbers the cards in another order. When no number maps (no class directory), each number is used as the index itself. When some map, a number that does not is left out, so two cards never share an index.
 
 ## Blending with tt-smi
 

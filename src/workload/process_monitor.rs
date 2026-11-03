@@ -19,7 +19,7 @@
 //! bounds.
 
 use crate::workload::device_holders::{
-    self, DeviceMap, FdRead, Holder, HolderSource, ProcHolders, ScanCounts,
+    self, DeviceMap, FdRead, Holder, HolderSource, Limits, ProcHolders, ScanCounts,
 };
 use procfs::process::Process;
 use std::collections::HashMap;
@@ -42,6 +42,10 @@ pub struct ProcessInfo {
     pub hugepages_2m: usize,
     /// Whether this process has Tenstorrent-related memory mappings
     pub has_tt_mapping: bool,
+    /// A tt-smi snapshot run (`tt-smi -s`), decided on the full argv before
+    /// `cmdline` is cut for display. See
+    /// [`crate::workload::device_holders::is_snapshot_tool`].
+    pub snapshot_tool: bool,
 }
 
 /// Process monitor that scans for processes using Tenstorrent devices
@@ -79,11 +83,29 @@ pub struct ProcessMonitor {
     complete: bool,
     /// Why the last scan's answer may be partial.
     counts: ScanCounts,
+    /// How much one scan reads.
+    limits: Limits,
 }
 
-/// Most processes one scan looks at. The rest are counted in
-/// [`ScanCounts::proc_truncated`].
-pub const MAX_PROCESSES: usize = 32768;
+/// Most characters of a command line kept for display.
+const CMDLINE_DISPLAY_CHARS: usize = 60;
+
+/// The display command line (cut to [`CMDLINE_DISPLAY_CHARS`]) and whether the
+/// process is a tt-smi snapshot run, decided on the whole argv first: a
+/// venv interpreter path can push `-s` past the cut.
+fn command_line(process: &Process, comm: &str) -> (String, bool) {
+    let argv = process.cmdline().unwrap_or_default();
+    let full = argv.join(" ");
+    let snapshot = crate::workload::device_holders::is_snapshot_tool(comm, &full);
+    let shown = if argv.is_empty() {
+        format!("[pid {}]", process.pid())
+    } else {
+        full.chars().take(CMDLINE_DISPLAY_CHARS).collect()
+    };
+    (shown, snapshot)
+}
+
+pub use crate::workload::device_holders::MAX_PROCESSES;
 
 impl ProcessMonitor {
     /// Create a new process monitor
@@ -100,7 +122,14 @@ impl ProcessMonitor {
             root: root.into(),
             complete: false,
             counts: ScanCounts::default(),
+            limits: Limits::default(),
         }
+    }
+
+    /// The same monitor with other bounds (tests make them small).
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
     }
 
     /// Update the process list by scanning `/proc`, using each device number
@@ -128,19 +157,23 @@ impl ProcessMonitor {
         self.shared_processes.clear();
         self.counts = ScanCounts::default();
 
-        let driver = device_holders::read_driver_pids(&self.root);
+        let driver = device_holders::read_driver_pids_with(&self.root, &self.limits);
         self.complete = driver.is_some();
         let driver = driver.unwrap_or_default();
 
         // Attempt to scan all processes, but don't fail on errors
         // Some processes may be inaccessible due to permissions
         match procfs::process::all_processes_with_root(&self.root) {
-            Ok(processes) => {
-                for (i, process_result) in processes.enumerate() {
-                    if i == MAX_PROCESSES {
-                        self.counts.proc_truncated += 1;
-                        continue;
+            Ok(mut processes) => {
+                let mut looked_at = 0usize;
+                while let Some(process_result) = processes.next() {
+                    if looked_at >= self.limits.processes {
+                        // Stop here. The rest are counted, not read: each
+                        // costs one directory open and nothing else.
+                        self.counts.proc_truncated = 1 + processes.count();
+                        break;
                     }
+                    looked_at += 1;
                     let Ok(process) = process_result else {
                         // Listed, then gone before it could be opened.
                         self.counts.vanished += 1;
@@ -195,16 +228,12 @@ impl ProcessMonitor {
             self.counts.vanished += 1;
             return;
         };
-        let cmdline = process
-            .cmdline()
-            .ok()
-            .filter(|a| !a.is_empty())
-            .map(|a| a.join(" "))
-            .unwrap_or_else(|| format!("[pid {}]", process.pid()));
+        let (cmdline, snapshot_tool) = command_line(process, &stat.comm);
         self.push(ProcessInfo {
             pid: process.pid(),
             name: stat.comm,
-            cmdline: cmdline.chars().take(60).collect(),
+            cmdline,
+            snapshot_tool,
             device_indices: map.indices_for(held),
             hugepages_1g: 0,
             hugepages_2m: 0,
@@ -236,8 +265,10 @@ impl ProcessMonitor {
 
         // Check file descriptors for /dev/tenstorrent/* devices. Links are
         // read with `readlink` only; nothing is opened.
-        let (fds, truncated) =
-            device_holders::fd_numbers(&self.root.join(process.pid().to_string()).join("fd"));
+        let (fds, truncated) = device_holders::fd_numbers_with(
+            &self.root.join(process.pid().to_string()).join("fd"),
+            self.limits.fds_per_process,
+        );
         if truncated {
             self.counts.fd_truncated += 1;
         }
@@ -300,22 +331,13 @@ impl ProcessMonitor {
                 self.counts.vanished += 1;
                 return;
             };
-            let cmdline = process
-                .cmdline()
-                .ok()
-                .and_then(|args| {
-                    if args.is_empty() {
-                        None
-                    } else {
-                        Some(args.join(" "))
-                    }
-                })
-                .unwrap_or_else(|| format!("[pid {}]", process.pid()));
+            let (cmdline, snapshot_tool) = command_line(process, &stat.comm);
 
             self.push(ProcessInfo {
                 pid: process.pid(),
                 name: stat.comm,
-                cmdline: cmdline.chars().take(60).collect(), // Truncate long commands
+                cmdline,
+                snapshot_tool,
                 device_indices: map.indices_for(&numbers),
                 hugepages_1g,
                 hugepages_2m,
@@ -340,6 +362,7 @@ impl ProcessMonitor {
                     devices: p.device_indices.clone(),
                     name: p.name.clone(),
                     cmdline: p.cmdline.clone(),
+                    snapshot_tool: p.snapshot_tool,
                     source: HolderSource::Proc,
                 })
                 .collect(),
@@ -452,6 +475,7 @@ mod proc_guard_tests {
 #[cfg(all(test, target_os = "linux"))]
 mod fake_root_tests {
     use super::*;
+    use crate::workload::device_holders::Limits;
     use std::collections::BTreeMap;
     use std::fs;
     use std::os::unix::fs::{symlink, PermissionsExt};
@@ -474,6 +498,81 @@ mod fake_root_tests {
         for (i, l) in links.iter().enumerate() {
             symlink(l, d.join("fd").join((i + 3).to_string())).unwrap();
         }
+    }
+
+    /// Like [`fake_pid`], with this exact argv in `cmdline`.
+    fn fake_pid_argv(root: &Path, pid: i32, comm: &str, argv: &[&str], links: &[&str]) {
+        fake_pid(root, pid, comm, links);
+        let mut text = argv.join("\0");
+        text.push('\0');
+        fs::write(root.join(pid.to_string()).join("cmdline"), text).unwrap();
+    }
+
+    /// The `(pid, device)` pairs the Wafer Waffler gets from a scan of `root`.
+    fn waffler_pairs(root: &Path) -> Vec<(i64, usize)> {
+        let mut pm = ProcessMonitor::with_root(root);
+        pm.update();
+        crate::workload::device_holders::opened_pairs(&pm.holders(&DeviceMap::identity()).holders)
+    }
+
+    const ALL_FOUR: [&str; 4] = [
+        "/dev/tenstorrent/0",
+        "/dev/tenstorrent/1",
+        "/dev/tenstorrent/2",
+        "/dev/tenstorrent/3",
+    ];
+
+    /// This box's `tt-smi -s`: a Python venv interpreter running the script,
+    /// 75 characters, so a 60-character cut loses the `-s`. Through the real
+    /// scan it must still not be a process event, nor at any longer length.
+    #[test]
+    fn a_long_tt_smi_snapshot_command_line_is_still_a_snapshot_run() {
+        let long_venv = format!("/opt/{}/venv/bin/python3", "x".repeat(300));
+        let cases: [Vec<&str>; 3] = [
+            vec![
+                "/home/ttuser/.tenstorrent-venv/bin/python",
+                "/home/ttuser/.local/bin/tt-smi",
+                "-s",
+            ],
+            vec![long_venv.as_str(), "/usr/local/bin/tt-smi", "--snapshot"],
+            vec![
+                long_venv.as_str(),
+                "/usr/local/bin/tt-smi",
+                "-s",
+                "-f",
+                "/tmp/out.json",
+            ],
+        ];
+        for (i, argv) in cases.iter().enumerate() {
+            let td = tempfile::tempdir().unwrap();
+            fake_pid_argv(td.path(), 4_100_041 + i as i32, "tt-smi", argv, &ALL_FOUR);
+            assert!(
+                argv.join(" ").chars().count() > 60,
+                "case {i} is longer than the old cut"
+            );
+            assert_eq!(waffler_pairs(td.path()), vec![], "case {i}: {argv:?}");
+        }
+    }
+
+    /// A long command line that is not a snapshot run still counts.
+    #[test]
+    fn a_long_workload_command_line_is_still_a_process_event() {
+        let td = tempfile::tempdir().unwrap();
+        let model = format!("--model=/models/{}", "m".repeat(200));
+        fake_pid_argv(
+            td.path(),
+            4_100_051,
+            "python3",
+            &[
+                "/home/ttuser/.tenstorrent-venv/bin/python",
+                "-m",
+                "vllm",
+                "serve",
+                &model,
+            ],
+            &["/dev/tenstorrent/1"],
+        );
+        assert_eq!(waffler_pairs(td.path()), vec![(4_100_051, 1)]);
     }
 
     fn driver(root: &Path, lists: &[(u32, &[i32])]) {
@@ -528,6 +627,39 @@ mod fake_root_tests {
                 (4_100_003, vec![0], "worker".to_string()),
             ]
         );
+    }
+
+    /// Past the process bound the scan stops, and counts every process it
+    /// left unread.
+    #[test]
+    fn the_process_bound_stops_the_scan_and_counts_the_rest() {
+        let td = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            fake_pid(td.path(), 4_100_061 + i, "w", &["/dev/tenstorrent/0"]);
+        }
+        let mut pm = ProcessMonitor::with_root(td.path()).with_limits(Limits {
+            processes: 2,
+            ..Limits::default()
+        });
+        pm.update();
+        assert_eq!(pm.holders(&DeviceMap::identity()).holders.len(), 2);
+        assert_eq!(pm.counts().proc_truncated, 3);
+    }
+
+    /// The fd bound reaches the real scan: a process with more links than
+    /// the bound is read up to it and counted.
+    #[test]
+    fn the_fd_bound_reaches_the_scan() {
+        let td = tempfile::tempdir().unwrap();
+        let links: Vec<String> = (0..6).map(|_| "/dev/null".to_string()).collect();
+        let links: Vec<&str> = links.iter().map(String::as_str).collect();
+        fake_pid(td.path(), 4_100_071, "many", &links);
+        let mut pm = ProcessMonitor::with_root(td.path()).with_limits(Limits {
+            fds_per_process: 4,
+            ..Limits::default()
+        });
+        pm.update();
+        assert_eq!(pm.counts().fd_truncated, 1);
     }
 
     #[test]
