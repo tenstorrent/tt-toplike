@@ -137,7 +137,7 @@ enum DisplayMode {
     Die3d,
     /// Saga: a hero's quest through a dungeon the machine's signals build
     /// (`saga_view`). Entered with `S` only (`saga_view::ENTRY_KEY`;
-    /// excluded from the `v` cycle like Die 3D, and not in `--rotate` yet);
+    /// excluded from the `v` cycle, and not in `--rotate` yet);
     /// `S` toggles back out to `prev_mode`, as does Esc. While active it
     /// also takes `y` for "why" (see `saga_key_for`).
     Saga,
@@ -160,9 +160,9 @@ const ALL_DISPLAY_MODES: [DisplayMode; 12] = [
     DisplayMode::Saga,
 ];
 
-/// The `v` rotation. `InferenceMonitor`, `HivemindSweeper`, `Training` and
-/// `Die3d` are entry-key-only modes and are never cycled into; a `v` pressed while
-/// one of them is active leaves to `Insights`.
+/// The `v` rotation. `HivemindSweeper`, `Training` and `Saga` are entry-key-only
+/// modes and are never cycled into; a `v` pressed while one of them is active
+/// leaves to `Insights`. Die 3D is the last stop before the cycle wraps.
 fn next_display_mode(m: DisplayMode) -> DisplayMode {
     match m {
         DisplayMode::Insights | DisplayMode::Grid => DisplayMode::MemoryFlow,
@@ -175,14 +175,14 @@ fn next_display_mode(m: DisplayMode) -> DisplayMode {
         // cycling with `v` (the monitor is also still a direct toggle via
         // `i`).
         DisplayMode::Defrag => DisplayMode::InferenceMonitor,
-        DisplayMode::InferenceMonitor => DisplayMode::Insights,
+        DisplayMode::InferenceMonitor => DisplayMode::Die3d,
         // HivemindSweeper and Training are deliberately excluded from the
         // `v`-cycle rotation (only reachable via `~`/`t`), but `v` is a
         // global hotkey, so pressing it while either happens to be active
         // still needs to leave cleanly.
         DisplayMode::HivemindSweeper => DisplayMode::Insights,
         DisplayMode::Training => DisplayMode::Insights,
-        // Die3d is entered with `3` only, so `v` from it leaves the same way.
+        // Die3d ends the cycle (it is also entered directly with `3`).
         DisplayMode::Die3d => DisplayMode::Insights,
         // Saga too, with `S`.
         DisplayMode::Saga => DisplayMode::Insights,
@@ -10283,16 +10283,22 @@ mod display_mode_tests {
         assert_eq!(mode, DisplayMode::Insights);
     }
 
-    /// The unattended rotation (`--rotate`, `R`) visits Die 3D, the `v` cycle
-    /// does not: `v` stays a short manual loop and `3` is the way in.
+    /// Both the unattended rotation (`--rotate`, `R`) and the `v` cycle visit
+    /// Die 3D, and `v` from Die 3D wraps to Insights.
     #[test]
-    fn die3d_is_in_the_unattended_rotation_but_not_the_v_cycle() {
+    fn die3d_is_in_the_unattended_rotation_and_the_v_cycle() {
         assert!(ROTATION.contains(&DisplayMode::Die3d));
         let mut m = DisplayMode::Insights;
+        let mut seen = false;
         for _ in 0..12 {
             m = next_display_mode(m);
-            assert_ne!(m, DisplayMode::Die3d, "`v` must not cycle into Die3d");
+            seen |= m == DisplayMode::Die3d;
         }
+        assert!(seen, "`v` must cycle into Die3d");
+        assert_eq!(
+            next_display_mode(DisplayMode::InferenceMonitor),
+            DisplayMode::Die3d
+        );
     }
 
     #[test]

@@ -18,6 +18,7 @@ Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
 ### 0.16.0
+- The `v` cycle now ends at the Wafer Waffler (Die 3D) before it wraps to Insights; `3` still opens it directly.
 - Saga, phase 1: a view where a hero quests through a dungeon built from the machine's own signals.
   Press `S` in any view, or start with `--mode saga`; `S` or `Esc` leaves. Each chip is a floor, and a
   Blackhole floor follows the chip's tile grid. A model becoming ready, a reset, a model going away, a
