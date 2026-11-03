@@ -884,6 +884,137 @@ fn the_party_keys_are_not_taken_outside_saga() {
     assert!(die3d_key_for(DisplayMode::Die3d, NEXT_FLOOR_KEY).is_some());
 }
 
+/// The body of the function `name` in `mod.rs`: from `\nfn name(` to the
+/// first line that is a lone `}` at the left margin.
+fn mod_fn(name: &str) -> &'static str {
+    let src = include_str!("mod.rs");
+    let start = src
+        .find(&format!("\nfn {name}("))
+        .unwrap_or_else(|| panic!("{name} in mod.rs"));
+    let end = src[start..].find("\n}\n").map_or(src.len(), |i| start + i);
+    &src[start..end]
+}
+
+/// The party view's state (the focus, the zoom, the draw size) never
+/// reaches the saga driver, so it cannot change a story or a digest (party
+/// Review Focus item 2). `run_tui` needs a terminal, so the wiring is
+/// pinned by its source, as `season_tag_tests` pins the season tag. The
+/// scan covers:
+///
+/// * every line of `run_app` that names `saga_focus` or `saga_zoom`: each
+///   is one of the declarations, the key arm's assignments or the two
+///   fields of the one `SagaFlags` literal, so neither is ever an argument
+///   of a call on the driver (`saga`, `d`) or of anything else;
+/// * the one `SagaFlags` literal in `run_app`: its fields are exactly the
+///   stopped flag, "why", the focus and the zoom (no backend count), and
+///   the flags go straight to `ui_saga`;
+/// * every line of `ui_saga`: its only call on the driver is
+///   `d.published()`, and the flags and the draw size go only to
+///   `render_saga` and `render_saga_off`;
+/// * the driver's public methods (`src/saga/driver.rs`): exactly its
+///   lifecycle and its read-only views, and the file never names
+///   `SagaFlags`.
+///
+/// `the_core_never_reads_view_state` (`saga_party_tests.rs`) checks the
+/// other half: drawing a state leaves its saga's digest alone.
+#[test]
+fn view_state_never_reaches_the_saga_driver() {
+    let run_app = mod_fn("run_app");
+    let allowed = [
+        "let mut saga_focus: usize = 0;",
+        "let mut saga_zoom = false;",
+        "saga_focus = saga_focus_step(saga_focus, floors, false);",
+        "saga_focus = saga_focus_step(saga_focus, floors, true);",
+        "saga_view::ZOOM_KEY => saga_zoom = !saga_zoom,",
+        "focus: saga_focus,",
+        "zoom: saga_zoom,",
+    ];
+    let mut named = 0;
+    for line in run_app.lines().map(str::trim) {
+        if line.starts_with("//") {
+            continue;
+        }
+        if line.contains("saga_focus") || line.contains("saga_zoom") {
+            named += 1;
+            assert!(
+                allowed.contains(&line),
+                "run_app passes the party view's state on: {line}"
+            );
+        }
+    }
+    assert_eq!(named, allowed.len(), "every allowed line is there once");
+
+    // The one SagaFlags literal, its fields, and where it goes.
+    let lit = "let flags = saga_view::SagaFlags {";
+    assert_eq!(
+        run_app.matches("SagaFlags").count(),
+        1,
+        "one SagaFlags in run_app"
+    );
+    let at = run_app.find(lit).expect("the SagaFlags literal");
+    let rest = &run_app[at + lit.len()..];
+    let close = rest.find("};").expect("the literal closes");
+    let fields: Vec<&str> = rest[..close]
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            "stopped: false,",
+            "why: saga_why,",
+            "focus: saga_focus,",
+            "zoom: saga_zoom,"
+        ]
+    );
+    let after = rest[close + 2..].trim_start();
+    assert!(
+        after.starts_with("ui_saga("),
+        "the flags go to ui_saga: {after:.40}"
+    );
+
+    // ui_saga reads the driver once and hands the view state to the view.
+    let ui = mod_fn("ui_saga");
+    for line in ui.lines().map(str::trim) {
+        if line.contains("d.") && !line.starts_with("//") {
+            assert_eq!(line, "let p = d.published();", "ui_saga's driver calls");
+        }
+        let call = line.contains("render_saga(") || line.contains("render_saga_off(");
+        if line.contains("size") && !line.starts_with("let size") {
+            assert!(call, "the draw size goes only to the view: {line}");
+        }
+    }
+    assert!(ui.contains("saga_view::render_saga(&p.state, party, flags, size, frame)"));
+
+    // The driver takes nothing from a view.
+    let driver = include_str!("../../saga/driver.rs");
+    // Its methods: the indented `pub fn`s of its `impl` blocks.
+    let mut pubs: Vec<&str> = driver
+        .lines()
+        .filter_map(|l| l.strip_prefix("    pub fn "))
+        .map(|l| l.split('(').next().unwrap_or(""))
+        .collect();
+    pubs.sort_unstable();
+    assert_eq!(
+        pubs,
+        [
+            "published",
+            "spawn",
+            "spawn_remote",
+            "state",
+            "stop",
+            "stopped",
+            "wait_for"
+        ],
+        "the driver's public functions"
+    );
+    assert!(
+        !driver.contains("SagaFlags"),
+        "the driver never sees the view's flags"
+    );
+}
+
 // ---- Walls, fog and memory ---------------------------------------------------
 
 /// A floor `w` x `h` of open cells, with walls at `walls`. One room covers
