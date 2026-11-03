@@ -80,7 +80,22 @@ fn empty_state(label: Label) -> SagaState {
 fn draw(state: &SagaState, flags: SagaFlags, area: (u16, u16), frame: u64) -> Vec<Line<'static>> {
     let mut memory = SagaMemory::new();
     memory.observe(state);
-    render_saga(state, &memory, flags, area, frame)
+    render_lead(state, &memory, flags, area, frame)
+}
+
+/// The single-floor drawing of the lead's floor ([`render_floor`] with
+/// [`lead_seat`]) from one floor's memory: what [`render_saga`] draws for a
+/// world of one floor, and what it drew for every world before the party.
+/// The tests of the floor drawing itself (fog, walls, sizes, the status
+/// row) use it on the two-floor busy log, whose full view is now the grid.
+fn render_lead(
+    state: &SagaState,
+    memory: &SagaMemory,
+    flags: SagaFlags,
+    area: (u16, u16),
+    frame: u64,
+) -> Vec<Line<'static>> {
+    render_floor(state, memory, lead_seat(state), flags, area, frame)
 }
 
 /// A saga fed the first `n` busy records and a memory that observed the
@@ -98,6 +113,9 @@ fn saga_and_memory(n: usize) -> (Saga, SagaMemory) {
 const PLAIN: SagaFlags = SagaFlags {
     stopped: false,
     why: false,
+    focus: 0,
+    zoom: false,
+    chips: 0,
 };
 
 /// The text of each line, spans joined.
@@ -202,6 +220,7 @@ fn the_waiting_screen_says_when_the_story_stopped() {
     let flags = SagaFlags {
         stopped: true,
         why: false,
+        ..SagaFlags::default()
     };
     let all = text(&tc(|| draw(&state, flags, (80, 23), 0))).join("\n");
     assert!(all.contains("the story has stopped"), "{all}");
@@ -265,6 +284,7 @@ fn every_size_from_0x0_to_500x200_draws_without_overflow() {
     let why = SagaFlags {
         stopped: true,
         why: true,
+        ..SagaFlags::default()
     };
     let widths: Vec<u16> = (0..=130)
         .chain((131..=500).step_by(17))
@@ -313,6 +333,7 @@ fn no_row_ends_in_a_right_side_border() {
             SagaFlags {
                 stopped: true,
                 why: true,
+                ..SagaFlags::default()
             },
         ),
     ];
@@ -337,7 +358,7 @@ fn no_row_ends_in_a_right_side_border() {
         for (state, memory, flags) in runs {
             for w in 1..=240u16 {
                 for h in [1u16, 2, 5, 6, 11, 12, 23, 24, 39, 60] {
-                    let frame = render_saga(state, memory, flags, (w, h), 3);
+                    let frame = render_lead(state, memory, flags, (w, h), 3);
                     for (i, line) in frame.iter().enumerate() {
                         let mut col = 0usize;
                         for ch in text(std::slice::from_ref(line))[0].chars() {
@@ -401,6 +422,7 @@ fn the_stopped_banner_shows_over_the_last_state() {
     let stopped = SagaFlags {
         stopped: true,
         why: false,
+        ..SagaFlags::default()
     };
     for (w, h) in [(80, 23), (140, 39)] {
         let on = text(&tc(|| draw(&state, stopped, (w, h), 0))).join("\n");
@@ -521,24 +543,24 @@ fn an_out_of_range_floor_is_the_first_floor_in_title_and_map() {
     let first_title = tc(|| {
         let mut s = state.clone();
         s.party[0].hero.floor = 0;
-        title_row(&s, &look, 200, false).line()
+        title_row(&s, &look, 200, false, Some(lead_seat(&s).floor)).line()
     });
     let first_map = tc(|| {
         let mut s = state.clone();
         s.party[0].hero.floor = 0;
-        map_rows(&s, &memory, &look, 140, 30, 0)
+        map_rows(&s, &memory, &look, lead_seat(&s), 140, 30, 0)
             .into_iter()
             .map(Row::line)
             .collect::<Vec<_>>()
     });
     state.party[0].hero.floor = u8::try_from(n + 3).unwrap_or(u8::MAX);
     assert_eq!(hero_floor_index(&state), Some(0));
-    let title = tc(|| title_row(&state, &look, 200, false).line());
+    let title = tc(|| title_row(&state, &look, 200, false, Some(lead_seat(&state).floor)).line());
     let all = text(std::slice::from_ref(&title)).join("");
     assert!(all.contains(&format!("floor 1 of {n}")), "{all}");
     assert_eq!(text(&[title]), text(&[first_title]));
     let map = tc(|| {
-        map_rows(&state, &memory, &look, 140, 30, 0)
+        map_rows(&state, &memory, &look, lead_seat(&state), 140, 30, 0)
             .into_iter()
             .map(Row::line)
             .collect::<Vec<_>>()
@@ -592,6 +614,7 @@ fn generated_mode_shows_no_real_name() {
                     let flags = SagaFlags {
                         stopped: false,
                         why,
+                        ..SagaFlags::default()
                     };
                     for (w, h) in [(80, 23), (140, 39)] {
                         let t = text(&draw(saga.state(), flags, (w, h), 0));
@@ -635,6 +658,7 @@ fn the_chronicle_shows_whole_beats() {
                 let flags = SagaFlags {
                     stopped: false,
                     why,
+                    ..SagaFlags::default()
                 };
                 for size in [(80, 23), (140, 39)] {
                     let t = text(&draw(saga.state(), flags, size, 0));
@@ -670,6 +694,7 @@ fn the_why_toggle_shows_each_beats_cause() {
     let why = SagaFlags {
         stopped: false,
         why: true,
+        ..SagaFlags::default()
     };
     let on = text(&tc(|| draw(&state, why, (140, 39), 0))).join("\n");
     // The line wraps at the pane's width: its start is what must be on screen.
@@ -725,6 +750,20 @@ fn the_overlays_fit_their_row_targets() {
             overlay_rows_needed(lines.len())
         );
         assert!(lines.len() > 3, "{kind:?} has Saga text");
+        // The party's rows (Task A.7): its keys in Help and Explain, its
+        // colours and roster in the legend.
+        let all: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        let want: &[&str] = match kind {
+            OverlayPanel::Help => &["[ ]", "focus the floor", "zoom"],
+            OverlayPanel::Legend => &["THE PARTY", "F1 ", "F8 ", "roster"],
+            OverlayPanel::Explain => &["F3", "z shows the focused floor"],
+        };
+        for w in want {
+            assert!(all.contains(w), "{kind:?} has {w:?}: {all}");
+        }
     }
 }
 
@@ -793,6 +832,57 @@ fn the_entry_key_is_free() {
             );
         }
     }
+}
+
+/// The party view's keys (`[`, `]` and `z`, Task A.7) are free in Saga:
+/// no arm of the key handler names them, no view's own key table takes
+/// them in Saga, the backdrop key is another, and `saga_key_for` takes
+/// them there. They move the focus one floor back or on, wrapping.
+#[test]
+fn the_party_keys_are_free_in_saga_mode() {
+    use super::super::{
+        arcade_step_for, die3d_key_for, saga_focus_step, saga_key_for, DisplayMode,
+    };
+    let keys = handler_keys();
+    for k in [PREV_FLOOR_KEY, NEXT_FLOOR_KEY, ZOOM_KEY] {
+        assert!(
+            !keys.iter().any(|(c, _)| *c == k),
+            "an arm of the handler takes {k:?}"
+        );
+        assert_ne!(crate::animation::backdrop::KEY, k);
+        assert_ne!(k, ENTRY_KEY);
+        assert_ne!(k, WHY_KEY);
+        assert_eq!(die3d_key_for(DisplayMode::Saga, k), None);
+        assert!(arcade_step_for(DisplayMode::Saga, k).is_none());
+        assert!(saga_key_for(DisplayMode::Saga, k), "Saga takes {k:?}");
+    }
+    // `]` on, `[` back, wrapping at both ends; a focus left past the end
+    // by a smaller world starts from the last floor.
+    assert_eq!(saga_focus_step(0, 4, true), 1);
+    assert_eq!(saga_focus_step(3, 4, true), 0);
+    assert_eq!(saga_focus_step(0, 4, false), 3);
+    assert_eq!(saga_focus_step(9, 4, false), 2);
+    assert_eq!(saga_focus_step(9, 4, true), 0);
+    assert_eq!(saga_focus_step(0, 1, true), 0);
+    assert_eq!(saga_focus_step(0, 0, false), 0);
+}
+
+/// Outside Saga the party keys keep their meanings: `saga_key_for` takes
+/// none of them in another mode, so Die 3D still changes boards with `[`
+/// and `]`.
+#[test]
+fn the_party_keys_are_not_taken_outside_saga() {
+    use super::super::{die3d_key_for, saga_key_for, DisplayMode};
+    for m in super::super::ALL_DISPLAY_MODES {
+        if m == DisplayMode::Saga {
+            continue;
+        }
+        for k in [PREV_FLOOR_KEY, NEXT_FLOOR_KEY, ZOOM_KEY] {
+            assert!(!saga_key_for(m, k), "{m:?} takes {k:?}");
+        }
+    }
+    assert!(die3d_key_for(DisplayMode::Die3d, PREV_FLOOR_KEY).is_some());
+    assert!(die3d_key_for(DisplayMode::Die3d, NEXT_FLOOR_KEY).is_some());
 }
 
 // ---- Walls, fog and memory ---------------------------------------------------
@@ -912,6 +1002,7 @@ fn whole_floor_cells(state: &SagaState, memory: &SagaMemory) -> (Vec<Vec<(char, 
         state,
         memory,
         &look,
+        lead_seat(state),
         floor.w as usize + 1,
         floor.h as usize,
         0,
@@ -1062,11 +1153,12 @@ fn every_drawn_glyph_is_one_column_wide() {
     let why = SagaFlags {
         stopped: false,
         why: true,
+        ..SagaFlags::default()
     };
     tc(|| {
         for (w, h) in [(80, 23), (140, 39), (200, 59)] {
             for flags in [PLAIN, why] {
-                for line in render_saga(&state, &memory, flags, (w, h), 4) {
+                for line in render_lead(&state, &memory, flags, (w, h), 4) {
                     for span in &line.spans {
                         for c in span.content.chars() {
                             assert_eq!(UnicodeWidthChar::width(c), Some(1), "{c:?} at {w}x{h}");
@@ -1104,7 +1196,7 @@ fn the_map_keeps_its_last_column_blank() {
         tc(|| {
             // The map pane alone, narrower than the floor so it scrolls.
             for cols in [20usize, 39, 52, 53, 54] {
-                for row in map_rows(&s, &memory, &look, cols, 30, 0) {
+                for row in map_rows(&s, &memory, &look, lead_seat(&s), cols, 30, 0) {
                     let t: String = row
                         .line()
                         .spans
@@ -1118,7 +1210,7 @@ fn the_map_keeps_its_last_column_blank() {
                 }
             }
             for (w, h) in [(80u16, 23u16), (140, 39), (200, 59)] {
-                for line in render_saga(&s, &memory, PLAIN, (w, h), 0) {
+                for line in render_lead(&s, &memory, PLAIN, (w, h), 0) {
                     let t: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
                     if t.chars().count() == w as usize {
                         let last = t.chars().last().unwrap();
@@ -1141,7 +1233,7 @@ fn truecolor_and_256_colour_frames_both_draw_the_map() {
         colors::with_truecolor(on, || {
             colors::with_theme(Theme::Default, || {
                 let (cells, _) = whole_floor_cells(state, &memory);
-                let frame = render_saga(state, &memory, PLAIN, (140, 39), 0);
+                let frame = render_lead(state, &memory, PLAIN, (140, 39), 0);
                 (cells, frame)
             })
         })
@@ -1233,16 +1325,17 @@ fn golden_frames() -> Vec<u64> {
         let half = busy().len() / 2;
         let mut out = Vec::new();
         for cut in [half, busy().len()] {
-            let (saga, memory) = saga_and_memory(cut);
+            let (saga, party) = saga_and_party(&busy()[..cut]);
             for why in [false, true] {
                 let flags = SagaFlags {
                     stopped: false,
                     why,
+                    ..SagaFlags::default()
                 };
                 for size in GOLDEN_SIZES {
                     out.push(frame_hash(&render_saga(
                         saga.state(),
-                        &memory,
+                        &party,
                         flags,
                         size,
                         5,
@@ -1287,15 +1380,22 @@ fn golden_frames() -> Vec<u64> {
 /// windows chip B owns). The chronicle these frames show changed, and the
 /// generator's later draws with it. All eight frames moved. The solo frames
 /// below did not.
+///
+/// Re-pinned in Task A.7 (the party view). The busy log's worlds have two
+/// floors, so the view now draws them as two tiles (two side by side at
+/// both sizes), each from its own floor's memory, with floor tags on the
+/// chronicle's member lines and the party's keys on the status row. The
+/// frames are drawn from a `PartyMemory` built over the log, as the TUI
+/// draws them. All eight frames moved. The solo frames below did not.
 const GOLDEN: [u64; 8] = [
-    2823822441598792507,
-    10011667271693178222,
-    15588437517750267014,
-    314746947548751076,
-    14101431863956101849,
-    13731776209435916461,
-    9677398856115480327,
-    11316589869872957457,
+    7571048964412272060,
+    4777154084262469764,
+    3287335782298783969,
+    10812401408321409080,
+    9204706333865428866,
+    4711706745706634224,
+    472239707984335236,
+    11715230383402559548,
 ];
 
 /// Prints the hashes for [`GOLDEN`]. Run with
@@ -1331,22 +1431,18 @@ fn solo() -> &'static [Record] {
 /// the state after every record.
 fn solo_frames() -> Vec<u64> {
     tc(|| {
-        let mut saga = Saga::new(config(NameMode::Real, Label::Mock));
-        let mut memory = SagaMemory::new();
-        for r in solo() {
-            saga.feed(r);
-            memory.observe(saga.state());
-        }
+        let (saga, party) = saga_and_party(solo());
         let mut out = Vec::new();
         for why in [false, true] {
             let flags = SagaFlags {
                 stopped: false,
                 why,
+                ..SagaFlags::default()
             };
             for size in GOLDEN_SIZES {
                 out.push(frame_hash(&render_saga(
                     saga.state(),
-                    &memory,
+                    &party,
                     flags,
                     size,
                     5,
@@ -1396,7 +1492,7 @@ fn the_status_row_names_the_target_from_the_core() {
         q.reason.entity = tt_toplike_bus::EntityKey::model("demo-sage");
         q.target_label = Some("Hand-Label".to_string());
     }
-    assert_eq!(quest_target(&state).as_deref(), Some("Hand-Label"));
+    assert_eq!(quest_target(state.lead()).as_deref(), Some("Hand-Label"));
     let row = |state: &SagaState| {
         let lines = text(&tc(|| draw(state, PLAIN, (140, 39), 0)));
         lines.last().cloned().unwrap_or_default()
@@ -1433,12 +1529,12 @@ fn the_status_row_names_the_target_from_the_core() {
             saga.feed(r);
             let state = saga.state();
             assert_eq!(
-                quest_target(state),
+                quest_target(state.lead()),
                 old(state),
                 "{names:?} at tick {}",
                 state.tick
             );
-            named += quest_target(state).is_some() as usize;
+            named += quest_target(state.lead()).is_some() as usize;
         }
         assert!(named > 0, "{names:?}: the solo hero never visits a sage");
     }
@@ -1606,7 +1702,7 @@ fn the_panel_map_and_hud_are_the_views_own() {
         };
         let lines = render_saga_panel(&feed, &memory, (39, 11), 5);
         let look = Look::for_state(state, &memory);
-        let want: Vec<Line<'static>> = map_rows(state, &memory, &look, 39, 10, 5)
+        let want: Vec<Line<'static>> = map_rows(state, &memory, &look, lead_seat(state), 39, 10, 5)
             .into_iter()
             .map(Row::line)
             .collect();
@@ -1614,7 +1710,8 @@ fn the_panel_map_and_hud_are_the_views_own() {
         // Where the whole status row fits up to the quest (70 columns
         // here), the HUD is the status row after the mark.
         let wide = render_saga_panel(&feed, &memory, (70, 16), 5);
-        let status = text(&[status_row(state, &memory, &look, 63).line()]).remove(0);
+        let status = text(&[status_row(state, &memory, &look, 63, lead_seat(state), false).line()])
+            .remove(0);
         let hud = text(&wide[..1]).remove(0);
         assert_eq!(hud, format!(" (mock){status}"));
     })
@@ -1628,7 +1725,7 @@ fn a_narrow_hud_keeps_the_hero_the_vitality_and_the_quest() {
     let state = busy_state();
     let name = state.party[0].hero.name.clone();
     let first = name.split(' ').next().unwrap().to_string();
-    let quest = quest_text(&state);
+    let quest = quest_text(state.lead());
     let pct = format!(
         "{:>3.0}%",
         state.party[0].hero.vitality.clamp(0.0, 1.0) * 100.0
@@ -1750,7 +1847,7 @@ fn panel_cost() {
     for size in [(70u16, 16u16), (140, 39)] {
         let t = std::time::Instant::now();
         for f in 0..n {
-            std::hint::black_box(render_saga(state, &memory, PLAIN, size, f));
+            std::hint::black_box(render_lead(state, &memory, PLAIN, size, f));
         }
         let view = t.elapsed() / n as u32;
         let t = std::time::Instant::now();
@@ -1998,6 +2095,12 @@ fn heat_is_per_floor() {
 /// before the party: the solo log draws the same frames from either, and
 /// the memory the view picks for the lead (`PartyMemory::lead`) is that
 /// floor's.
+///
+/// Both sides run the same `observe_floor`, so this guards the
+/// `PartyMemory` wrapper and `render_saga`'s choice of the single-floor path
+/// (a party memory that started over on every update, or a one-floor world
+/// sent to the grid, turns it red). "The same as before the party" is
+/// guarded by the pinned frames, `solo_frames_are_the_pre_party_frames`.
 #[test]
 fn a_party_memory_of_one_equals_a_saga_memory() {
     tc(|| {
@@ -2009,8 +2112,8 @@ fn a_party_memory_of_one_equals_a_saga_memory() {
             party.observe(saga.state());
             memory.observe(saga.state());
             if n % 97 == 0 {
-                let a = render_saga(saga.state(), party.floor(0).unwrap(), PLAIN, (80, 23), 5);
-                let b = render_saga(saga.state(), &memory, PLAIN, (80, 23), 5);
+                let a = render_saga(saga.state(), &party, PLAIN, (80, 23), 5);
+                let b = render_lead(saga.state(), &memory, PLAIN, (80, 23), 5);
                 assert_eq!(frame_hash(&a), frame_hash(&b), "record {n}");
             }
         }
@@ -2023,10 +2126,13 @@ fn a_party_memory_of_one_equals_a_saga_memory() {
             let flags = SagaFlags {
                 stopped: false,
                 why,
+                ..SagaFlags::default()
             };
             for size in GOLDEN_SIZES {
-                let a = render_saga(state, lead, flags, size, 5);
-                let b = render_saga(state, &memory, flags, size, 5);
+                let a = render_saga(state, &party, flags, size, 5);
+                let b = render_lead(state, lead, flags, size, 5);
+                let c = render_lead(state, &memory, flags, size, 5);
+                assert_eq!(frame_hash(&b), frame_hash(&c), "{size:?} why {why}");
                 assert_eq!(frame_hash(&a), frame_hash(&b), "{size:?} why {why}");
             }
         }

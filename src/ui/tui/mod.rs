@@ -140,7 +140,8 @@ enum DisplayMode {
     /// (`saga_view`). Entered with `S` only (`saga_view::ENTRY_KEY`;
     /// excluded from the `v` cycle, and not in `--rotate` yet);
     /// `S` toggles back out to `prev_mode`, as does Esc. While active it
-    /// also takes `y` for "why" (see `saga_key_for`).
+    /// also takes `y` for "why", `[` `]` for the party's focus and `z` for
+    /// zoom (see `saga_key_for`).
     Saga,
 }
 
@@ -277,12 +278,35 @@ fn saga_toggle(mode: DisplayMode, prev_mode: DisplayMode) -> (DisplayMode, Displ
     }
 }
 
-/// Whether `c` is a Saga key in `mode`: only `y` (`saga_view::WHY_KEY`,
-/// which shows each chronicle line's cause), and only in Saga. Elsewhere `y`
-/// keeps its meaning (Insights confirms a kill with it). The handler checks
-/// this before its general character arms.
+/// Whether `c` is a Saga key in `mode`: `y` (`saga_view::WHY_KEY`, which
+/// shows each chronicle line's cause), `[` and `]` (move the party view's
+/// focus) and `z` (zoom), and only in Saga. Elsewhere they keep their
+/// meaning (Insights confirms a kill with `y`, Die 3D changes boards with
+/// `[` and `]`). The handler checks this before its general character
+/// arms.
 fn saga_key_for(mode: DisplayMode, c: char) -> bool {
-    mode == DisplayMode::Saga && c == saga_view::WHY_KEY
+    mode == DisplayMode::Saga
+        && [
+            saga_view::WHY_KEY,
+            saga_view::PREV_FLOOR_KEY,
+            saga_view::NEXT_FLOOR_KEY,
+            saga_view::ZOOM_KEY,
+        ]
+        .contains(&c)
+}
+
+/// The party view's focus after `[` (`next` false) or `]` (`next` true) in
+/// a world of `floors` floors: one floor back or on, wrapping at the ends.
+/// A focus left past the last floor by a smaller world starts from the
+/// last floor.
+fn saga_focus_step(focus: usize, floors: usize, next: bool) -> usize {
+    let floors = floors.max(1);
+    let focus = focus.min(floors - 1);
+    if next {
+        (focus + 1) % floors
+    } else {
+        (focus + floors - 1) % floors
+    }
 }
 
 /// The Die 3D key `c` stands for in `mode`, if the view takes it. Outside
@@ -1190,11 +1214,16 @@ fn run_app(
     // itself runs on the driver's thread (`saga`).
     let mut saga_why = false;
     let mut saga_frame: u64 = 0;
+    // The party view's focused floor (`[` and `]`) and whether it draws
+    // that floor alone (`z`). View state only: the story never sees it.
+    let mut saga_focus: usize = 0;
+    let mut saga_zoom = false;
     // What the Saga view remembers between frames, one memory per floor:
     // the cells its heroes have lit, their trails and the floor's chip's
     // temperature (`saga_view::PartyMemory`). Fed on every update in every
     // view, so the maps are still remembered when Saga comes back on
-    // screen. The view and the arcade panel draw the lead's floor.
+    // screen. The view draws a tile per floor from it; the arcade panel
+    // draws the lead's floor.
     let mut saga_party = saga_view::PartyMemory::new();
     // The Die 3D inset beside the Insights process table (see
     // `insights_inset_rect`), with its own clock. It exists only on Insights,
@@ -2047,12 +2076,17 @@ fn run_app(
             if let Some(d) = saga {
                 let state = d.published().state;
                 saga_party.observe(&state);
+                // Each device's bus key is built once per update, so a
+                // floor's lookup compares keys and allocates nothing.
+                let keys: Vec<(tt_toplike_bus::EntityKey, usize)> = backend
+                    .devices()
+                    .iter()
+                    .map(|dev| (tt_toplike_bus::EntityKey::chip(&dev.bus_id), dev.index))
+                    .collect();
                 saga_party.set_heats(&state, |chip| {
-                    backend
-                        .devices()
-                        .iter()
-                        .find(|dev| tt_toplike_bus::EntityKey::chip(&dev.bus_id) == *chip)
-                        .and_then(|dev| backend.telemetry(dev.index))
+                    keys.iter()
+                        .find(|(key, _)| key == chip)
+                        .and_then(|&(_, index)| backend.telemetry(index))
                         .and_then(|t| t.asic_temperature)
                 });
             }
@@ -2461,12 +2495,19 @@ fn run_app(
                             }
                         }
                         DisplayMode::Saga => {
+                            let flags = saga_view::SagaFlags {
+                                stopped: false,
+                                why: saga_why,
+                                focus: saga_focus,
+                                zoom: saga_zoom,
+                                chips: backend.devices().len(),
+                            };
                             ui_saga(
                                 f,
                                 saga,
                                 &saga_party,
                                 loaded_config.saga.enabled,
-                                saga_why,
+                                flags,
                                 saga_frame,
                             );
                         }
@@ -3210,11 +3251,27 @@ fn run_app(
                                 force_redraw = true;
                             }
                             // ── Saga keys ──────────────────────────────────
-                            // `y` shows or hides each chronicle line's
-                            // cause, in Saga only (`saga_key_for`), so
-                            // Insights keeps `y` for its kill dialog.
+                            // In Saga only (`saga_key_for`): `y` shows or
+                            // hides each chronicle line's cause (Insights
+                            // keeps `y` for its kill dialog), `[` and `]`
+                            // move the party view's focus from floor to
+                            // floor (Die 3D keeps them for its boards), and
+                            // `z` draws the focused floor alone or goes back
+                            // to the grid.
                             KeyCode::Char(c) if saga_key_for(display_mode, c) => {
-                                saga_why = !saga_why;
+                                let floors = saga
+                                    .map_or(1, |d| d.published().state.world.floors.len())
+                                    .max(1);
+                                match c {
+                                    saga_view::PREV_FLOOR_KEY => {
+                                        saga_focus = saga_focus_step(saga_focus, floors, false);
+                                    }
+                                    saga_view::NEXT_FLOOR_KEY => {
+                                        saga_focus = saga_focus_step(saga_focus, floors, true);
+                                    }
+                                    saga_view::ZOOM_KEY => saga_zoom = !saga_zoom,
+                                    _ => saga_why = !saga_why,
+                                }
                                 force_redraw = true;
                             }
                             KeyCode::Char(saga_view::ENTRY_KEY) => {
@@ -4302,7 +4359,7 @@ fn ui_saga(
     saga: Option<&crate::saga::SagaDriver>,
     party: &saga_view::PartyMemory,
     enabled: bool,
-    why: bool,
+    flags: saga_view::SagaFlags,
     frame: u64,
 ) {
     let full = f.area();
@@ -4317,9 +4374,9 @@ fn ui_saga(
             let p = d.published();
             let flags = saga_view::SagaFlags {
                 stopped: p.stopped,
-                why,
+                ..flags
             };
-            saga_view::render_saga(&p.state, party.lead(&p.state), flags, size, frame)
+            saga_view::render_saga(&p.state, party, flags, size, frame)
         }
         None => saga_view::render_saga_off(size, enabled),
     };

@@ -328,7 +328,8 @@ teal `#74C5DF`, green `#6FABA0`, yellow `#F6BC42` and orange `#FA512E`.
 * `src/saga/config.rs`: the `[saga]` section as the core's config. `src/saga/digest.rs`: `--saga-digest`.
 * `src/ui/tui/saga_view.rs`: the view draws the snapshot and never feeds the core. Its
   `PartyMemory` lives in the TUI's loop: one `SagaMemory` per floor (the lit cells, a trail for
-  each hero on the floor, and the heat of the floor's chip). The view draws the lead's floor.
+  each hero on the floor, and the heat of the floor's chip). A world of one floor draws as
+  before; with more floors the view draws a tile per floor, each from its own memory.
   `render_saga_panel` draws the arcade panel from the same pieces (`map_rows`, the status row,
   `chronicle_rows`); the arcade keeps the last `PanelFeed` and a copy of the memory
   (`ArcadeVisualization::set_saga`).
