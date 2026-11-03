@@ -24,8 +24,10 @@
 #![forbid(unsafe_code)]
 
 pub mod event;
+pub mod hero;
 pub mod maze;
 pub mod observe;
+pub mod quest;
 pub mod rng;
 pub mod seed;
 pub mod stats;

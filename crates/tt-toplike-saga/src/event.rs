@@ -4,14 +4,19 @@
 //! `WorldBorn` is `saga.world_born` and `WorldEnded` is `saga.world_ended`.
 //! The core only makes these values. Publishing them is the host's job.
 //!
-//! This module starts with the world events (Task 1.8). Later tasks add
-//! variants to the same enum: hero and quest events (`HeroBorn`,
-//! `QuestStarted`, `QuestDone`, Task 1.9), the chronicle's `Beat` (Task
-//! 1.10), and monster and treasure events (phase 2). To add one, add a
+//! The world events come from Task 1.8 and the hero and quest events
+//! (`HeroBorn`, `QuestStarted`, `QuestDone`) from Task 1.9. Later tasks add
+//! variants to the same enum: the chronicle's `Beat` (Task 1.10), and
+//! monster and treasure events (phase 2). To add one, add a
 //! variant with named fields, starting with `world: u64` so every event says
 //! which world it belongs to. The enum derives only `Debug`, `Clone` and
 //! `PartialEq`, so a later variant may carry an `f32` intensity without
 //! changing the derives.
+
+use tt_toplike_bus::EntityKey;
+
+use crate::hero::Cause;
+use crate::quest::Verb;
 
 /// The kind of place a world is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,7 +39,8 @@ pub enum EndWhy {
     Reset,
     /// The machine was quiet for a whole season.
     Season,
-    /// The hero died. Task 1.9 raises this one; the lifecycle never does.
+    /// The hero died. Hero death arrives with combat in phase 2 (plan task
+    /// 2.2); the lifecycle never raises this one.
     HeroDied,
     /// A signal asked for a new world while this one was current: a model
     /// became ready, or a training run started. The new world took this
@@ -53,4 +59,17 @@ pub enum SagaEvent {
     /// World `world` ended. When a new world follows at once, its
     /// `WorldBorn` comes right after this event.
     WorldEnded { world: u64, why: EndWhy },
+    /// A hero named `name` was born in world `world`, on floor `floor` (an
+    /// index into the world's floors).
+    HeroBorn { world: u64, name: String, floor: u8 },
+    /// The hero set out on a quest: `verb`, about `target`, because of
+    /// `reason`.
+    QuestStarted {
+        world: u64,
+        verb: Verb,
+        target: Option<EntityKey>,
+        reason: Cause,
+    },
+    /// The hero reached the goal of its `verb` quest.
+    QuestDone { world: u64, verb: Verb },
 }
