@@ -8,10 +8,17 @@
 //!
 //! # The rules
 //!
-//! * **First world.** Born at the first tick at which the seed pool has seen
-//!   at least 64 samples (its ring is full), or at tick 5, whichever comes
-//!   first (ledger ruling R11). It is a dungeon on every chip. A signal that
-//!   births a world (below) may come earlier; that world is then the first.
+//! * **The seed gate.** No world is born before the gate opens. It opens at
+//!   the first tick at which the seed pool has seen at least 64 samples (its
+//!   ring is full), or at tick 5, whichever comes first (ledger rulings R11
+//!   and R13). A world seeded from a ring that is still mostly zeros would
+//!   repeat on every fresh start.
+//! * **First world.** Born at the tick the gate opens. It is a dungeon on
+//!   every chip, unless a signal that births a world (a model ready or a
+//!   training start, below) arrived while the gate was closed. That birth
+//!   is queued and takes the plain dungeon's place at the gate tick. A later
+//!   queued birth replaces an earlier one, and a queued model's dungeon is
+//!   dropped if that model goes away before the gate opens.
 //! * **A model reaches `Ready`.** The current world ends
 //!   ([`EndWhy::Superseded`]) and a dungeon is born on the model's chips. A
 //!   repeated `Ready` for the model whose dungeon this already is changes
@@ -136,6 +143,18 @@ pub struct Lifecycle {
     /// The tick of the latest training sample while a run is tracked.
     /// `None` when no run is tracked.
     training: Option<u64>,
+    /// A birth asked for while the seed gate was still closed. It is born at
+    /// the gate tick in place of the plain first dungeon.
+    pending: Option<Pending>,
+}
+
+/// A queued birth: the world a signal asked for before the seed gate opened.
+#[derive(Debug, Clone)]
+struct Pending {
+    biome: Biome,
+    chips: Vec<EntityKey>,
+    /// The model whose `Ready` asked for it, if one did.
+    model: Option<EntityKey>,
 }
 
 impl Lifecycle {
@@ -149,6 +168,7 @@ impl Lifecycle {
             model: None,
             last_activity: 0,
             training: None,
+            pending: None,
         }
     }
 
@@ -193,7 +213,6 @@ impl Lifecycle {
                 if self.world.is_some() && self.model.as_ref() == Some(model) {
                     return;
                 }
-                self.end(EndWhy::Superseded, out);
                 // An empty chip list says nothing about where the model
                 // runs, so its dungeon covers every chip.
                 let chips = if chips.is_empty() {
@@ -201,11 +220,21 @@ impl Lifecycle {
                 } else {
                     chips.clone()
                 };
-                self.birth(Biome::Dungeon, chips, at, out);
-                self.model = Some(model.clone());
+                let want = Pending {
+                    biome: Biome::Dungeon,
+                    chips,
+                    model: Some(model.clone()),
+                };
+                self.supersede(want, at, out);
             }
             Event::ModelGone { model } => {
-                if self.world.is_some() && self.model.as_ref() == Some(model) {
+                if self.world.is_none() {
+                    // Before the gate opens: drop a queued dungeon for a
+                    // model that is no longer there.
+                    if self.pending.as_ref().and_then(|p| p.model.as_ref()) == Some(model) {
+                        self.pending = None;
+                    }
+                } else if self.model.as_ref() == Some(model) {
                     self.end(EndWhy::ModelDown, out);
                     self.birth(Biome::Dungeon, all_chips(at.topo), at, out);
                 }
@@ -235,16 +264,39 @@ impl Lifecycle {
             self.training = Some(at.tick);
         }
         if starts {
-            self.end(EndWhy::Superseded, out);
-            self.birth(Biome::Forge, all_chips(at.topo), at, out);
+            let want = Pending {
+                biome: Biome::Forge,
+                chips: all_chips(at.topo),
+                model: None,
+            };
+            self.supersede(want, at, out);
         }
+    }
+
+    /// A signal asks for a new world. Before the first world is born the
+    /// request is queued until the seed gate opens. After that the current
+    /// world ends ([`EndWhy::Superseded`]) and the new one is born at once.
+    fn supersede(&mut self, want: Pending, at: &Birth, out: &mut Vec<SagaEvent>) {
+        if self.world.is_none() {
+            self.pending = Some(want);
+            return;
+        }
+        self.end(EndWhy::Superseded, out);
+        self.birth(want.biome, want.chips, at, out);
+        self.model = want.model;
     }
 
     /// Handles a tick: the first world, the forge timeout and the season.
     fn on_tick(&mut self, at: &Birth, out: &mut Vec<SagaEvent>) {
         let Some(world) = &self.world else {
             if at.seeds.pushed() >= FULL_POOL || at.tick >= FIRST_WORLD_BY_TICK {
-                self.birth(Biome::Dungeon, all_chips(at.topo), at, out);
+                let want = self.pending.take().unwrap_or_else(|| Pending {
+                    biome: Biome::Dungeon,
+                    chips: all_chips(at.topo),
+                    model: None,
+                });
+                self.birth(want.biome, want.chips, at, out);
+                self.model = want.model;
             }
             return;
         };

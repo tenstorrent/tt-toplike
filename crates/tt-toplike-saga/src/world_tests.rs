@@ -161,7 +161,7 @@ fn the_first_world_is_born_by_tick_five() {
 }
 
 #[test]
-fn a_full_pool_births_the_first_world_at_the_first_tick() {
+fn a_full_pool_births_the_first_world_at_the_first_tick_after_it_fills() {
     let mut run = Run::new(12_000);
     for i in 0..63 {
         assert_eq!(
@@ -169,15 +169,93 @@ fn a_full_pool_births_the_first_world_at_the_first_tick() {
             vec![]
         );
     }
-    // 63 samples are not enough, and samples alone never birth a world.
+    // 63 samples are one short of a full ring, so tick 1 births nothing.
+    assert_eq!(run.tick(), vec![]);
     assert!(run.lc.world().is_none());
-    run.feed(sample(C1, "toplike.power", 99.0));
+    // Sample 64 fills the ring. Samples never birth a world on their own;
+    // the next tick (tick 2, well before tick 5) does.
+    assert_eq!(run.feed(sample(C1, "toplike.power", 99.0)), vec![]);
     assert!(run.lc.world().is_none());
-    // Sample 64 has filled the ring; the next tick (tick 1) births.
     assert_eq!(run.tick(), vec![born(1, Biome::Dungeon)]);
-    assert_eq!(run.world().born_tick, 1);
+    assert_eq!(run.world().born_tick, 2);
     // The seed is the pool's draw at the birth's ordinal.
     assert_eq!(run.world().seed, run.seeds.draw(run.ordinal));
+}
+
+#[test]
+fn an_early_model_ready_waits_for_the_seed_gate() {
+    let mut run = Run::new(12_000);
+    run.feed(sample(C1, "toplike.power", 1.0));
+    // Before tick 1, with one sample in the pool: the gate is closed, so the
+    // ready is queued and nothing is born.
+    let ready = Event::ModelReady {
+        model: EntityKey::model("llama"),
+        chips: vec![chip(C2)],
+    };
+    assert_eq!(run.event(ready), vec![]);
+    assert!(run.lc.world().is_none());
+    for _ in 0..4 {
+        assert_eq!(run.tick(), vec![]);
+    }
+    // Tick 5 opens the gate and births the queued dungeon on the model's
+    // chips, seeded from the gate tick's ordinal.
+    assert_eq!(run.tick(), vec![born(1, Biome::Dungeon)]);
+    let w = run.world();
+    assert_eq!(w.born_tick, 5);
+    assert_eq!(w.chips, vec![chip(C2)]);
+    assert_eq!(w.seed, run.seeds.draw(run.ordinal));
+    assert_eq!(w.floors[0], expected_floor(C2, w.seed));
+    // The dungeon belongs to the model: its going away ends it.
+    let out = run.event(Event::ModelGone {
+        model: EntityKey::model("llama"),
+    });
+    assert_eq!(out[0], ended(1, EndWhy::ModelDown));
+}
+
+#[test]
+fn an_early_training_start_waits_for_the_seed_gate_and_a_later_signal_replaces_an_earlier_one() {
+    let mut run = Run::new(12_000);
+    assert_eq!(
+        run.event(Event::ModelReady {
+            model: EntityKey::model("llama"),
+            chips: vec![chip(C2)],
+        }),
+        vec![]
+    );
+    // The training start comes later, so its forge replaces the queued
+    // dungeon.
+    assert_eq!(run.feed(train_step(1)), vec![]);
+    assert!(run.lc.world().is_none());
+    let mut out = Vec::new();
+    for _ in 0..5 {
+        out.extend(run.tick());
+    }
+    assert_eq!(out, vec![born(1, Biome::Forge)]);
+    assert_eq!(run.world().chips.len(), 3);
+    assert_eq!(run.world().seed, run.seeds.draw(run.ordinal));
+}
+
+#[test]
+fn a_queued_model_that_goes_away_is_not_born() {
+    let mut run = Run::new(12_000);
+    run.event(Event::ModelReady {
+        model: EntityKey::model("llama"),
+        chips: vec![chip(C2)],
+    });
+    // The model leaves before the gate opens, so the plain first world is
+    // born on every chip.
+    assert_eq!(
+        run.event(Event::ModelGone {
+            model: EntityKey::model("llama"),
+        }),
+        vec![]
+    );
+    let mut out = Vec::new();
+    for _ in 0..5 {
+        out.extend(run.tick());
+    }
+    assert_eq!(out, vec![born(1, Biome::Dungeon)]);
+    assert_eq!(run.world().chips.len(), 3);
 }
 
 #[test]

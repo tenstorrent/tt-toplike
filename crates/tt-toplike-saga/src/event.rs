@@ -36,12 +36,12 @@ pub enum EndWhy {
     Season,
     /// The hero died. Task 1.9 raises this one; the lifecycle never does.
     HeroDied,
-    /// A new world began from a signal (a model became ready, or a training
-    /// run started) and took this world's place. The brief's list has no
-    /// cause for this case, so this variant was added for it.
+    /// A signal asked for a new world while this one was current: a model
+    /// became ready, or a training run started. The new world took this
+    /// world's place.
     Superseded,
-    /// This forge's training run stopped sending signals for 600 ticks.
-    /// The brief's list has no cause for this case either.
+    /// This forge's training run sent no training signal for 600 ticks, so
+    /// the run is over and its forge closed.
     RunEnded,
 }
 
