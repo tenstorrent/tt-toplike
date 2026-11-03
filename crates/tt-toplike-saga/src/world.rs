@@ -118,11 +118,14 @@ pub const MAX_CHIPS: usize = 64;
 /// bounds it: see "Bounds" in [`crate::saga`].
 pub const MAX_FLOORS: usize = 32;
 
-/// The signal whose first appearance starts a training run.
-const TRAIN_STEP: &str = "toplike.train.step";
+/// The signal whose first appearance starts a training run. A copy of the
+/// root crate's bus signal name, checked there (see `crate::saga`'s note on
+/// copied names).
+pub const TRAIN_STEP: &str = "toplike.train.step";
 
-/// Every training signal starts with this prefix.
-const TRAIN_PREFIX: &str = "toplike.train.";
+/// Every training signal starts with this prefix (checked against each
+/// bus training signal in the root crate).
+pub const TRAIN_PREFIX: &str = "toplike.train.";
 
 /// One world.
 #[derive(Debug, Clone, PartialEq)]

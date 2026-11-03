@@ -112,6 +112,35 @@ mod tests {
         d.stop();
     }
 
+    /// The saga crate keeps its own copies of the bus signal names it reads
+    /// (it does not depend on the root crate). Each must equal the bus's,
+    /// or a rename in the bus would leave the saga reading a signal no one
+    /// sends: vitality would stay at 1.0, or every floor would fall back to
+    /// the generic shape, and nothing would fail (final review finding M2).
+    #[test]
+    fn the_saga_signal_names_are_the_bus_names() {
+        use crate::bus::signals as bus;
+        use tt_toplike_saga::{hero, saga, world};
+        assert_eq!(saga::HEARTBEAT, bus::HEARTBEAT);
+        assert_eq!(saga::HARVESTING_STATE, bus::HARVESTING_STATE);
+        assert_eq!(saga::ENABLED_TENSIX_COL, bus::ENABLED_TENSIX_COL);
+        assert_eq!(saga::ETH_LIVE_MASK, bus::ETH_LIVE_MASK);
+        assert_eq!(hero::AI_CLOCK, bus::AI_CLOCK_MHZ);
+        assert_eq!(hero::ASIC_TEMPERATURE, bus::ASIC_TEMPERATURE_C);
+        assert_eq!(world::TRAIN_STEP, bus::TRAIN_STEP);
+        for name in [
+            bus::TRAIN_STEP,
+            bus::TRAIN_MAX_STEPS,
+            bus::TRAIN_LOSS,
+            bus::TRAIN_STEP_MS,
+            bus::TRAIN_CPU_PCT,
+            bus::TRAIN_RSS_BYTES,
+            bus::TRAIN_CHIPS,
+        ] {
+            assert!(name.starts_with(world::TRAIN_PREFIX), "{name}");
+        }
+    }
+
     /// An attached TUI whose host is gone runs without a saga.
     #[cfg(unix)]
     #[test]

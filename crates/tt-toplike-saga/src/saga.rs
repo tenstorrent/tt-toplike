@@ -259,14 +259,21 @@ pub const MAX_READY_MODELS: usize = 64;
 /// reaches it.
 pub const MAX_PENDING_EVENTS: usize = 4096;
 
+// The bus signal names below are copies of the root crate's
+// `crate::bus::signals` constants: the saga crate depends only on the bus
+// crate, which does not hold them. A root-crate test checks every copy
+// (`crate::saga::tests::the_saga_signal_names_are_the_bus_names`), so a
+// rename in the bus cannot leave the saga reading a signal that no longer
+// exists.
+
 /// The ARC heartbeat counter on a chip.
-const HEARTBEAT: &str = "toplike.heartbeat";
+pub const HEARTBEAT: &str = "toplike.heartbeat";
 /// The harvesting state register on a chip.
-const HARVESTING_STATE: &str = "toplike.harvesting_state";
+pub const HARVESTING_STATE: &str = "toplike.harvesting_state";
 /// The enabled Tensix column mask on a chip (Blackhole only).
-const ENABLED_TENSIX_COL: &str = "toplike.enabled_tensix_col";
+pub const ENABLED_TENSIX_COL: &str = "toplike.enabled_tensix_col";
 /// The Ethernet live-link mask on a chip.
-const ETH_LIVE_MASK: &str = "toplike.eth.live_mask";
+pub const ETH_LIVE_MASK: &str = "toplike.eth.live_mask";
 
 /// Where the saga's records come from. It decides the mark on the title and
 /// the first chronicle line (spec 3.9).
