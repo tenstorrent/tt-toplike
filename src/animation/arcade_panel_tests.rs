@@ -107,20 +107,13 @@ fn the_die3d_panel_draws_what_the_die3d_view_draws_at_that_size() {
         let v = view(2_000_000_000 + 12 * 33_000_000);
         let want = solo.render(Some(&v), 12.0 / 20.0);
         let got = a.render(&b);
-        // The hero may sit in the panel; compare every other cell.
-        let (hx, hy) = (a.hero_x as usize, a.hero_y as usize);
-        let trail: Vec<(usize, usize)> = a
-            .hero_trail
-            .iter()
-            .map(|t| (t.x as usize, t.y as usize))
-            .chain([(hx, hy)])
-            .collect();
+        // Every cell of the panel is the full view's.
         let g = cells_in(&got, rect);
         let w = cells_of(&want, rect.w, rect.h);
         let mut differ = 0;
-        for (r, (gr, wr)) in g.iter().zip(&w).enumerate() {
-            for (c, (gc, wc)) in gr.iter().zip(wr).enumerate() {
-                if gc != wc && !trail.contains(&(rect.x + c, rect.y + r)) {
+        for (gr, wr) in g.iter().zip(&w) {
+            for (gc, wc) in gr.iter().zip(wr) {
+                if gc != wc {
                     differ += 1;
                 }
             }
@@ -165,18 +158,12 @@ fn the_training_panel_says_no_run_and_draws_a_run_when_there_is_one() {
         tv.update();
         tv.update();
         let want = tv.render(&st, &b);
-        // Every cell but the hero's and its trail's is the Training view's.
-        let trail: Vec<(usize, usize)> = a
-            .hero_trail
-            .iter()
-            .map(|t| (t.x as usize, t.y as usize))
-            .chain([(a.hero_x as usize, a.hero_y as usize)])
-            .collect();
+        // Every cell is the Training view's.
         let (g, w) = (cells_in(&got, rect), cells_of(&want, rect.w, rect.h));
         let mut differ = Vec::new();
         for (r, (gr, wr)) in g.iter().zip(&w).enumerate() {
             for (c, (gc, wc)) in gr.iter().zip(wr).enumerate() {
-                if gc != wc && !trail.contains(&(rect.x + c, rect.y + r)) {
+                if gc != wc {
                     differ.push((c, r, gc.0, wc.0));
                 }
             }
@@ -563,54 +550,6 @@ fn a_spark_is_dropped_when_no_starfield_panel_exists() {
         assert_eq!(read, 1, "the spark is read");
         assert_eq!(with, without, "with no starfield the spark draws nothing");
     })
-}
-
-#[test]
-fn the_hero_ranges_over_the_laid_out_rows() {
-    tc(|| {
-        let (mut a, b) = arcade_with(example_rows(), 160, 50);
-        for _ in 0..200 {
-            a.update(&b);
-        }
-        let bands = a.layout().bands();
-        let y = a.hero_y as usize;
-        assert!(
-            bands.iter().any(|r| r.contains(&y)),
-            "hero at row {y}, bands {bands:?}"
-        );
-        assert!(a.hero_x >= 0.0 && (a.hero_x as usize) < 160);
-    })
-}
-
-#[test]
-fn the_hero_targets_a_known_row_for_a_known_power_on_two_rows() {
-    // Starfield over flow at 100x30: 25 content rows cut 12 / 13, so the
-    // bands are 2..14 (rule 2) and 15..28 (rule 15). With two rows the
-    // middle power range shares the top row.
-    let rows = vec![
-        RowSpec {
-            height: 1,
-            panels: vec![PanelSpec {
-                view: View::Starfield,
-                width: 1,
-            }],
-        },
-        RowSpec {
-            height: 1,
-            panels: vec![PanelSpec {
-                view: View::Flow,
-                width: 1,
-            }],
-        },
-    ];
-    let (a, _) = arcade_with(rows, 100, 30);
-    assert_eq!(a.layout().bands(), [2..14, 15..28]);
-    let y = |power: f32| a.calculate_hero_target(power, 50.0).1;
-    assert_eq!(y(150.0), 14.0, "high power: the end of the top row");
-    assert_eq!(y(80.0), 2.0, "80 W: the top row's rule");
-    assert_eq!(y(55.0), 8.0, "mid power: halfway down the top row");
-    assert_eq!(y(15.0), 21.5, "low power: halfway down the bottom row");
-    assert_eq!(a.calculate_hero_target(55.0, 50.0).0, 49.5, "x is current");
 }
 
 /// What the black fill costs on the wire: bytes a terminal backend writes and

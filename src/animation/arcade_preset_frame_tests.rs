@@ -161,10 +161,6 @@ fn each_preset_draws_every_panel_it_names() {
         for l in presets() {
             let mut a = arcade_of(l, 200, 60, &b);
             busy(&mut a, &b);
-            // The hero and its trail may sit on a rule; put them in the
-            // footer row for this frame.
-            a.hero_trail.clear();
-            (a.hero_x, a.hero_y) = (199.0, 59.0);
             let lines = a.render(&b);
             for (i, row) in l.rows.iter().enumerate() {
                 let laid = &a.layout().rows[i];
@@ -242,48 +238,51 @@ fn each_preset_draws_every_panel_it_names() {
     })
 }
 
-/// A switch keeps the hero where it was (scaled to a new size), the
-/// backdrop, the sensitivity, the bus state and the running state, and
-/// lays the arcade out from the new rows.
+/// A switch keeps the sensitivity, the bus state, the power peak and
+/// baseline, the duel, the frame count and the running state, and lays the
+/// arcade out from the new rows. The same holds at another size.
 #[test]
-fn a_switch_keeps_the_hero_the_backdrop_and_the_bus_state() {
+fn a_switch_keeps_the_running_state_the_duel_and_the_bus_state() {
     tc(|| {
         let b = Fixed::new(2);
         let classic = &presets()[0];
         let deck = crate::animation::arcade_presets::preset("deck").unwrap();
         let mut a = arcade_of(classic, 120, 40, &b);
         a.set_sensitivity(2.5);
+        a.set_serving(Some(crate::workload::inference_server::ServingStats {
+            generation_tps: 42.0,
+            ..crate::workload::inference_server::ServingStats::zeroed()
+        }));
         busy(&mut a, &b);
-        a.hero_x = 30.0;
-        a.hero_y = 20.0;
-        a.hero_target_x = 33.0;
-        a.hero_target_y = 21.0;
         a.bus_now = 77;
         a.bus_state = ArcadeBusState::default();
         a.power_peak = 123.0;
         let frame = a.frame;
-        let trail = a.hero_trail.len();
-        assert!(trail > 0);
+        let duel = format!("{:?}", a.duel);
+        let established = a.baseline.is_established();
+        let row1 = text(&a.render(&b)[1]);
+        assert!(row1.contains('⚔'), "the duel is on Row 1: {row1:?}");
 
         let a = a.relayout(120, 40, &config_of(deck), &b);
         assert_eq!(a.layout(), &arcade_layout::layout(&deck.rows, 120, 40));
         assert_eq!(a.config().rows, deck.rows);
         assert!(a.die3d.is_some() && a.train.is_some());
-        assert_eq!((a.hero_x, a.hero_y), (30.0, 20.0));
-        assert_eq!((a.hero_target_x, a.hero_target_y), (33.0, 21.0));
-        assert_eq!(a.hero_trail.len(), trail);
         assert_eq!(a.sensitivity, 2.5);
         assert_eq!(a.bus_now, 77);
         assert_eq!(a.power_peak, 123.0);
         assert_eq!(a.frame, frame);
+        assert_eq!(format!("{:?}", a.duel), duel, "the duel is kept");
+        assert_eq!(a.baseline.is_established(), established);
+        assert!(a.serving.is_some());
         assert!(!a.services.is_empty() && a.train_state.is_some());
+        // Row 1 is drawn from kept state only, so the switch leaves it alone.
+        assert_eq!(text(&a.render(&b)[1]), row1);
 
-        // At another size the hero's place is scaled.
+        // At another size.
         let a = a.relayout(60, 20, &config_of(classic), &b);
-        assert_eq!((a.hero_x, a.hero_y), (15.0, 10.0));
-        assert_eq!((a.hero_target_x, a.hero_target_y), (16.5, 10.5));
-        assert!(a.hero_trail.iter().all(|t| t.x < 60.0 && t.y < 20.0));
         assert_eq!((a.width(), a.height()), (60, 20));
+        assert_eq!(a.power_peak, 123.0);
+        assert_eq!(format!("{:?}", a.duel), duel);
     })
 }
 
@@ -522,8 +521,6 @@ fn now_serving_draws_the_fed_saga_and_no_right_edge_glyph() {
                 },
                 &memory,
             );
-            a.hero_trail.clear();
-            (a.hero_x, a.hero_y) = ((w - 1) as f32, (h - 1) as f32);
             let lines = a.render(&b);
             let p = *a.layout().find(View::Saga).expect("a Saga panel");
             let rule = text(&lines[a.layout().row_of(&p).unwrap().rule_y]);

@@ -718,17 +718,19 @@ device order, and the arcade draws only on the TUI's own chips. It draws:
 | A purple band sweeping across the chip's share when a loading model has no progress figure | the phase | decoration: it says the model is busy and does not say how far |
 | The share lit teal on a change to `Ready`, grey on a change to `Down`, fading over 2 s | the phase, against the phase the arcade saw last | the phase change is read; the fade is decoration |
 | The model's name, phase, progress and tokens/s at the right of the rule, `~` first for an estimate. When no form of the label fits in the chip's share, an estimate still shows a bare `~` there | `model.label`, `model.phase`, `model.progress`, `model.tokens_per_s`, `model.waiting` | as the source reports them; `~` through `model_text_is_estimated`, the helper the Wafer Waffler and the `i` view use |
-| A ring of `✦` growing from the hero, one glyph per request up to eight | `RequestsCompleted` for a model on one of the TUI's chips | the event is read; the ring's shape, growth and fade are decoration |
-| The snake in the hero duel lunges | the same `RequestsCompleted` events | the event is read |
+| The snake in the hero duel lunges | `RequestsCompleted` for a model on one of the TUI's chips | the event is read |
 | A `*` rising in the chip's share of the starfield, in the `spark_rgb` colours (purple for a compile) | `Spark` and `KernelCompiled` naming one of the TUI's chips | the event is read; where it starts and how it rises are decoration |
 | The chip's share of the rule shown reversed for 0.6 s | a new `reset_seq` for the chip | the reset is read; the flash length is decoration |
-| A faster hero heartbeat | the sum of `model.tokens_per_s` over the ready models on the TUI's chips, when at most 10 s old, smoothed over 2 s | derived from the reported rate |
+
+Until 0.16.5 the arcade also drew a ring of `✦` round its roaming hero for each request
+completed, and quickened the hero's heartbeat with tokens per second. Both went with the hero.
 
 Events already in the world when the arcade first reads it draw nothing, and so do events that
 arrived while the arcade was off screen. The arcade uses the Wafer Waffler's rule and constants for this.
 A model re-announced with an unchanged phase changes nothing. Events with no chip (a `Spark`
 or `KernelCompiled` with `chip: None`) draw nothing, as in the Wafer Waffler. With an empty world the
-arcade draws the frames it drew before the bus; a test pins them by hash.
+arcade draws the frames it drew before the bus (less the hero, since 0.16.5); a test pins them by
+hash.
 
 When the TUI is attached to a headless host, the hero duel's serving stats come from the
 host's world, from the rows the activity lanes use: the first ready model on one of the TUI's
@@ -749,10 +751,7 @@ effects then attach to the panels that exist, by these rules:
 * **Spark and compile particles** rise in the starfield panel's rows below the lanes, in the
   chip's share of the starfield's columns. A layout with no starfield draws no particles; they
   are read and dropped.
-* **Request hits** grow from the hero, wherever it is. They are not drawn above the first
-  content row, or on the lanes when the lanes are in the top row.
-* **The heartbeat** and **the duel's lunge** belong to the hero and the header, which every
-  layout has.
+* **The duel's lunge** belongs to Row 1, which every layout has.
 * **The Wafer Waffler panel** reads the world itself, through `Die3dView::update`, and draws its own
   overlay (flags, fill, pulses, GDDR rows) exactly as the `3` view does. It draws it at the bus
   time of the last update (`Die3dView::render_at`).

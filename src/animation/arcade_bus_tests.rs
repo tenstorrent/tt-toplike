@@ -7,6 +7,13 @@
 //! They were taken by running `golden_hashes` against the commit before the
 //! bus port (the commit that added this file holds only these tests), so a
 //! frame drawn from an empty world must hash to exactly these values.
+//!
+//! In 0.16.5 the roaming hero and its trail were removed, and every pin in
+//! this file was taken again. The new values are the old frames with the
+//! hero's and the trail's glyphs left out: they were computed on 0.16.4 with
+//! only the hero overlay and the hit ring switched off, and the 0.16.5 code
+//! draws exactly those frames. The commit that took them again describes
+//! the audit.
 
 use super::*;
 use crate::models::{Device, SmbusTelemetry, Telemetry};
@@ -148,17 +155,17 @@ pub(super) fn hashes_with(
 }
 
 /// The frames as the arcade drew them before the bus port, at each of
-/// [`SIZES`]. Taken from the commit that added this file.
+/// [`SIZES`], less the hero (see the module doc).
 const GOLDEN: [[u64; 3]; 2] = [
     [
-        2872948124327350074,
-        11781309314807476498,
-        4393317451934106095,
+        8021353625144597835,
+        1476590408980959154,
+        11303730708863001513,
     ],
     [
-        1981102043556422336,
-        3972904484839130755,
-        8297947485695072225,
+        6250265776302580827,
+        3780944662425372459,
+        15047257426043297099,
     ],
 ];
 
@@ -200,7 +207,7 @@ fn the_colour_helpers_pin_the_default_theme() {
 
 // ---- The bus ---------------------------------------------------------------
 
-use crate::animation::arcade_bus::{HEARTBEAT_FRAMES, MAX_HIT_GLYPHS, TPS_STALE_MS};
+use crate::animation::arcade_bus::MAX_HIT_GLYPHS;
 use crate::animation::die3d::overlay::{DOWN_GREY, FLASH_NS, LOAD_PURPLE, SERVE_TEAL, SETTLE_NS};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tt_toplike_bus::{
@@ -395,8 +402,22 @@ fn an_empty_world_draws_the_pinned_frames() {
     }
 }
 
+/// The request hits on the chip in `slot`, as `from_world` kept them.
+fn chip_hits(a: &ArcadeVisualization, slot: usize) -> Vec<crate::animation::arcade_bus::Hit> {
+    a.bus_fx
+        .chips
+        .iter()
+        .find(|c| c.slot == slot)
+        .map(|c| c.hits.clone())
+        .unwrap_or_default()
+}
+
+/// A request seen arriving is a hit on its chip; one already there at the
+/// first read (history), or one that landed while the arcade was away, is
+/// not. The arcade draws no ring for a hit (the ring went with the hero in
+/// 0.16.5): the frame is the quiet one's.
 #[test]
-fn a_request_since_the_last_update_draws_a_hit_and_history_does_not() {
+fn a_request_since_the_last_update_is_a_hit_and_history_is_not() {
     tc(|| {
         let mut base = Bus::new();
         base.ready("m", &[0], None);
@@ -404,40 +425,32 @@ fn a_request_since_the_last_update_draws_a_hit_and_history_does_not() {
         with.requests("m", 3);
         let t0 = 5 * SEC;
 
-        // Seen arriving: the frame differs from the quiet one, with teal
-        // hit glyphs in it.
+        // Seen arriving: a hit of three glyphs on chip 0, and no ring.
         let (mut a, b) = arcade();
         let (mut q, _) = arcade();
         step(&mut a, &b, &base.view(t0));
         step(&mut q, &b, &base.view(t0));
         step(&mut a, &b, &with.view(t0 + TICK));
         step(&mut q, &b, &base.view(t0 + TICK));
+        let hits = chip_hits(&a, 0);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].glyphs, 3, "one glyph per request");
         let (fa, fq) = (a.render(&b), q.render(&b));
-        assert_ne!(fa, fq, "a new request draws a hit");
-        let hits = cells(&fa)
-            .iter()
-            .flatten()
-            .filter(|(c, s)| *c == '✦' && s.fg == fg(SERVE_TEAL))
-            .count();
-        assert_eq!(hits, 3, "one glyph per request");
+        assert_eq!(fa, fq, "the arcade draws no ring for a hit");
+        assert!(!cells(&fa).iter().flatten().any(|(c, _)| *c == '✦'));
 
         // History: the event was already there at the first read.
         let (mut h, _) = arcade();
-        let (mut q, _) = arcade();
         step(&mut h, &b, &with.view(t0));
-        step(&mut q, &b, &base.view(t0));
-        assert_eq!(h.render(&b), q.render(&b), "history draws nothing");
+        assert!(chip_hits(&h, 0).is_empty(), "history is no hit");
 
         // Away: the event landed while the arcade was not updating.
         let (mut w, _) = arcade();
-        let (mut q, _) = arcade();
         for i in 0..5 {
             step(&mut w, &b, &base.view(t0 + i * TICK));
-            step(&mut q, &b, &base.view(t0 + i * TICK));
         }
         step(&mut w, &b, &with.view(t0 + 10 * SEC));
-        step(&mut q, &b, &base.view(t0 + 10 * SEC));
-        assert_eq!(w.render(&b), q.render(&b), "an away event draws nothing");
+        assert!(chip_hits(&w, 0).is_empty(), "an away event is no hit");
     })
 }
 
@@ -451,17 +464,18 @@ fn a_hit_has_one_glyph_per_request_up_to_the_cap() {
         let (mut a, b) = arcade();
         step(&mut a, &b, &base.view(5 * SEC));
         step(&mut a, &b, &with.view(5 * SEC + TICK));
-        assert_eq!(a.bus_fx.hits.len(), 1);
-        assert_eq!(a.bus_fx.hits[0].glyphs, MAX_HIT_GLYPHS);
+        let hits = chip_hits(&a, 0);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].glyphs, MAX_HIT_GLYPHS);
         // The hit is gone a second later.
         step(&mut a, &b, &with.view(5 * SEC + TICK + SEC));
-        assert!(a.bus_fx.hits.is_empty());
+        assert!(chip_hits(&a, 0).is_empty());
     })
 }
 
 /// A `RequestsCompleted` with a count of 0 completed nothing: no hit.
 #[test]
-fn a_request_count_of_zero_draws_no_hit() {
+fn a_request_count_of_zero_is_no_hit() {
     tc(|| {
         let mut base = Bus::new();
         base.ready("m", &[0], None);
@@ -470,7 +484,7 @@ fn a_request_count_of_zero_draws_no_hit() {
         let (mut a, b) = arcade();
         step(&mut a, &b, &base.view(5 * SEC));
         step(&mut a, &b, &with.view(5 * SEC + TICK));
-        assert!(a.bus_fx.hits.is_empty(), "{:?}", a.bus_fx.hits);
+        assert!(chip_hits(&a, 0).is_empty(), "{:?}", a.bus_fx);
     })
 }
 
@@ -691,7 +705,7 @@ fn a_world_naming_a_chip_this_tui_lacks_draws_nothing_for_it() {
 /// The view cuts the model's chip list and the chip-keyed events, and keeps
 /// `RequestsCompleted`, which names no chip. A model, requests, a spark, a
 /// compile and a reset on the host's own chip draw nothing; the same model
-/// once it also runs on chip 0 draws its label and its hits.
+/// once it also runs on chip 0 draws its label and has its hits.
 #[test]
 fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
     use crate::animation::bus_test_support::Clocked;
@@ -775,7 +789,7 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
         assert_eq!(kinds, vec!["requests"]);
         step(&mut a, &b, &w);
         step(&mut q, &b, &Bus::new().view(w.now_mono_ns()));
-        // No hit, no tokens per second, nothing on either chip.
+        // No hit and nothing on either chip.
         assert!(a.bus_fx.is_empty(), "{:?}", a.bus_fx);
         assert_eq!(a.render(&b), q.render(&b));
 
@@ -793,9 +807,11 @@ fn attached_through_only_chips_a_hosts_chip_draws_nothing() {
         let w = Clocked(&r, at());
         assert_eq!(w.models()[0].chips, vec![chip(0)]);
         step(&mut a, &b, &w);
-        // `update` hands `new_requests` to the duel, so the hit is checked.
-        assert_eq!(a.bus_fx.hits.len(), 1);
-        assert_eq!(a.bus_fx.hits[0].glyphs, 2);
+        // `update` hands `new_requests` to the duel, so the chip's hit is
+        // checked.
+        let hits = chip_hits(&a, 0);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].glyphs, 2);
         assert_eq!(a.bus_fx.chips.len(), 1);
         assert_eq!(a.bus_fx.chips[0].slot, 0);
         assert!(row_text(&a.render(&b), GAUGE_ROW).contains("theirs ready"));
@@ -1024,55 +1040,6 @@ fn the_frame_path_never_reads_the_world() {
 }
 
 #[test]
-fn tokens_per_second_quicken_the_heartbeat_smoothly_and_a_stale_rate_does_not() {
-    tc(|| {
-        let t0 = 5 * SEC;
-        let mut f = Bus::new();
-        f.ready("m", &[0], Some(100.0));
-        let (mut a, b) = arcade();
-        step(&mut a, &b, &f.view(t0));
-        assert_eq!(a.bus_fx.tokens_per_s, Some(100.0));
-        assert!(a.bus_fx.heartbeat_frames() < HEARTBEAT_FRAMES);
-        // A jump is smoothed: one tick later the rate is part of the way.
-        let mut jump = f.clone();
-        jump.ready("m", &[0], Some(200.0));
-        step(&mut a, &b, &jump.view(t0 + TICK));
-        let t = a.bus_fx.tokens_per_s.unwrap();
-        assert!(t > 100.0 && t < 110.0, "{t}");
-
-        // The heartbeat shows in the frames: the hero's brightness differs
-        // from an arcade whose model reports no rate.
-        let mut none = Bus::new();
-        none.ready("m", &[0], None);
-        let (mut x, _) = arcade();
-        let (mut y, _) = arcade();
-        let mut differ = false;
-        for i in 0..20 {
-            step(&mut x, &b, &f.view(t0 + i * TICK));
-            step(&mut y, &b, &none.view(t0 + i * TICK));
-            differ |= x.render(&b) != y.render(&b);
-        }
-        assert!(differ, "the rate shows in the hero");
-
-        // A reading older than the limit counts as none: the frames are
-        // those of a model with no rate, but for the label, which still
-        // prints the model's last rate.
-        let stale = SEC + (TPS_STALE_MS + 1_000) * 1_000_000;
-        let (mut s, _) = arcade();
-        let (mut n, _) = arcade();
-        for i in 0..20 {
-            step(&mut s, &b, &f.view(stale + i * TICK));
-            step(&mut n, &b, &none.view(stale + i * TICK));
-            let (mut fs, mut fn_) = (s.render(&b), n.render(&b));
-            fs.remove(GAUGE_ROW);
-            fn_.remove(GAUGE_ROW);
-            assert_eq!(fs, fn_);
-        }
-        assert_eq!(s.bus_fx.tokens_per_s, None);
-    })
-}
-
-#[test]
 fn sparks_and_compiles_rise_in_their_chips_slot() {
     tc(|| {
         let t0 = 5 * SEC;
@@ -1157,7 +1124,6 @@ fn the_legend_and_explain_text_name_what_the_bus_draws() {
             "down",
             "~",
             "estimate",
-            "✦",
             "request",
             "compile",
             "reset",
@@ -1245,8 +1211,8 @@ fn the_duel_serves_the_hosts_model_on_a_local_chip_first() {
 }
 
 /// Prints an arcade frame with something from the bus on each chip: a model
-/// loading at 40% on chip 0, one ready on chip 1 with a hit just begun, a
-/// spark and a compile. For a person to look at; asserts nothing. Run with
+/// loading at 40% on chip 0, one ready on chip 1 with requests just
+/// completed, a spark and a compile. For a person to look at; asserts nothing. Run with
 /// `cargo test --locked --lib --features tui arcade_bus_smoke_frame -- --ignored --nocapture`.
 #[test]
 #[ignore = "prints a frame for a person to look at"]
@@ -1279,37 +1245,39 @@ fn arcade_bus_smoke_frame() {
 
 /// More sizes for the default layout, taken from the commit before the
 /// layout engine (f9ebf418), so the default layout drawn through the engine
-/// must hash to exactly these values.
+/// must hash to exactly these values. Taken again in 0.16.5 without the
+/// hero (see the module doc).
 const LAYOUT_SIZES: [(usize, usize); 4] = [(40, 12), (80, 24), (120, 40), (200, 60)];
 
-/// The frames at [`LAYOUT_SIZES`] with no bus, as drawn at f9ebf418.
+/// The frames at [`LAYOUT_SIZES`] with no bus, as drawn at f9ebf418, less
+/// the hero.
 const LAYOUT_GOLDEN: [[u64; 3]; 4] = [
     [
-        16405903045868402890,
-        348949444799598575,
-        17758899892730667701,
+        10138926458916307914,
+        11563504340744364399,
+        17439190003978251664,
     ],
     [
-        12504372272606325408,
-        12462495840730416799,
-        17359970104331777380,
+        5915911991922797659,
+        16815131782152037519,
+        1891722748567713495,
     ],
     [
-        10058453730770147578,
-        12209255261273412595,
-        11553880141151839571,
+        8837103168463125634,
+        17585498658561527377,
+        731680844145390918,
     ],
     [
-        2131948977754792761,
-        13513267271374092933,
-        4571970079251868778,
+        7125667911791680080,
+        15774519675444989819,
+        1356820972271897435,
     ],
 ];
 
 /// A busy arcade at `w` x `h`: a model loading at 40% on chip 0, one ready
 /// on chip 1 with requests, a spark and a compile, and two activity lanes.
-/// The hashes after three updates and after six. Every bus effect, the
-/// lanes and the hero are in these frames.
+/// The hashes after three updates and after six. Every bus effect and the
+/// lanes are in these frames.
 fn busy_hashes(w: usize, h: usize) -> Vec<u64> {
     tc(|| {
         let t0 = 5 * SEC;
@@ -1359,11 +1327,12 @@ fn busy_hashes(w: usize, h: usize) -> Vec<u64> {
     })
 }
 
-/// [`busy_hashes`] at 60x18, 120x40 and 200x60, as drawn at f9ebf418.
+/// [`busy_hashes`] at 60x18, 120x40 and 200x60, as drawn at f9ebf418, less
+/// the hero and its hit ring.
 const BUSY_GOLDEN: [[u64; 2]; 3] = [
-    [6926133645160357105, 14361061777142784915],
-    [486681346888478306, 6463703216560181227],
-    [17678925567211405084, 10309374953790955074],
+    [9893009626592102288, 9376089425154301943],
+    [6315125620604610779, 9429469395078877381],
+    [8836509715553549753, 11953599448560859929],
 ];
 const BUSY_SIZES: [(usize, usize); 3] = [(60, 18), (120, 40), (200, 60)];
 
@@ -1400,7 +1369,9 @@ fn the_default_layout_draws_the_frames_pinned_before_the_layout_engine() {
 /// running [`grid_idle`] and [`grid_busy`] on 89bf8d05 (f9ebf418, the
 /// arcade before the layout engine, plus the pin tests), then changed only
 /// in the last column by the right-edge guard: 377 sizes in bc588630 (`│`)
-/// and 82 more when the guard took in the ASCII bar (`|`).
+/// and 82 more when the guard took in the ASCII bar (`|`). In 0.16.5 the
+/// hero was removed: 4292 of the 4440 sizes changed, by the hero's and its
+/// trail's cells only (see the module doc).
 const BASE_GRID: &str = include_str!("fixtures/arcade_base_grid.txt");
 
 /// The widths of the grid: every width to 60, then a spread up to 240.

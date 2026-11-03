@@ -1,3 +1,27 @@
+tt-toplike (0.16.6) noble; urgency=medium
+
+  * The status bar flags a stalled ARC: a chip whose firmware heartbeat
+    reads 0 shows a red "ARC!" after its readings, and with more than four
+    chips the averaged column ends with "ARC!xN". A chip that reports no
+    heartbeat is not flagged. The arcade's removed hero used to show this.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 16:00:00 -0800
+
+tt-toplike (0.16.5) noble; urgency=medium
+
+  * Arcade mode no longer has the @ hero that moved over the whole screen,
+    or its trail: it distracted from the panels. The duel on the top row
+    while a model serves is unchanged. The ring round the hero for each
+    request completed and the hero's heartbeat from tokens per second went
+    with it; a request completed still makes the duel's snake lunge.
+  * The arcade no longer shows a faults register, an ARC heartbeat of 0, an
+    undervolt (a busy Blackhole under 0.65 V) or a harvesting state. It
+    showed them only through the hero's glyph. Throttling still
+    desaturates the starfield; harvested Tensix columns and GDDR
+    temperatures still show in Insights.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 18:00:00 -0800
+
 tt-toplike (0.16.4) noble; urgency=medium
 
   * Saga is an arcade panel (view = "saga", at least 20x6). The now-serving

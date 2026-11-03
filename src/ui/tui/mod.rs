@@ -109,7 +109,7 @@ enum DisplayMode {
     MemoryCastle,
     /// Memory Flow Topology (full-screen DRAM motion visualization)
     MemoryFlow,
-    /// Arcade mode (unified visualization with all three modes + hero character)
+    /// Arcade mode (the views as panels of one screen, laid out by `[arcade]`)
     Arcade,
     /// Defrag view — model-loading visualization (inspired by disk defragmenters)
     Defrag,
@@ -4343,10 +4343,9 @@ fn saga_panel_feed(saga: Option<&crate::saga::SagaDriver>, enabled: bool) -> sag
     }
 }
 
-/// Render Arcade mode — uses the composite canvas so the hero `@` and trail
-/// actually appear.  The previous ratatui-Layout approach called sub-viz methods
-/// directly into separate Rects, bypassing ArcadeVisualization::render() and
-/// overlay_hero() entirely — the hero was computed but never drawn.
+/// Render Arcade mode from the composite canvas (`ArcadeVisualization::render`),
+/// so the shared header, the bus effects and the activity lanes, which are
+/// drawn across panels, appear.
 ///
 /// The composite path: arcade.render(backend) → Vec<Line> → single Paragraph
 /// over the full terminal area.  No border boxes around each sub-panel, but
@@ -4373,6 +4372,13 @@ fn ui_arcade(f: &mut Frame, arcade: &ArcadeVisualization, backend: &dyn Telemetr
 /// >4 chips: a single `avg  44°  822M  79W` column instead.
 ///
 /// The command bar and overlay panels render on top of this row when active.
+/// The chip's ARC firmware has stalled: its heartbeat reads 0. A backend
+/// that reports no heartbeat is not stalled (the old arcade hero's `?` rule,
+/// now shown in the status bar).
+fn arc_stalled(telem: Option<&crate::models::telemetry::Telemetry>) -> bool {
+    telem.is_some_and(|t| t.heartbeat == Some(0))
+}
+
 fn render_global_statusbar(
     f: &mut Frame,
     backend: &dyn TelemetryBackend,
@@ -4472,6 +4478,9 @@ fn render_global_statusbar(
         temp: f32,
         mhz: u32,
         watts: f32,
+        /// The ARC firmware heartbeat reads 0: the chip's firmware has
+        /// stalled. A chip that does not report a heartbeat is not stalled.
+        arc_stalled: bool,
     }
 
     let chips: Vec<ChipTelem> = devices
@@ -4493,11 +4502,13 @@ fn render_global_statusbar(
                 temp,
                 mhz,
                 watts,
+                arc_stalled: arc_stalled(telem),
             }
         })
         .collect();
 
     let mut right: Vec<Span> = Vec::new();
+    let stalled_fg = colors::rgb(255, 100, 80);
 
     if chips.is_empty() {
         // nothing to show
@@ -4537,6 +4548,12 @@ fn render_global_statusbar(
                 format!("{:>3.0}W", c.watts),
                 Style::default().fg(colors::rgb(200, 160, 255)),
             ));
+            if c.arc_stalled {
+                right.push(Span::styled(
+                    " ARC!",
+                    Style::default().fg(stalled_fg).add_modifier(Modifier::BOLD),
+                ));
+            }
         }
         right.push(Span::raw(" "));
     } else {
@@ -4569,6 +4586,13 @@ fn render_global_statusbar(
             format!("  ×{}", chips.len()),
             Style::default().fg(label_fg),
         ));
+        let stalled = chips.iter().filter(|c| c.arc_stalled).count();
+        if stalled > 0 {
+            right.push(Span::styled(
+                format!(" ARC!×{stalled}"),
+                Style::default().fg(stalled_fg).add_modifier(Modifier::BOLD),
+            ));
+        }
         right.push(Span::raw(" "));
     }
 
@@ -5436,11 +5460,9 @@ fn overlay_lines_with(
                         "Arcade Mode — Unified View",
                         "",
                         "Starfield, Memory Castle, Defrag and Memory Flow on one",
-                        "screen. The @ hero roams on live telemetry: x is current",
-                        "draw (0–100 A), y is power, colour is die temperature.",
-                        "The glyph is its health: @ healthy, ! throttled or",
-                        "faulted, ? ARC stalled, % undervolt (a busy Blackhole",
-                        "under 0.65 V, other chips under 0.75 V).",
+                        "screen. While a model serves, row 2 is a duel: the @",
+                        "lunges on a power spike, the snake on each finished",
+                        "request, and the ⚔ slides to whoever is winning.",
                         "",
                         "While something trains, loads or serves, the top rows",
                         "become up to two lanes, most urgent first: ▶ TRAIN,",
@@ -6712,7 +6734,7 @@ fn legend_parts(
 
 /// Legend for Arcade. It shows the four views at once, so each gets one
 /// packed line with the glyphs its own legend explains (`l` in that view has
-/// the full list), then the hero and the activity lanes, which only Arcade
+/// the full list), then the duel and the activity lanes, which only Arcade
 /// draws. The glyph colours match the views' own legends.
 fn arcade_legend_lines(
     bar: ratatui::style::Color,
@@ -6764,8 +6786,14 @@ fn arcade_legend_lines(
             (" writes · ring = GDDR channels", None),
         ]),
     ];
-    v.push(l(&[("@ Hero", Some(head))]));
-    v.extend(hero_legend_lines(bar, bg, dim));
+    v.push(l(&[
+        ("⚔ Duel ", Some(head)),
+        ("row 2 while a model serves: ", None),
+        ("@", Some(colors::info())),
+        (" chip ⚔ ", None),
+        ("▶●●", Some(colors::rgb(80, 200, 230))),
+        (" snake", None),
+    ]));
     v.push(l(&[
         ("▶ Activity lanes ", Some(head)),
         ("while something runs", None),
@@ -6820,46 +6848,6 @@ fn activity_legend_lines(
         l(&[
             ("  ○ ◌ · ", Some(label)),
             ("a flare for each step or request finished", None),
-        ]),
-    ]
-}
-
-/// The Arcade hero's lines: where it stands and what its glyph says.
-fn hero_legend_lines(
-    bar: ratatui::style::Color,
-    bg: ratatui::style::Color,
-    dim: ratatui::style::Color,
-) -> Vec<Line<'static>> {
-    let label = colors::rgb(200, 230, 255);
-    let l =
-        |parts: &[(&'static str, Option<ratatui::style::Color>)]| legend_parts(bar, bg, dim, parts);
-    vec![
-        l(&[
-            ("  x ", Some(label)),
-            ("current 0–100 A  ", None),
-            ("y ", Some(label)),
-            ("power  ", None),
-            ("colour ", Some(label)),
-            ("temperature  ", None),
-            ("trail ", Some(label)),
-            ("GDDR temp, ETH", None),
-        ]),
-        l(&[
-            ("  @", Some(colors::rgb(79, 209, 197))),
-            (" healthy  ", None),
-            ("!", Some(colors::rgb(255, 100, 80))),
-            (" throttled/faulted  ", None),
-            ("?", Some(colors::rgb(255, 220, 80))),
-            (" ARC stalled  ", None),
-            ("( )", Some(colors::rgb(180, 140, 255))),
-            (" harvested", None),
-        ]),
-        l(&[
-            ("  %", Some(colors::rgb(255, 180, 80))),
-            (
-                " undervolt: a busy Blackhole under 0.65 V, others under 0.75 V",
-                None,
-            ),
         ]),
     ]
 }
@@ -12449,12 +12437,9 @@ mod host_default_screen_tests {
 
         // Deliberate column alignment must survive — `split_whitespace`
         // would collapse the double spaces that line these up.
-        let hero = [
-            "@  healthy   !  throttled/faulted",
-            "?  ARC stall  %  undervolt",
-        ];
-        let got = wrap_overlay_text(&hero, 56);
-        assert_eq!(got, vec![hero[0].to_string(), hero[1].to_string()]);
+        let defrag = ["░  empty     ▒  loading", "▓  resident  █  peak"];
+        let got = wrap_overlay_text(&defrag, 56);
+        assert_eq!(got, vec![defrag[0].to_string(), defrag[1].to_string()]);
 
         // An unindented list whose items are ordinary prose must not merge
         // either — the rule is "never join", not "never join glyphs".
@@ -14596,6 +14581,37 @@ mod bus_wiring_tests {
         .unwrap();
         let buf = term.backend().buffer();
         (0..buf.area.width).map(|x| buf[(x, 2)].symbol()).collect()
+    }
+
+    /// A chip whose ARC heartbeat reads 0 shows `ARC!` after its readings; a
+    /// healthy chip, and one that reports no heartbeat, show nothing.
+    #[test]
+    fn the_status_bar_flags_a_stalled_arc() {
+        let mut b = mock();
+        assert!(!bar(&b, None).contains("ARC!"));
+        b.set_heartbeat_for_test(1, Some(0));
+        let stalled = bar(&b, None);
+        assert!(stalled.contains("ARC!"), "{stalled}");
+        // Only the chip that stalled: one marker, after the second chip.
+        assert_eq!(stalled.matches("ARC!").count(), 1, "{stalled}");
+        b.set_heartbeat_for_test(1, None);
+        assert!(
+            !bar(&b, None).contains("ARC!"),
+            "no heartbeat is not a stall"
+        );
+    }
+
+    /// Past four chips the bar shows one average column, and the stalls are
+    /// counted after it.
+    #[test]
+    fn the_averaged_status_bar_counts_stalled_arcs() {
+        let mut b = MockBackend::new(6);
+        b.init().unwrap();
+        b.update().unwrap();
+        b.set_heartbeat_for_test(0, Some(0));
+        b.set_heartbeat_for_test(3, Some(0));
+        let s = bar(&b, None);
+        assert!(s.contains("ARC!×2"), "{s}");
     }
 
     /// A local bus adds nothing to the status bar, so a default run's bar is

@@ -17,6 +17,23 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.16.6
+- The status bar flags a stalled ARC. A chip whose firmware heartbeat reads 0 shows a red `ARC!` after
+  its readings (`BH0  66°  990M  80W ARC!`). With more than four chips the averaged column ends with
+  `ARC!×N`, N being how many chips stalled. A chip that reports no heartbeat is not flagged. The
+  arcade's roaming hero used to show this and was removed in 0.16.5.
+
+### 0.16.5
+- Arcade mode no longer has the `@` hero that moved over the whole screen, or its trail. It
+  distracted from the panels. The duel on the top row (the chip's `@` against the inference
+  snake, while a model serves) is unchanged.
+- The ring of `✦` round the hero for each request completed, and the hero's heartbeat from
+  tokens per second, went with it. A request completed still makes the duel's snake lunge.
+- The arcade no longer shows a faults register, an ARC heartbeat of 0 (the hero's `?`), an
+  undervolt (`%`, a busy Blackhole under 0.65 V) or a harvesting state (`( )`); it showed them
+  only through the hero's glyph. Throttling still desaturates the starfield, and harvested
+  Tensix columns and GDDR temperatures still show in Insights.
+
 ### 0.16.4
 - Saga is an arcade panel. The `now-serving` layout shows it in place of defrag: the inference
   server over the Wafer Waffler and Saga. The panel draws the Saga view's map with the same fog,

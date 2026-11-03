@@ -248,6 +248,15 @@ impl MockBackend {
         self.heartbeats = vec![1; self.device_count];
     }
 
+    /// Test hook: set one device's last ARC heartbeat reading (0 is a stalled
+    /// ARC). The next `update` writes a fresh counting-up value again.
+    #[cfg(test)]
+    pub(crate) fn set_heartbeat_for_test(&mut self, device_idx: usize, heartbeat: Option<u32>) {
+        if let Some(t) = self.telemetry.get_mut(&device_idx) {
+            t.heartbeat = heartbeat;
+        }
+    }
+
     /// Generate realistic telemetry for a device
     ///
     /// Creates telemetry with temporal variation:

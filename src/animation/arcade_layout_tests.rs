@@ -75,7 +75,6 @@ fn the_default_layout_hides_nothing_at_any_size() {
             let labels: Vec<&str> = l.rows.iter().map(|r| r.label()).collect();
             assert_eq!(labels, want, "{w}x{h}");
             assert!(l.rows.iter().all(|r| r.hidden.is_empty()), "{w}x{h}");
-            assert_eq!(l.bands().len(), 3, "the hero keeps three bands at {w}x{h}");
         }
     }
 }
@@ -268,17 +267,6 @@ fn the_gauge_goes_on_the_topmost_leftmost_host_panel() {
     assert_eq!(l.gauge_panel().unwrap().view, View::Flow, "else the first");
     let l = layout(&[row(1, &[(View::Die3d, 1)])], 4, 40);
     assert!(l.gauge_panel().is_none());
-}
-
-#[test]
-fn the_hero_bands_are_the_old_region_fields() {
-    let l = layout(&default_rows(), 80, 40);
-    let (s, c, f) = old_rows(40);
-    // starfield_start = 2, starfield_end = 2 + s, castle_start = end + 1, ...
-    let ss = 2;
-    let cs = ss + s + 1;
-    let fs = cs + c + 1;
-    assert_eq!(l.bands(), [ss..ss + s, cs..cs + c, fs..fs + f]);
 }
 
 #[test]
