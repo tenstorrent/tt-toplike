@@ -1962,15 +1962,23 @@ fn run_app(
                     let local_rows = || inference_monitor.snapshot();
                     #[cfg(not(target_os = "linux"))]
                     let local_rows = Vec::new;
+                    // The synthetic roster's clock exists on Linux alone (see
+                    // `mock_started`); elsewhere the mock has no roster.
+                    #[cfg(target_os = "linux")]
+                    let mock_rows = || {
+                        crate::workload::inference_server::mock::mock_services(
+                            mock_started.elapsed().as_secs_f32(),
+                        )
+                    };
+                    #[cfg(not(target_os = "linux"))]
+                    let mock_rows = Vec::new;
                     let rows = if !want_rows {
                         Vec::new()
                     } else if let Some(r) = inference_bus::attached_rows(tui_bus, backend.as_ref())
                     {
                         r
                     } else if backend_type == BackendType::Mock {
-                        crate::workload::inference_server::mock::mock_services(
-                            mock_started.elapsed().as_secs_f32(),
-                        )
+                        mock_rows()
                     } else if backend_type == BackendType::Remote {
                         Vec::new()
                     } else {
