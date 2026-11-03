@@ -221,7 +221,7 @@ Everything shows at 120x40 and 200x60.
 
 ### `skyline`
 
-The quiet one: a tall starfield over the flow.
+A tall starfield over the flow.
 
 ```text
 ║ ✧ starfield
@@ -437,15 +437,16 @@ When a layout with a backdrop is selected (at start-up, with `{` or `}`, or with
 layout`), the arcade's backdrop becomes that kind. A layout without one leaves the current
 backdrop alone. `w`, `c`, `/backdrop` and `/arcade cloudfield` still change it for the session,
 and the next switch to a layout with a backdrop applies that backdrop again. `--check-config`
-shows it under the layout's name as `backdrop clouds when selected`, and says which layout the
-arcade starts with.
+shows it under the layout's name as `backdrop clouds when selected`. Its line `arcade starts
+with NAME: N rows, backdrop KIND` gives the start layout, its rows and the backdrop it draws
+first.
 
 `c` turns the arcade's backdrop off when one is drawn, and back on as the layout's own kind, or
 the scene when the layout sets none. `w` steps through every kind.
 
 The older `cloudfield = true` (or `false`) in a layout still works. It is `backdrop = "scene"`
 (or `"off"`), and `--check-config` and the status line print a note saying so. When a layout has
-both, `backdrop` wins.
+both, `backdrop` wins and the note says `cloudfield` is ignored.
 
 ## Error messages
 

@@ -217,33 +217,26 @@ pub fn write_check_report(loaded: &LoadedConfig, out: &mut dyn std::io::Write) -
         for n in &loaded.notes {
             writeln!(out, "note: {n}")?;
         }
-        let a = &loaded.arcade;
-        let default = a.rows == crate::animation::arcade_layout::default_rows();
-        writeln!(
-            out,
-            "arcade: {} layout, {} row{}, cloudfield {}",
-            if default { "default" } else { "configured" },
-            a.rows.len(),
-            if a.rows.len() == 1 { "" } else { "s" },
-            if a.cloudfield { "on" } else { "off" }
-        )?;
-        // Every layout `{` and `}` step through, with its rows, after the
-        // one the arcade starts with (it may set another backdrop than the
-        // line above says).
+        // The layout the arcade starts with, its rows, and the backdrop it
+        // draws first: the layout's own, else the arcade's `[backdrop]`
+        // entry (which takes in the deprecated `[arcade] cloudfield`).
         let cycle = crate::animation::arcade_presets::LayoutCycle::new(
             &loaded.layouts,
             loaded.start_layout.as_deref(),
         );
         let start = cycle.current();
-        match start.backdrop {
-            Some(c) => writeln!(
-                out,
-                "arcade starts with {}, backdrop {}",
-                start.name,
-                crate::animation::backdrop::choice_name(c)
-            )?,
-            None => writeln!(out, "arcade starts with {}", start.name)?,
-        }
+        let backdrop = start
+            .backdrop
+            .unwrap_or_else(|| loaded.backdrop.choice("arcade"));
+        let n = start.rows.len();
+        writeln!(
+            out,
+            "arcade starts with {}: {n} row{}, backdrop {}",
+            start.name,
+            if n == 1 { "" } else { "s" },
+            crate::animation::backdrop::choice_name(backdrop)
+        )?;
+        // Every layout `{` and `}` step through, with its rows.
         writeln!(
             out,
             "layouts, in the order }} steps through them (* starts):"
@@ -639,17 +632,25 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
     // `arcade.cloudfield` still works: `true` is `[backdrop.views] arcade =
     // "scene"`, `false` is off, and a `[backdrop.views] arcade` entry wins.
     if let (Some(on), Some((file, line))) = (cloudfield.filter(|_| !arcade_bad), cloudfield_at) {
-        if !backdrop.views.iter().any(|(v, _)| *v == "arcade") {
+        let set = backdrop.views.iter().any(|(v, _)| *v == "arcade");
+        if !set {
             backdrop.views.push((
                 "arcade",
                 on.then_some(crate::animation::backdrop::BackdropKind::Scene),
             ));
         }
+        let message = if set {
+            "`arcade.cloudfield` is deprecated and ignored: [backdrop.views] arcade sets the arcade's backdrop".to_string()
+        } else {
+            format!(
+                "`arcade.cloudfield` is deprecated; write [backdrop.views] arcade = \"{}\"",
+                if on { "scene" } else { "off" }
+            )
+        };
         out.notes.push(ConfigProblem {
             file,
             line,
-            message: "`arcade.cloudfield` is deprecated; write [backdrop.views] arcade = \"scene\""
-                .into(),
+            message,
         });
     }
     out.backdrop = backdrop;
@@ -957,13 +958,17 @@ fn parse_layouts(
                     let ks = t
                         .get_key_value("cloudfield")
                         .and_then(|(key, _)| key.span());
-                    cloudfield_note = Some((
-                        ks,
+                    let message = if backdrop.is_some() {
+                        format!(
+                            "{ctx}: `cloudfield` is deprecated and ignored: `backdrop` sets this layout's backdrop"
+                        )
+                    } else {
                         format!(
                             "{ctx}: `cloudfield` is deprecated; write backdrop = \"{}\"",
                             if b { "scene" } else { "off" }
-                        ),
-                    ));
+                        )
+                    };
+                    cloudfield_note = Some((ks, message));
                     Some(b.then_some(BackdropKind::Scene))
                 }
                 None => {
@@ -1672,15 +1677,60 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("c.toml:2: row 1 height"), "{out}");
         assert!(out.contains("c.toml:3: unknown view `nope`"), "{out}");
-        assert!(out.contains("arcade: default layout"), "{out}");
+        assert!(
+            out.contains("\narcade starts with classic: 3 rows, backdrop off\n"),
+            "{out}"
+        );
         let l = load(&[("c.toml", "[arcade]\ncloudfield = true\n")]);
         let mut out = Vec::new();
         assert_eq!(write_check_report(&l, &mut out), 0);
         let out = String::from_utf8(out).unwrap();
         assert!(
-            out.ends_with("ok\n") && out.contains("cloudfield on"),
+            out.ends_with("ok\n")
+                && out.contains("\narcade starts with classic: 3 rows, backdrop scene\n"),
             "{out}"
         );
+    }
+
+    /// The report's arcade line is the layout the arcade starts with, its
+    /// rows and the backdrop it draws first: the layout's own backdrop, else
+    /// the `[backdrop]` entry for the arcade (which takes in the deprecated
+    /// `[arcade] cloudfield`). No line describes only the `[[arcade.row]]`
+    /// tables or names the cloudfield (re-review M1).
+    #[test]
+    fn check_config_says_how_the_arcade_starts() {
+        let report = |l: &LoadedConfig| {
+            let mut out = Vec::new();
+            write_check_report(l, &mut out);
+            String::from_utf8(out).unwrap()
+        };
+        let mine = "[arcade]\nlayout = \"mine\"\n[[arcade.layouts]]\nname = \"mine\"\nbackdrop = \"clouds\"\n[[arcade.layouts.row]]\npanels = [{ view = \"castle\" }]\n[[arcade.layouts.row]]\npanels = [{ view = \"flow\" }]\n";
+        for (text, want) in [
+            (mine, "arcade starts with mine: 2 rows, backdrop clouds"),
+            (
+                "[backdrop.views]\narcade = \"sky\"\n",
+                "arcade starts with classic: 3 rows, backdrop sky",
+            ),
+            (
+                "[arcade]\ncloudfield = true\n[backdrop.views]\narcade = \"sky\"\n",
+                "arcade starts with classic: 3 rows, backdrop sky",
+            ),
+            (
+                "[backdrop]\ndefault = \"clouds\"\n",
+                "arcade starts with classic: 3 rows, backdrop clouds",
+            ),
+            (
+                "[[arcade.row]]\npanels = [{ view = \"castle\" }]\n",
+                "arcade starts with config: 1 row, backdrop off",
+            ),
+        ] {
+            let mut l = load(&[("c.toml", text)]);
+            choose_layout(&mut l, None);
+            let out = report(&l);
+            assert!(out.contains(&format!("\n{want}\n")), "{text}\n{out}");
+            assert!(!out.contains("\narcade: "), "{text}\n{out}");
+            assert!(!out.contains("cloudfield o"), "{text}\n{out}");
+        }
     }
 
     #[test]
@@ -2086,14 +2136,26 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
             n,
             vec!["c.toml:2: `arcade.cloudfield` is deprecated; write [backdrop.views] arcade = \"scene\""]
         );
-        // `[backdrop.views] arcade` wins over it.
+        // `[backdrop.views] arcade` wins over it, and the note says the old
+        // key is ignored (re-review M2).
         let text = "[arcade]\ncloudfield = true\n[backdrop.views]\narcade = \"clouds\"\n";
         let l = load(&[("c.toml", text)]);
         assert_eq!(l.backdrop.choice("arcade"), CLOUDS);
-        assert_eq!(l.notes.len(), 1);
+        let n: Vec<String> = l.notes.iter().map(|p| p.to_string()).collect();
+        assert_eq!(
+            n,
+            vec!["c.toml:2: `arcade.cloudfield` is deprecated and ignored: [backdrop.views] arcade sets the arcade's backdrop"]
+        );
         // `false` is the default: the arcade has no backdrop.
         let l = load(&[("c.toml", "[arcade]\ncloudfield = false\n")]);
         assert_eq!(l.backdrop.choice("arcade"), None);
+        assert!(
+            l.notes[0]
+                .message
+                .ends_with("write [backdrop.views] arcade = \"off\""),
+            "{:?}",
+            l.notes
+        );
     }
 
     #[test]
@@ -2244,7 +2306,12 @@ panels = [{ view = "starfield" }]
             Some(Some(BackdropKind::Sky)),
             "backdrop wins"
         );
-        assert_eq!(l.notes.len(), 1);
+        // The note says the old key is ignored (re-review M2).
+        let n: Vec<String> = l.notes.iter().map(|p| p.message.clone()).collect();
+        assert_eq!(
+            n,
+            vec!["layout `solo`: `cloudfield` is deprecated and ignored: `backdrop` sets this layout's backdrop"]
+        );
         // The note goes to --check-config, which still passes.
         let mut l = with("cloudfield = true");
         choose_layout(&mut l, None);
@@ -2516,7 +2583,10 @@ panels = [{ view = "starfield" }]
         let mut out = Vec::new();
         assert_eq!(write_check_report(&l, &mut out), 0);
         let out = String::from_utf8(out).unwrap();
-        assert!(out.contains("\narcade starts with tall\n"), "{out}");
+        assert!(
+            out.contains("\narcade starts with tall: 2 rows, backdrop off\n"),
+            "{out}"
+        );
         // With a start layout that sets a backdrop, the line says so.
         let mut ns = load(&[]);
         choose_layout(&mut ns, Some("now-serving"));
@@ -2524,7 +2594,7 @@ panels = [{ view = "starfield" }]
         write_check_report(&ns, &mut o);
         let o = String::from_utf8(o).unwrap();
         assert!(
-            o.contains("\narcade starts with now-serving, backdrop clouds\n"),
+            o.contains("\narcade starts with now-serving: 2 rows, backdrop clouds\n"),
             "{o}"
         );
         assert!(

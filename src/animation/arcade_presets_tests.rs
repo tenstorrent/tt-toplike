@@ -214,7 +214,7 @@ fn the_layout_command_steps_selects_and_lists() {
     assert!(r.error && !r.relayout);
     assert_eq!(
         r.message,
-        "no arcade layout `castel`; /arcade layout list names them"
+        "no arcade layout `castel`\n/arcade layout list names them"
     );
     // A typed control character is shown escaped.
     let r = command("layout a\u{1b}[2J", &mut cf, &mut c);
@@ -497,9 +497,17 @@ fn every_status_line_fits_80_columns() {
     let s = c.status();
     assert_eq!(s.chars().count(), STATUS_MAX, "{s}");
     assert!(s.ends_with('…') && s.contains(", clouds — "), "{s}");
-    // The list and the usage are lines of at most 78 characters.
-    let c = LayoutCycle::new(&[], None);
-    for text in [c.wrapped_names(), USAGE.to_string()] {
+    // The list, the usage and the reply to an unknown name (at its longest
+    // shown name, re-review M4) are lines of at most 78 characters.
+    let mut c = LayoutCycle::new(&[], None);
+    let mut settings = crate::animation::backdrop::BackdropSettings::default();
+    let unknown = command(
+        &format!("layout {}", "x".repeat(100)),
+        &mut settings,
+        &mut c,
+    );
+    assert!(unknown.error && unknown.message.contains("/arcade layout list"));
+    for text in [c.wrapped_names(), USAGE.to_string(), unknown.message] {
         for line in text.lines() {
             assert!(line.chars().count() <= STATUS_MAX, "{line}");
         }

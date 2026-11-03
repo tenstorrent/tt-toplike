@@ -347,7 +347,7 @@ pub struct BackdropSignals {
     /// the world. `None` without a fresh one.
     pub step_ms: Option<f32>,
     /// Whether any value above is an estimate (the mock backend). The
-    /// legend line then carries the `~` marker.
+    /// legend line then shows the `~` marker.
     pub estimated: bool,
 }
 

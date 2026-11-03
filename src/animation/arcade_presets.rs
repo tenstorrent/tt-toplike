@@ -173,7 +173,7 @@ pub fn presets() -> &'static [NamedLayout] {
             ),
             named(
                 "skyline",
-                "a tall starfield over the flow; the quiet one",
+                "a tall starfield over the flow",
                 vec![row(3, vec![p(Starfield, 1)]), row(1, vec![p(Flow, 1)])],
             ),
             named(
@@ -426,7 +426,8 @@ pub fn command(
             } else {
                 reply(
                     format!(
-                        "no arcade layout `{}`; /arcade layout list names them",
+                        // Two lines, so the longest shown name fits 80 columns.
+                        "no arcade layout `{}`\n/arcade layout list names them",
                         shown(name)
                     ),
                     true,
