@@ -62,10 +62,11 @@ fn columns(line: &Line<'static>) -> Vec<char> {
     row
 }
 
-/// Characters that would be a right-side frame edge at the end of a row:
-/// the arcade's own guard set (`arcade::RIGHT_EDGE_GLYPHS`) and the set
-/// `arcade_panel_tests` uses.
-const RIGHT_BORDERS: &str = "│║┃▕▐┤╣┫╢╡┨┥╎╏┆┇┊┋";
+/// `ch` is one of the right-edge border glyphs the arcade's guard clears
+/// ([`RIGHT_EDGE_GLYPHS`], the one list both use).
+fn is_right_border(ch: char) -> bool {
+    RIGHT_EDGE_GLYPHS.contains(&ch)
+}
 
 /// Every layout, the presets and a user one: config, then presets.
 fn every_layout() -> Vec<NamedLayout> {
@@ -135,7 +136,7 @@ fn every_layout_at_every_size_fits_and_draws_no_right_border() {
                         bad.push(format!("{} {w}x{h} row {y} is {width} wide", l.name));
                     }
                     let cols = columns(line);
-                    if w > 0 && y < h && cols.len() >= w && RIGHT_BORDERS.contains(cols[w - 1]) {
+                    if w > 0 && y < h && cols.len() >= w && is_right_border(cols[w - 1]) {
                         bad.push(format!(
                             "{} {w}x{h} row {y} ends in {:?}: {t:?}",
                             l.name,
@@ -393,7 +394,7 @@ fn no_row_ends_in_a_right_border_at_any_width() {
                                             let cols = columns(line);
                                             if y < h
                                                 && cols.len() >= w
-                                                && RIGHT_BORDERS.contains(cols[w - 1])
+                                                && is_right_border(cols[w - 1])
                                             {
                                                 bad.push(format!(
                                                     "{} {w}x{h} busy={is_busy} row {y}: {:?}",
@@ -422,4 +423,48 @@ fn no_row_ends_in_a_right_border_at_any_width() {
         bad.len(),
         &bad[..bad.len().min(10)]
     );
+}
+
+/// The glyphs AGENTS.md names as right-side borders: every character set in
+/// backticks on a line that says "right-side border". Today that is the
+/// BBS box's `┐ │ ┘`.
+fn agents_md_right_borders() -> Vec<char> {
+    let doc = include_str!("../../AGENTS.md");
+    let mut named = Vec::new();
+    for line in doc.lines().filter(|l| l.contains("right-side border")) {
+        // The text between each pair of backticks.
+        for (i, part) in line.split('`').enumerate() {
+            if i % 2 == 1 {
+                named.extend(part.chars().filter(|c| !c.is_whitespace()));
+            }
+        }
+    }
+    named
+}
+
+/// The guard's list holds every right-side border AGENTS.md names, and the
+/// corners and ASCII bar that a cut can leave in the last column.
+#[test]
+fn the_right_edge_list_holds_every_border_agents_md_names() {
+    let named = agents_md_right_borders();
+    // The extraction found the BBS box's glyphs, so this test cannot pass
+    // on an empty list.
+    for ch in ['┐', '│', '┘'] {
+        assert!(
+            named.contains(&ch),
+            "AGENTS.md no longer names {ch:?}: {named:?}"
+        );
+    }
+    let missing: Vec<char> = named
+        .iter()
+        .copied()
+        .filter(|c| !RIGHT_EDGE_GLYPHS.contains(c))
+        .collect();
+    assert!(missing.is_empty(), "not in RIGHT_EDGE_GLYPHS: {missing:?}");
+    for ch in "│┐┘┤║╗╝╣┃┓┛┫╮╯▐▕|".chars() {
+        assert!(
+            RIGHT_EDGE_GLYPHS.contains(&ch),
+            "not in RIGHT_EDGE_GLYPHS: {ch:?}"
+        );
+    }
 }

@@ -289,6 +289,11 @@ fn every_view_that_draws_a_backdrop_draws_its_pinned_frames() {
 /// `arcade loading|serving cloudfield true` pins: those were taken again
 /// when the shared scene moved to the 4 Hz step clock with banded colours
 /// (with the old clock and no banding they match the d6560a27 frames).
+/// `arcade loading cloudfield true 200x60` was taken once more when the
+/// arcade's right-edge guard took in the ASCII bar: the forge's scaffold
+/// beam stands in column 199, and in each of the three frames its `|`
+/// cells there (12, 18 and 18) are now spaces in the same style. No
+/// other cell of those frames changed.
 const PINS: &[(&str, [u64; 3])] = &[
     (
         "scene none 40x12",
@@ -701,9 +706,9 @@ const PINS: &[(&str, [u64; 3])] = &[
     (
         "arcade loading cloudfield true 200x60",
         [
-            3133112314097811679,
-            8672895268254122397,
-            13578347475956915347,
+            10962629317634343775,
+            18244021966256018733,
+            15616547361110668743,
         ],
     ),
     (

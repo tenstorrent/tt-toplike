@@ -313,11 +313,6 @@ fn defrag_at_width_three_draws_three_times_the_castle() {
     })
 }
 
-/// Characters that would be a right-side frame edge at the end of a row.
-/// (The inference panel's loading snake draws boxed stage names such as
-/// `┌load───┐`, as the `i` view does; a box corner is not a frame edge.)
-const RIGHT_BORDERS: &str = "│║▕┤╣";
-
 #[test]
 fn every_panel_kind_at_several_sizes_fits_its_row() {
     tc(|| {
@@ -368,7 +363,7 @@ fn every_panel_kind_at_several_sizes_fits_its_row() {
                 let edges = [w - 1];
                 for x in edges {
                     assert!(
-                        !RIGHT_BORDERS.contains(row[x].0),
+                        !RIGHT_EDGE_GLYPHS.contains(&row[x].0),
                         "{w}x{h} row {y} col {x} is a right border: {text:?}"
                     );
                 }

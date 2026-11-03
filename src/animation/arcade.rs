@@ -1788,16 +1788,36 @@ fn fit_width(mut line: Line<'static>, w: usize) -> Line<'static> {
     line
 }
 
-/// Glyphs that would read as a right-side border in a row's last column:
-/// box-drawing verticals and right-edge pieces. The user's rule is no
-/// right-side border characters, at any width.
+/// Glyphs that draw a right-side border when they sit in a row's last
+/// column. The user's rule is no right-side border characters, at any width.
+///
+/// The list is every box-drawing character with a vertical stroke and no
+/// stroke to the right (verticals, dashed verticals, half verticals, right
+/// corners and right-edge joints, in light, heavy, double and rounded
+/// forms), the two right-hand block pieces `▐` and `▕`, and the ASCII bar
+/// `|`. The arcade's guard ([`clear_right_edge`]), the frame sweeps in
+/// `arcade_preset_frame_tests`, the panel test and the docs-sketch test all
+/// read this one list.
+///
+/// In order: the light, heavy, double and dashed verticals; the half and
+/// mixed verticals; the top-right corners; the bottom-right corners; the
+/// right-edge joints; the right-hand block pieces; the ASCII bar.
+#[rustfmt::skip]
 pub(crate) const RIGHT_EDGE_GLYPHS: &[char] = &[
-    '│', '║', '┃', '▕', '▐', '┤', '╣', '┫', '╢', '╡', '┨', '┥', '╎', '╏', '┆', '┇', '┊', '┋',
+    '│', '┃', '║', '╎', '╏', '┆', '┇', '┊', '┋',
+    '╵', '╷', '╹', '╻', '╽', '╿',
+    '┐', '┑', '┒', '┓', '╕', '╖', '╗', '╮',
+    '┘', '┙', '┚', '┛', '╛', '╜', '╝', '╯',
+    '┤', '┥', '┦', '┧', '┨', '┩', '┪', '┫', '╡', '╢', '╣',
+    '▐', '▕',
+    '|',
 ];
 
 /// Put a space for the glyph in column `w - 1` of `line` when it is one of
-/// [`RIGHT_EDGE_GLYPHS`]: a divider, a field separator or a panel's wall
-/// that a cut has left at the terminal's right edge. Nothing else changes.
+/// [`RIGHT_EDGE_GLYPHS`]: a panel divider, a field separator, a panel's
+/// wall, a stage card's right corner or a scene's scaffold beam that has
+/// landed in the terminal's last column. Nothing else changes: the space
+/// keeps the glyph's style, and no other column is touched.
 fn clear_right_edge(line: &mut Line<'static>, w: usize) {
     if w == 0 {
         return;

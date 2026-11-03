@@ -379,7 +379,10 @@ fn the_docs_sketch_every_preset_with_no_right_border() {
             "```" => in_text = false,
             body if in_text => {
                 let end = body.trim_end().chars().last().unwrap_or(' ');
-                assert!(!"│║▕┤╣┃".contains(end), "ends in a right border: {body:?}");
+                assert!(
+                    !crate::animation::arcade::RIGHT_EDGE_GLYPHS.contains(&end),
+                    "ends in a right border: {body:?}"
+                );
                 assert!(!body.contains(['╗', '╝', '┐', '┘']), "{body:?}");
             }
             _ => {}
