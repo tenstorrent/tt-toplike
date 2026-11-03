@@ -1287,6 +1287,75 @@ fn the_busy_frames_are_the_pinned_frames() {
     assert_eq!(golden_frames(), GOLDEN.to_vec());
 }
 
+// ---- The solo frames, pinned before the party ------------------------------------
+
+/// Every record of the saga crate's solo fixture: one chip, 1,200 ticks,
+/// made-up names. Read once per test process.
+fn solo() -> &'static [Record] {
+    static RECORDS: OnceLock<Vec<Record>> = OnceLock::new();
+    RECORDS.get_or_init(|| {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/tt-toplike-saga/tests/fixtures/solo.jsonl");
+        let read = read_segment(&path).expect("solo.jsonl is committed");
+        assert_eq!(read.bad_lines, 0, "solo.jsonl decodes");
+        read.records
+    })
+}
+
+/// The four frames of the whole solo log, as [`golden_frames`] draws the
+/// busy log: 80x23 and 140x39, "why" off and on, with a memory that observed
+/// the state after every record.
+fn solo_frames() -> Vec<u64> {
+    tc(|| {
+        let mut saga = Saga::new(config(NameMode::Real, Label::Mock));
+        let mut memory = SagaMemory::new();
+        for r in solo() {
+            saga.feed(r);
+            memory.observe(saga.state());
+        }
+        let mut out = Vec::new();
+        for why in [false, true] {
+            let flags = SagaFlags {
+                stopped: false,
+                why,
+            };
+            for size in GOLDEN_SIZES {
+                out.push(frame_hash(&render_saga(
+                    saga.state(),
+                    &memory,
+                    flags,
+                    size,
+                    5,
+                )));
+            }
+        }
+        out
+    })
+}
+
+/// The hashes of [`solo_frames`], taken on the single-chip code before the
+/// party (0.16.4, with the why line as reworded in 0.16.3). One chip must
+/// keep drawing exactly this through Phase A of the party work.
+const SOLO_GOLDEN: [u64; 4] = [
+    15638877983819768657,
+    15019330008394832811,
+    10571686743467978106,
+    10878471527206318858,
+];
+
+/// Prints the hashes for [`SOLO_GOLDEN`]. Run with
+/// `cargo test --locked --lib --features tui print_solo_frames -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints the hashes to pin"]
+fn print_solo_frames() {
+    println!("{:?}", solo_frames());
+}
+
+#[test]
+fn solo_frames_are_the_pre_party_frames() {
+    assert_eq!(solo_frames(), SOLO_GOLDEN.to_vec());
+}
+
 // ---- The arcade panel (0.16.4) ------------------------------------------------
 
 /// A live feed of `state`, not stopped.

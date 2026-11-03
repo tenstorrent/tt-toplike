@@ -1,7 +1,7 @@
 //! Determinism tests for the Saga front door (spec 3.5): the same ordered
 //! stream of record contents gives the same saga.
 //!
-//! The three fixtures in `tests/fixtures/`:
+//! The fixtures in `tests/fixtures/`:
 //!
 //! * `quiet.jsonl`: a six-second recording (60 ticks) of `tt-toplike-tui
 //!   --headless --mock` made without `--mock-workloads` (ledger ruling R6), so
@@ -17,6 +17,11 @@
 //!   errors, a training run). `the_busy_fixture_matches_its_generator`
 //!   keeps the file and the generator in step.
 //!
+//! * `solo.jsonl` and `party4.jsonl`: written by `tests/support/party.rs` (one
+//!   chip and four chips). `tests/party.rs` keeps them in step with the
+//!   generator. Their digests were pinned on the single-chip code before the
+//!   party (0.16.4).
+//!
 //! In generated-name mode the published beats carry aliased causes (ledger
 //! ruling R17), so the digests differ between the two name modes and every
 //! comparison here is made within one mode.
@@ -28,7 +33,13 @@ use tt_toplike_saga::chronicle::NameMode;
 use tt_toplike_saga::{Label, Saga, SagaConfig};
 
 /// The three fixtures, by file name.
-const FIXTURES: [&str; 3] = ["quiet.jsonl", "bringup.jsonl", "busy.jsonl"];
+const FIXTURES: [&str; 5] = [
+    "quiet.jsonl",
+    "bringup.jsonl",
+    "busy.jsonl",
+    "solo.jsonl",
+    "party4.jsonl",
+];
 
 /// A season of 200 ticks (20 s at 10 Hz), short enough that the busy log's
 /// quiet stretches end worlds and dreams are born.
@@ -218,7 +229,7 @@ fn one_temperature_bit_changes_the_first_world() {
     assert_ne!(seed, changed_seed, "a changed reading gave the same world");
 }
 
-/// Golden digests for the three fixtures, one per name mode.
+/// Golden digests for the fixtures, one per name mode.
 ///
 /// These pin the current behaviour: the seed rule, the maze, the hero's walk,
 /// quest planning, the chronicle's grammar and lexicon, and the event order.
@@ -228,10 +239,12 @@ fn one_temperature_bit_changes_the_first_world() {
 /// the story changed for the same log, which breaks replay.
 #[test]
 fn a_snapshot_of_the_digests_matches() {
-    let golden: [(&str, u64, u64); 3] = [
+    let golden: [(&str, u64, u64); 5] = [
         ("quiet.jsonl", 0x42ae3da4810092ce, 0x42ae3da4810092ce),
         ("bringup.jsonl", 0xffa0c7d46fb3aae2, 0xffa0c7d46fb3aae2),
         ("busy.jsonl", 0xc704fe05f6f97267, 0xc49371dd78c6084b),
+        ("solo.jsonl", 0x6d401ae1a7a9e9f1, 0xa9188a23f3126849),
+        ("party4.jsonl", 0x1e0708a50b65a1bb, 0x35c454fd53d24f42),
     ];
     let mut actual = Vec::new();
     for (name, _, _) in golden {

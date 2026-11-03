@@ -5,6 +5,8 @@
 //!   names, so the busy log comes from a script).
 //! * [`read_fixture`] reads one of the committed fixtures with the bus crate's
 //!   segment reader, which skips the header line.
+//! * [`party`] is the generator behind `solo.jsonl` and `party4.jsonl` and
+//!   every in-memory party of the party tests.
 //! * [`renumber`] gives a log new sequence numbers and new times, the way a
 //!   replay host does.
 //! * [`fuzz`] holds the seeded random streams and the adversarial flood of
@@ -14,6 +16,7 @@
 
 pub mod busy;
 pub mod fuzz;
+pub mod party;
 
 use std::path::PathBuf;
 
@@ -68,4 +71,63 @@ pub fn renumber(records: &[Record]) -> Vec<Record> {
             }
         })
         .collect()
+}
+
+/// FNV-1a, 64 bit, one byte at a time.
+fn fnv(h: &mut u64, bytes: &[u8]) {
+    for &b in bytes {
+        *h ^= u64::from(b);
+        *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
+const FNV_START: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// A hash of the saga's chronicle: for each line, oldest first, its tone
+/// code (calm 0, tense 1, triumphant 2) and its text. It reads only public
+/// state. Only the lines still in the ring count, so a log long enough to
+/// push lines out hashes the newest 500.
+pub fn story_print(saga: &tt_toplike_saga::Saga) -> u64 {
+    use tt_toplike_saga::chronicle::Tone;
+    let chronicle = &saga.state().chronicle;
+    let mut h = FNV_START;
+    for beat in chronicle.lines(chronicle.len()) {
+        let tone = match beat.tone {
+            Tone::Calm => 0u8,
+            Tone::Tense => 1,
+            Tone::Triumphant => 2,
+        };
+        fnv(&mut h, &[tone]);
+        fnv(&mut h, beat.text.as_bytes());
+        // A separator, so two lines cannot trade characters unseen.
+        fnv(&mut h, &[0xff]);
+    }
+    h
+}
+
+/// A hash of where the lead hero stood after every tick. It feeds every
+/// record to a fresh saga (real names, mock label, 200-tick season) and,
+/// each time the tick counter moves, folds the hero's floor, x and y into
+/// the hash. It reads only public state; Task A.3 changes the one accessor
+/// line below (`state.hero` to `state.party[0].hero`) and nothing else.
+pub fn story_trace(records: &[Record]) -> u64 {
+    use tt_toplike_saga::chronicle::NameMode;
+    use tt_toplike_saga::{Label, Saga, SagaConfig};
+    let mut saga = Saga::new(SagaConfig {
+        season_ticks: 200,
+        names: NameMode::Real,
+        label: Label::Mock,
+    });
+    let mut h = FNV_START;
+    let mut seen_tick = saga.state().tick;
+    for r in records {
+        saga.feed(r);
+        let state = saga.state();
+        if state.tick != seen_tick {
+            seen_tick = state.tick;
+            let hero = &state.hero;
+            fnv(&mut h, &[hero.floor, hero.pos.0, hero.pos.1]);
+        }
+    }
+    h
 }
