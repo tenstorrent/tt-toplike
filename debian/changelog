@@ -1,3 +1,49 @@
+tt-toplike (0.15.5) noble; urgency=medium
+
+  * The backdrop applies only to the views that carry one of their own:
+    the Inference view (scene), the Training view (sky) and the Wafer
+    Waffler (clouds). Each still takes any of the three kinds or off. Every
+    other view, the arcade among them, carries no backdrop; w and /backdrop
+    there say "no backdrop on this view" and change nothing.
+  * The arcade draws nothing behind its panels, and its c key is gone.
+    now-serving no longer turns on clouds; its Wafer Waffler panel draws
+    its own clouds as before.
+  * [arcade] cloudfield, a layout's backdrop or cloudfield, /arcade
+    cloudfield, a [backdrop.views] entry for a view that takes none, and a
+    [backdrop] default other than off are read and ignored with a note.
+    None of them is an error.
+  * --check-config prints "arcade starts with NAME: N rows".
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 23:00:00 -0800
+
+tt-toplike (0.15.4) noble; urgency=medium
+
+  * A shared backdrop. Any view can draw a signal-driven background behind
+    its content: scene (the Inference atmosphere), sky (the Training aurora
+    and stars) or clouds (the Wafer Waffler's clouds). The Inference view,
+    the Training view and the Wafer Waffler keep their own as before. w cycles
+    the backdrop of the view on screen, /backdrop sets it, and [backdrop] in
+    the config file sets a default and a choice per view. The Starfield
+    refuses scene and sky, because its stars are Tensix cores.
+  * Arcade layouts. { and } step through eight built-in layouts (classic,
+    now-serving, defrag-wide, waffler, workload, deck, skyline, memory-lane)
+    and your own [[arcade.layouts]] tables in the config file. A layout can set
+    the arcade's backdrop. --arcade-layout NAME starts with one, and
+    /arcade layout next, prev, a name or list works on the command bar.
+  * No arcade row ends in a right-side border character at any width. A
+    vertical, a right corner, a right-edge joint, a right-hand block or an
+    ASCII bar in the last column is drawn as a space, and nothing else
+    changes. The default layout differs from 0.15.3 only by that last
+    column at 418 sizes.
+  * A message set by a layout, backdrop or arcade key goes away when you leave
+    that view, and an informational one goes after about four seconds.
+  * Fix: switching layouts no longer shows "no Tenstorrent device found" for
+    one frame.
+  * The backdrop writes far less to the terminal: a serving model's scene
+    went from 1.17 MB/s to 74 KB/s on a blank 200x60 view.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 21:00:00 -0800
+
 tt-toplike (0.15.3) noble; urgency=medium
 
   * Die 3D is now the Wafer Waffler. /waffler and --mode waffler open it, and

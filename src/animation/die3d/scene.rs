@@ -108,7 +108,7 @@ pub struct ChipInputs {
 /// A chip's TDP in watts: SMBUS first, the tt-smi `limits` block second, `None`
 /// when neither reports a positive value. Same rule as `TrainView::chip_tdp`,
 /// which is private to that view.
-fn chip_tdp(backend: &dyn TelemetryBackend, device: &Device) -> Option<f32> {
+pub(crate) fn chip_tdp(backend: &dyn TelemetryBackend, device: &Device) -> Option<f32> {
     backend
         .smbus_telemetry(device.index)
         .and_then(|s| s.tdp_watts())

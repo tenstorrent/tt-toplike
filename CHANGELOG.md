@@ -17,6 +17,35 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.15.5
+- The backdrop applies only to the views that carry one of their own: the Inference view (scene), the
+  Training view (sky) and the Wafer Waffler (clouds). Each still takes any of the three kinds or off. Every
+  other view, the arcade among them, carries no backdrop: `w` and `/backdrop` there say "no backdrop on
+  this view" and change nothing.
+- The arcade draws nothing behind its panels, and its `c` key is gone. `now-serving` no longer turns on
+  clouds; its Wafer Waffler panel draws its own clouds as before.
+- `[arcade] cloudfield`, a layout's `backdrop` or `cloudfield`, `/arcade cloudfield`, a `[backdrop.views]`
+  entry for a view that takes none, and a `[backdrop] default` other than off are read and ignored, with a
+  note on the status line and in `--check-config`. None of them is an error.
+- `--check-config` prints `arcade starts with NAME: N rows`.
+
+### 0.15.4
+- Shared backdrop: any view can draw a signal-driven background (`scene`, `sky` or `clouds`) behind its
+  content. `w` cycles the current view's backdrop, `/backdrop` sets it, `[backdrop]` in `config.toml` sets
+  a default and a choice per view. The Inference view, the Training view and the Wafer Waffler keep their
+  own. See `docs/backdrop.md`.
+- Arcade layouts: `{` and `}` step through eight built-in layouts and your own `[[arcade.layouts]]`;
+  `--arcade-layout NAME`, `/arcade layout ...`. A layout can set the arcade's backdrop. See
+  `docs/arcade-layout.md`.
+- No arcade row ends in a right-side border character at any width. A vertical (`│ ┃ ║` and their dashed
+  and half forms), a right corner (`┐ ┘ ╗ ╝ ╮ ╯` and their heavy and mixed forms), a right-edge joint
+  (`┤ ┫ ╣` and the like), `▐`, `▕` or ASCII `|` in the last column is drawn as a space; nothing else
+  changes. 418 sizes of the default layout differ from 0.15.3, only in their last column.
+- Messages from the layout, backdrop and arcade keys go away when you leave the view.
+- Fix: switching layouts no longer flashes "no Tenstorrent device found" for one frame.
+- The backdrop's terminal traffic fell from 1.17 MB/s to 74 KB/s while a model serves (blank 200x60 view).
+- Limits: not run on real hardware, in a live terminal, or attached to a headless host.
+
 ### 0.15.3
 - Die 3D is the Wafer Waffler (`/waffler`, `--mode waffler`; `/die3d` and `--mode die3d` still work).
 - Every explain, legend and help overlay is shorter and fits 80 columns without scrolling (help in 24

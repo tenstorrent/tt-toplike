@@ -1398,7 +1398,9 @@ fn the_default_layout_draws_the_frames_pinned_before_the_layout_engine() {
 /// The base frames over a grid of sizes: widths 1 to 60 and a spread up to
 /// 240, heights 1 to 60, an idle frame and a busy frame at each. Taken by
 /// running [`grid_idle`] and [`grid_busy`] on 89bf8d05 (f9ebf418, the
-/// arcade before the layout engine, plus the pin tests).
+/// arcade before the layout engine, plus the pin tests), then changed only
+/// in the last column by the right-edge guard: 377 sizes in bc588630 (`│`)
+/// and 82 more when the guard took in the ASCII bar (`|`).
 const BASE_GRID: &str = include_str!("fixtures/arcade_base_grid.txt");
 
 /// The widths of the grid: every width to 60, then a spread up to 240.
@@ -1431,10 +1433,24 @@ fn grid_cell_hash(lines: Vec<Line<'static>>, w: usize, h: usize) -> u64 {
     f.0
 }
 
+/// An arcade laid out by the `classic` preset, so the grid pins it to the
+/// base frames. `classic_is_the_default_layout` checks that its rows are
+/// the default rows `ArcadeVisualization::new` uses.
+fn classic_arcade(w: usize, h: usize) -> ArcadeVisualization {
+    let classic = crate::animation::arcade_presets::preset("classic").expect("classic");
+    ArcadeVisualization::with_config(
+        w,
+        h,
+        &ArcadeConfig {
+            rows: classic.rows.clone(),
+        },
+    )
+}
+
 /// An idle arcade at `w` x `h` after three updates, as [`grid_cell_hash`].
 fn grid_idle(w: usize, h: usize) -> u64 {
     let backend = Fixed::new(2);
-    let mut a = ArcadeVisualization::new(w, h);
+    let mut a = classic_arcade(w, h);
     a.initialize_from_devices(backend.devices());
     a.initialize_topology(&backend);
     for _ in 0..3 {
@@ -1447,7 +1463,7 @@ fn grid_idle(w: usize, h: usize) -> u64 {
 /// updates, as [`grid_cell_hash`].
 fn grid_busy(w: usize, h: usize) -> u64 {
     let backend = Fixed::new(2);
-    let mut a = ArcadeVisualization::new(w, h);
+    let mut a = classic_arcade(w, h);
     a.initialize_from_devices(backend.devices());
     a.initialize_topology(&backend);
     let lane = |id: &str, kind| crate::animation::Activity {

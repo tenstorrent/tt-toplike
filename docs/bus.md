@@ -758,6 +758,25 @@ effects then attach to the panels that exist, by these rules:
   draws the rows from `inference_bus::attached_rows` when the TUI is attached, as their own
   views do.
 
+#### The shared backdrop
+
+Every view can draw a backdrop behind what it shows (`docs/backdrop.md`,
+`src/animation/backdrop.rs`). What it reads from the bus:
+
+* **Clouds**: `toplike.pcie.in_bps` and `toplike.pcie.out_bps` (drift) and `tt_tdp_w` over the
+  chip's TDP (brightness), on this TUI's own chips only, by PCI address. A chip with no reading
+  in the last 10 s uses the backend's own telemetry.
+* **Sky**: `toplike.train.step_ms` of the newest run (speed), while it is at most 30 s old.
+* **Scene**: the same service rows the arcade and the `i` view draw (the attached host's models
+  when attached).
+* A reading marked `Estimated`, or a model whose text is an estimate, puts `~` before the
+  signals on the legend's backdrop line.
+
+The shapes of the sky and the clouds are decoration. A view the last update did not feed starts a
+fresh backdrop, so events from while it was off screen draw nothing. With every
+setting at its default, every view draws the frames it drew before; tests pin them by hash
+(`src/animation/backdrop_pins.rs`, `src/animation/die3d/backdrop_pins.rs`).
+
 The default layout puts the gauge on the `✧ STARFIELD` rule across the whole width, as before.
 The brief that asked for this rule named castle, defrag and the Wafer Waffler; the starfield is first in
 the list so that the default layout's gauge stays where it was. The default frames, with and

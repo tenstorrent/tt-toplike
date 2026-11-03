@@ -20,6 +20,8 @@
 //! Time is `now`, seconds since the view was created, passed in by the caller
 //! from one clock. Nothing here reads a clock, so the tests set time exactly.
 
+#[cfg(test)]
+mod backdrop_pins;
 pub mod bh_layout_data;
 mod busiest;
 pub mod camera;
@@ -86,7 +88,7 @@ const FOOTER_ROWS: usize = 2;
 /// times cuts to the same angles; tests depend on that.
 const CAMERA_SEED: u64 = 0x3D;
 /// Seed of the cloud field. Fixed, so the sky is the same on every run.
-const CLOUD_SEED: u64 = 0xC10D;
+pub(crate) const CLOUD_SEED: u64 = 0xC10D;
 /// An RGB triple as a ratatui colour (`const`, so the footer colours can come
 /// straight from the palette).
 const fn rgb(c: [u8; 3]) -> Color {
@@ -410,6 +412,10 @@ pub struct Die3dView {
     cloud_intensity: f32,
     director: Director,
     detector: TriggerDetector,
+    /// The last `/proc` scan's device holders, blended with the backend's
+    /// tt-smi list for the process events. `None` until the host hands one
+    /// over with [`Die3dView::set_proc_holders`].
+    proc_holders: Option<crate::workload::device_holders::ProcHolders>,
     switcher: Switcher,
     /// Label of each drawn board (boards with at least one Blackhole chip).
     labels: Vec<String>,
@@ -616,6 +622,7 @@ impl Die3dView {
             cloud_intensity: Clouds::intensity(0.0),
             director: Director::new(CAMERA_SEED),
             detector: TriggerDetector::new(),
+            proc_holders: None,
             switcher: Switcher::new(),
             labels: Vec::new(),
             chips: Vec::new(),
@@ -675,6 +682,16 @@ impl Die3dView {
             .collect();
         scales.sort();
         format!("{:?} {:?}", self.director.camera_at(f64::INFINITY), scales)
+    }
+
+    /// Hand over the last `/proc` scan's device holders. The first list
+    /// handed over is history: it starts the process set again and makes no
+    /// event, so the view does not cut for every process already running.
+    pub fn set_proc_holders(&mut self, holders: crate::workload::device_holders::ProcHolders) {
+        if self.proc_holders.is_none() {
+            self.detector.forget_processes();
+        }
+        self.proc_holders = Some(holders);
     }
 
     /// Read every chip from the backend, group the chips into boards and feed
@@ -794,11 +811,16 @@ impl Die3dView {
                 events.extend(found.map(|t| (board, t)));
             }
         }
-        let opened: Vec<(i64, usize)> = backend
-            .device_processes()
-            .iter()
-            .filter_map(|p| p.pid.zip(p.device))
-            .collect();
+        // Who holds which device: the `/proc` scan, with tt-smi's list
+        // blended in (`device_holders::blend`), minus tt-smi's own snapshot
+        // runs. Without a `/proc` scan (`--mock`, `--remote`, no `/proc`)
+        // it is tt-smi's list alone, as before.
+        let opened = {
+            use crate::workload::device_holders::{blend, opened_pairs, ProcHolders};
+            let none = ProcHolders::default();
+            let proc = self.proc_holders.as_ref().unwrap_or(&none);
+            opened_pairs(&blend(proc, backend.device_processes()))
+        };
         for trigger in self.detector.observe_processes(&opened) {
             // A device the view does not draw has no board here.
             if let Some(board) = self
@@ -1229,6 +1251,17 @@ impl Die3dView {
         } else {
             self.switcher.scene_at(now)
         }
+    }
+
+    /// Whether the clouds are switched on (`/clouds`, or the view's
+    /// backdrop setting).
+    pub fn clouds_on(&self) -> bool {
+        self.show_clouds
+    }
+
+    /// Switch the clouds on or off, as `/clouds on|off` does.
+    pub fn set_clouds(&mut self, on: bool) {
+        self.show_clouds = on;
     }
 
     /// Whether the cloud layer is drawn: switched on (`W`) and the view large

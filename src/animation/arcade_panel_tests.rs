@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 //! Arcade frames with a configured layout: one test per new panel kind, the
-//! cloudfield, the width ratio, and every panel kind at several sizes.
+//! services, the width ratio, and every panel kind at several sizes.
 
 use super::bus_tests::{frame_hash, Fixed};
 use super::*;
@@ -17,10 +17,7 @@ fn tc<R>(f: impl FnOnce() -> R) -> R {
 }
 
 fn config(rows: Vec<RowSpec>) -> ArcadeConfig {
-    ArcadeConfig {
-        cloudfield: false,
-        rows,
-    }
+    ArcadeConfig { rows }
 }
 
 fn one(view: View) -> Vec<RowSpec> {
@@ -220,10 +217,12 @@ fn the_inference_panel_says_no_server_and_draws_the_snake_when_one_runs() {
     })
 }
 
+/// The arcade carries no backdrop: in the default layout, which has no
+/// inference panel, a serving model changes no cell.
 #[test]
-fn the_cloudfield_fills_only_blank_cells_and_off_draws_the_pinned_frame() {
+fn services_change_nothing_in_the_default_layout() {
     tc(|| {
-        // A server generating tokens: the atmosphere has an aurora to draw.
+        // A server generating tokens: a scene would have an aurora to draw.
         let serving: Vec<_> = (0..200)
             .map(|i| mock_services(i as f32))
             .find(|r| {
@@ -231,42 +230,15 @@ fn the_cloudfield_fills_only_blank_cells_and_off_draws_the_pinned_frame() {
                     .any(|s| s.serving.is_some_and(|v| v.generation_tps >= 1.0))
             })
             .expect("a mock roster that generates");
-        let frame = |on: bool, rows: Vec<_>| {
+        let frame = |rows: Vec<_>| {
             let (mut a, b) = arcade_with(arcade_layout::default_rows(), 120, 40);
-            a.set_cloudfield(on);
             for _ in 0..10 {
                 a.set_services(rows.clone());
                 a.update(&b);
             }
             a.render(&b)
         };
-        let plain = frame(false, Vec::new());
-        let off = frame(false, serving.clone());
-        let on = frame(true, serving.clone());
-        assert_eq!(
-            frame_hash(&off),
-            frame_hash(&plain),
-            "cloudfield off: services change nothing in the default layout"
-        );
-        assert_ne!(frame_hash(&on), frame_hash(&off), "on draws a backdrop");
-        // Every cell the backdrop changed was a blank cell.
-        let full = arcade_layout::Rect {
-            x: 0,
-            y: 0,
-            w: 120,
-            h: off.len(),
-        };
-        let (a, b) = (cells_in(&off, full), cells_in(&on, full));
-        let mut filled = 0;
-        for (ra, rb) in a.iter().zip(&b) {
-            for (ca, cb) in ra.iter().zip(rb) {
-                if ca != cb {
-                    assert_eq!(ca.0, ' ', "only a blank cell is filled");
-                    filled += 1;
-                }
-            }
-        }
-        assert!(filled > 0);
+        assert_eq!(frame_hash(&frame(serving)), frame_hash(&frame(Vec::new())));
     })
 }
 
@@ -313,11 +285,6 @@ fn defrag_at_width_three_draws_three_times_the_castle() {
     })
 }
 
-/// Characters that would be a right-side frame edge at the end of a row.
-/// (The inference panel's loading snake draws boxed stage names such as
-/// `┌load───┐`, as the `i` view does; a box corner is not a frame edge.)
-const RIGHT_BORDERS: &str = "│║▕┤╣";
-
 #[test]
 fn every_panel_kind_at_several_sizes_fits_its_row() {
     tc(|| {
@@ -333,7 +300,6 @@ fn every_panel_kind_at_several_sizes_fits_its_row() {
             let mut a = ArcadeVisualization::with_config(w, h, &config(example_rows()));
             a.initialize_from_devices(b.devices());
             a.initialize_topology(&b);
-            a.set_cloudfield(true);
             let run = crate::workload::train::MockTrainRun::new();
             for i in 0..4 {
                 a.set_services(mock_services(100.0 + i as f32));
@@ -368,7 +334,7 @@ fn every_panel_kind_at_several_sizes_fits_its_row() {
                 let edges = [w - 1];
                 for x in edges {
                     assert!(
-                        !RIGHT_BORDERS.contains(row[x].0),
+                        !RIGHT_EDGE_GLYPHS.contains(&row[x].0),
                         "{w}x{h} row {y} col {x} is a right border: {text:?}"
                     );
                 }

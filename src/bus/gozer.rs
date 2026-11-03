@@ -231,6 +231,7 @@ impl CommandRunner {
         if !matches!(args.first(), Some(&"status") | Some(&"env")) {
             return None;
         }
+        crate::startup_log::phase("gozer exec");
         let deadline = Instant::now() + timeout;
         let mut child = Command::new(&self.program)
             .args(args)

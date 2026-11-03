@@ -22,7 +22,13 @@ pub mod activity_lanes;
 pub mod arcade;
 pub mod arcade_bus;
 pub mod arcade_layout;
+pub mod arcade_presets;
 pub mod atmosphere;
+pub mod backdrop;
+#[cfg(test)]
+mod backdrop_cost;
+#[cfg(test)]
+mod backdrop_pins;
 pub mod baseline;
 pub(crate) mod bus_intake;
 #[cfg(test)]

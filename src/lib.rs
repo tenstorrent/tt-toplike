@@ -84,6 +84,8 @@ pub mod bus;
 pub mod error;
 pub mod logging;
 pub mod models;
+// The start-up timeline written when `TT_TOPLIKE_STARTUP_LOG` is set.
+pub mod startup_log;
 
 // Workload analysis. The module is always available because its `inference`
 // submodule (telemetry-based workload classification) is cross-platform and used

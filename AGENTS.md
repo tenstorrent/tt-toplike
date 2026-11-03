@@ -1485,6 +1485,41 @@ the point (and still fun!)", plus renaming Die 3D to a fun name the user liked, 
   speed and density drivers, docs/bus.md's "the other views read what they read before", README's
   "the arcade hero duel reads the local monitor".
 
+### Version history: 0.15.5 (Nov 2 2026)
+
+0.15.5 limits the shared backdrop to the Inference view, the Training view and the Wafer Waffler
+(`backdrop::accepts`); the arcade carries none.
+
+### The backdrop only where a view carries one (Nov 2 2026, branch `preview`)
+
+Prompt: "disable the cloud layer behind the arcade mode. only apply it to modules that already
+carry clouds."
+- The shared backdrop applies to the three views with a background of their own: the Inference
+  view (scene), the Training view (sky) and the Wafer Waffler (clouds). Each still takes every
+  kind. Every other view (Insights, Grid, Starfield, Castle, Flow, Arcade, Defrag, `~`) takes
+  none. `backdrop::accepts` is the single table for this; adding a view is one arm. `refusal`,
+  `BackdropConfig::choice`, `BackdropSettings::set`, `command` and `key_message` all read it.
+- The arcade has no backdrop: its `Backdrop`, signals and load scales are gone, and so are the
+  `c` key, `toggled_backdrop`, `apply_backdrop`, `NamedLayout::backdrop` and
+  `ArcadeConfig::cloudfield`. `now-serving` no longer sets clouds. The Die 3D panel in a layout
+  still draws its own clouds.
+- `[arcade] cloudfield` (any value), a layout's `backdrop` or `cloudfield`, `/arcade
+  cloudfield`, `[backdrop.views]` entries for a view that takes none and a `default` other than
+  off are read and ignored with a note, never a problem. `w` and `/backdrop` in a view that
+  takes none say "no backdrop on this view". The legend of such a view has no backdrop line.
+- The 12 `arcade ... cloudfield true` pins went with the arcade's backdrop; the 12 cloudfield-off
+  pins kept their values under new names, and the base grid and every other pin are unchanged.
+  The arcade-only cost measurements (`backdrop_cost`, `backdrop_layer_cost`) went too.
+- Tests: each refusing view draws a byte-identical frame with any setting, after `w` and
+  `/backdrop`, and reads no signal; the three views still draw theirs. Letting the arcade
+  accept in the table turns six tests red.
+
+### Version history: 0.15.4 (Nov 2 2026)
+
+0.15.4 adds the shared backdrop (`src/animation/backdrop.rs`, `docs/backdrop.md`) and the arcade layout
+presets with `{` and `}` (`src/animation/arcade_presets.rs`). The built-in layout order lives in one table in
+`arcade_presets.rs`.
+
 ### Version history: 0.15.3 (Nov 2 2026)
 
 0.15.3 adds the arcade layout engine (`src/animation/arcade_layout.rs`, `docs/arcade-layout.md`), the Wafer
@@ -1534,6 +1569,73 @@ inference server as panels, a cloudfield switch, and no change with no config.
   over 4440 sizes, captured on 89bf8d05 in a git worktree outside the repo, and a test compares
   every one. Rule labels and the hero's bands are made with the layout, so a frame builds
   neither. User-facing Die 3D strings take the display name (`◆ WAFER WAFFLER`).
+
+### Shared backdrop (Nov 2 2026, branch `backdrop`)
+
+Prompt: "there's a cloud-like background from signals in Training view and Inference view both.
+And now also 3d/waffler view too. I want that to be a shared feature. Not necessarily needing a
+black out bg, can just layer on top transparently too."
+- `src/animation/backdrop.rs` puts the three painters behind one `Backdrop`: scene (the Inference
+  atmosphere), sky (the Training aurora and stars), clouds (the Waffler cloud field, one band per
+  cell). `layer` (lines) and `layer_buffer` (a drawn ratatui buffer) fill blank cells only.
+  `BackdropSignals::gather` reads PCIe, power and the training step time from the world for this
+  TUI's chips, with the backend as the fallback, and marks estimates.
+- Defaults are byte-identical: the snake, the Training view and the Waffler keep their own
+  painters for their own kind and turn them off for another. Pins taken at d6560a27 before any
+  change (`backdrop_pins.rs`, `die3d/backdrop_pins.rs`) hold.
+- Settings: `[backdrop] default` and `[backdrop.views]` in config.toml, `/backdrop`, and `w` in
+  every view (`c` stays the arcade's scene switch; `arcade.cloudfield` is an alias with a note).
+  The Starfield refuses scene and sky (its stars are cores).
+- The sky and the clouds move on the clouds' 4 Hz step clock; the shared sky's aurora is coloured
+  in flat bands, which cut its cost on the arcade at 200x60 from 137 to 18 changed cells a frame.
+- Docs: `docs/backdrop.md`; the bus section is in `docs/bus.md`.
+
+### Backdrop and arcade presets together (Nov 2 2026, branch `preview`)
+
+The two branches above, cherry-picked onto one branch and made one whole, then one fix wave from
+both reviews.
+- A layout's `cloudfield` became `backdrop = "off"|"scene"|"sky"|"clouds"`, applied to the
+  arcade's backdrop setting when the layout is selected; `cloudfield = true` in a layout is an
+  alias of `backdrop = "scene"` with a note. `now-serving` sets `clouds` and is second in the
+  cycle, after `classic` (the user's order "for now"; it lives in `arcade_presets::presets`).
+- `c` turns the arcade's backdrop off, or on as the layout's kind; `w` cycles the kind. Help packs
+  the global keys four to a line to fit both. Status messages from these keys go with their view
+  and after 4 s of animation time.
+- `{` `}` and `/arcade` share `arcade_switch` (mod.rs), which updates the new arcade before it is
+  drawn. The status line is at most 78 characters.
+- The shared scene steps 4 times a second with banded colours (about 74 KB/s on a blank 200x60
+  view while serving, from 1.17 MB/s); the shared clouds use the Waffler's `LoadScale`; a
+  default a view refuses leaves it off with a note; dialogs and the command bar keep the
+  backdrop out.
+- No arcade row ends in a right-side border at any width. The guard (`clear_right_edge`) puts a
+  space for a glyph of `RIGHT_EDGE_GLYPHS` in the last column: every box-drawing piece with a
+  vertical stroke and no stroke to the right (verticals, right corners, right-edge joints),
+  `▐`, `▕` and ASCII `|`. Nothing else changes. The first pass had no corners and no `|`, and the
+  sweep read the same list, so it could not see them (re-review SF1); the guard, the sweeps and
+  a test that the list holds every glyph AGENTS.md names now share a single constant. 418
+  base-grid sizes differ from 0.15.3, only in their last column; one backdrop pin was retaken.
+
+### Arcade layout presets and `{` `}` (Nov 2 2026, branch `arcade-presets`)
+
+Prompt: "can we add a variety of alternative arcade layouts to switch between. with `{` and `}`
+alternating between layouts?" Later: "now serving: top: 3 wide inference server, big bottom:
+left: 3d cube, right: defrag", then "this is not the default" (no starfield) and "clouds should
+go behind the whole arcade".
+- `src/animation/arcade_presets.rs`: eight built-in layouts (`classic` is the default rows and
+  is pinned by the base grid), `LayoutCycle` (config, then `[[arcade.layouts]]` in file order,
+  then the presets; wraps both ways), `/arcade layout next|prev|<name>|list`, the `{` `}` keys.
+- `ArcadeVisualization::relayout` builds the arcade again at a size from new rows and moves over
+  the hero (scaled), the cloudfield setting, the baseline, the duel, the lanes and the bus
+  state. The TUI calls it on the keypress, so the next draw is the new layout. That draw comes
+  before any update, which found a divide by zero in `MemoryFlowVis` drawn before its first
+  update (fixed: no heat map until the grid is known).
+- Config: `[[arcade.layouts]]` (with an `s`: TOML cannot have `[arcade] layout = "name"` and
+  `[[arcade.layout]]` in one file), `[arcade] layout`, `--arcade-layout`. A problem in one
+  layout drops only that layout; the old all-or-nothing rule stays for the rest of `[arcade]`.
+- A layout may carry `cloudfield = true|false`, applied when it is selected (`now-serving`
+  sets it). It is a thin setter over `set_cloudfield`, for the shared backdrop to take over.
+- The arcade's title and Row 1 are cut at the terminal's width (they ran past it below about
+  30 columns), and the hero is not drawn past the right edge (a 0-column arcade).
 
 ### Version history: 0.15.1 (Nov 2 2026)
 

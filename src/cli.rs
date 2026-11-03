@@ -244,13 +244,29 @@ pub struct Cli {
     /// exit non-zero when there is one.
     ///
     /// Reads `~/.config/tt-toplike/config.toml`, the only config file. The
-    /// `[arcade]` section sets the arcade's layout and its cloudfield; see
-    /// docs/arcade-layout.md. In the arcade, `c` or `/arcade cloudfield
-    /// on|off` switches the cloudfield, which shows only while an inference
-    /// service is loading or serving. Does not enter the TUI and opens no
-    /// device.
+    /// `[arcade]` section sets the arcade's own layouts and the layout to start
+    /// with (docs/arcade-layout.md); the report lists every arcade layout with
+    /// its panels. The `[backdrop]` section sets the backdrop of the Inference
+    /// view, the Training view and the Wafer Waffler: off, scene, sky or
+    /// clouds (docs/backdrop.md); other views carry none. In the TUI, `w`
+    /// cycles the backdrop of those views and `/backdrop` shows or sets it; in
+    /// the arcade, `}` and `{` step through the layouts. Does not enter the TUI
+    /// and opens no device.
     #[arg(long)]
     pub check_config: bool,
+
+    /// Start the arcade with the layout NAME.
+    ///
+    /// A built-in layout (classic, now-serving, defrag-wide, waffler,
+    /// workload, deck, skyline, memory-lane) or one from the config file (`config` for its
+    /// `[[arcade.row]]` tables, or the name of an `[[arcade.layouts]]`
+    /// table). Wins over `[arcade] layout` in the config. An unknown name is
+    /// reported on the status line and the arcade starts with the first
+    /// layout. In the arcade, `}` and `{` step to the next and previous
+    /// layout, and `/arcade layout next|prev|<name>|list` does the same from
+    /// the command bar. See docs/arcade-layout.md.
+    #[arg(long, value_name = "NAME")]
+    pub arcade_layout: Option<String>,
 
     /// Throttle animation FPS when the host is under heavy load (opt-in).
     ///
@@ -829,6 +845,7 @@ impl Cli {
             print: false,
             bench: true,
             check_config: false,
+            arcade_layout: None,
             mode: None,
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
@@ -1124,6 +1141,7 @@ mod tests {
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             check_config: false,
+            arcade_layout: None,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1175,6 +1193,7 @@ mod tests {
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             check_config: false,
+            arcade_layout: None,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1221,6 +1240,7 @@ mod tests {
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             check_config: false,
+            arcade_layout: None,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1267,6 +1287,7 @@ mod tests {
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             check_config: false,
+            arcade_layout: None,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1317,6 +1338,7 @@ mod tests {
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             check_config: false,
+            arcade_layout: None,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1360,6 +1382,7 @@ mod tests {
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             check_config: false,
+            arcade_layout: None,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1406,6 +1429,7 @@ mod tests {
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             check_config: false,
+            arcade_layout: None,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1461,6 +1485,7 @@ mod tests {
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             check_config: false,
+            arcade_layout: None,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1504,6 +1529,7 @@ mod tests {
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             check_config: false,
+            arcade_layout: None,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,
@@ -1549,6 +1575,7 @@ mod tests {
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
             check_config: false,
+            arcade_layout: None,
             throttle: false,
             idle_on_blur: false,
             tt_smi_reset_behavior: None,

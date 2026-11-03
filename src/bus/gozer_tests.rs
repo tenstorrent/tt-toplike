@@ -957,3 +957,32 @@ fn env_chip_list_takes_bdfs_only() {
     *h.env.lock().unwrap() = Some(r#"{"TT_VISIBLE_DEVICES": "0,1"}"#.into());
     assert!(denied(&g.permit(&EntityKey::chip(A))));
 }
+
+/// `gozer status` has a 2 s wall-clock timeout, so the thread that runs it
+/// must not be lowered: a child inherits its thread's nice value, and an
+/// unprivileged process cannot raise it back. The runner records the nice
+/// value of the thread it runs on, which is the value `gozer` would get.
+#[cfg(target_os = "linux")]
+#[test]
+fn gozer_runs_at_the_priority_of_the_thread_that_polls() {
+    struct NiceProbe(std::sync::Mutex<Option<i32>>);
+    impl StatusRunner for NiceProbe {
+        fn run(&self, _args: &[&str], _t: Duration) -> Option<String> {
+            *self.0.lock().unwrap() = Some(crate::workload::background::thread_nice());
+            None
+        }
+    }
+    let probe = Arc::new(NiceProbe(std::sync::Mutex::new(None)));
+    let mut src = GozerSource::new(probe.clone());
+    let t = Instant::now();
+    ctx_poll(&mut src, t);
+    // Wait for the worker's answer (it answers at once).
+    while probe.0.lock().unwrap().is_none() {
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(
+        *probe.0.lock().unwrap(),
+        Some(crate::workload::background::thread_nice()),
+        "gozer would run lowered"
+    );
+}

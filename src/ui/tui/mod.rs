@@ -35,10 +35,14 @@ pub use bench::BenchResult;
 pub mod chip_portrait;
 pub mod perf;
 pub use perf::PerfMeter;
+#[cfg(test)]
+mod arcade_traffic;
 pub(crate) mod proc_scan;
 pub(crate) mod reset_status;
+pub mod splash;
 pub mod throttle;
 pub use throttle::ThrottleState;
+mod backdrop_bus;
 mod grid_bus;
 mod hivemind_bus;
 mod hivemind_view;
@@ -244,6 +248,130 @@ fn die3d_key_for(mode: DisplayMode, c: char) -> Option<crate::animation::die3d::
         crate::animation::die3d::key_to_die3d(c)
     } else {
         None
+    }
+}
+
+/// The arcade layout step `c` stands for in `mode`: `}` next and `{`
+/// previous in Arcade, `None` anywhere else and for any other key.
+fn arcade_step_for(mode: DisplayMode, c: char) -> Option<crate::animation::arcade_presets::Step> {
+    if mode == DisplayMode::Arcade {
+        crate::animation::arcade_presets::step_for(c)
+    } else {
+        None
+    }
+}
+
+/// What asks the arcade to change its layout: the `{` or `}` key, or the
+/// argument of an `/arcade` command.
+#[derive(Debug, Clone, Copy)]
+enum ArcadeInput<'a> {
+    Key(char),
+    Command(&'a str),
+}
+
+/// The arcade's state that `{`, `}` and `/arcade` change, as `run_app`
+/// holds it.
+struct ArcadeSwitch<'a> {
+    arcade: &'a mut Option<ArcadeVisualization>,
+    config: &'a mut crate::animation::arcade_layout::ArcadeConfig,
+    cycle: &'a mut crate::animation::arcade_presets::LayoutCycle,
+}
+
+/// The body of the `{` `}` key arm and of `/arcade`: step or select the
+/// layout, and lay the arcade out again. Returns the
+/// status-line message and whether it is an error, or `None` for a key
+/// that is not a layout key in `mode`.
+///
+/// After a relayout the new arcade gets one update from the state it
+/// carried over (services, training run, devices) before it is drawn, as
+/// a resize builds and updates in one tick. Without it, the first frame
+/// after a switch shows "no Tenstorrent device found" and "0 of 0 models"
+/// in the new panels.
+fn arcade_switch(
+    input: ArcadeInput<'_>,
+    mode: DisplayMode,
+    s: ArcadeSwitch<'_>,
+    backend: &dyn TelemetryBackend,
+) -> Option<(String, bool)> {
+    use crate::animation::arcade_presets as presets;
+    let (message, error, relayout) = match input {
+        ArcadeInput::Key(c) => {
+            let step = arcade_step_for(mode, c)?;
+            (presets::step_status(s.cycle, step), false, true)
+        }
+        ArcadeInput::Command(arg) => {
+            let r = presets::command(arg, s.cycle);
+            (r.message, r.error, r.relayout)
+        }
+    };
+    if relayout {
+        s.config.rows = s.cycle.current().rows.clone();
+        let config = &*s.config;
+        *s.arcade = s.arcade.take().map(|a| {
+            let (w, h) = (a.width(), a.height());
+            a.relayout(w, h, config, backend)
+        });
+    }
+    if let (true, Some(a)) = (relayout, s.arcade.as_mut()) {
+        a.update(backend);
+    }
+    Some((message, error))
+}
+
+/// How long an informational message that belongs to a view stays on the
+/// status line, in seconds of animation time.
+const VIEW_MESSAGE_SECS: f64 = 4.0;
+
+/// A status-line message that belongs to one view: a layout switch, the
+/// the `w` key, a `/backdrop` or `/arcade` reply. It goes
+/// away when that view is left, and an informational one after
+/// [`VIEW_MESSAGE_SECS`]. A global message (rotation, config problems,
+/// `/mode` errors) has no `ViewMessage` and stays as before.
+#[derive(Debug, Clone, PartialEq)]
+struct ViewMessage {
+    /// The message's text, to tell whether `cmd_message` still holds it.
+    text: String,
+    view: DisplayMode,
+    /// The animation time it was shown at.
+    at_s: f64,
+}
+
+impl ViewMessage {
+    /// Tag the message now in `msg` as belonging to `view`.
+    fn tag(msg: &Option<(String, bool)>, view: DisplayMode, now_s: f64) -> Option<ViewMessage> {
+        msg.as_ref().map(|(text, _)| ViewMessage {
+            text: text.clone(),
+            view,
+            at_s: now_s,
+        })
+    }
+}
+
+/// Clear `msg` when it belongs to a view (`tag`) and that view is no
+/// longer `mode`, or when it is informational and older than
+/// [`VIEW_MESSAGE_SECS`] of animation time. An error stays until the next
+/// command. A message the tag does not describe (another message has
+/// replaced it) is left alone and the tag dropped. Called every loop turn,
+/// at the mode-transition choke point.
+fn tidy_view_message(
+    msg: &mut Option<(String, bool)>,
+    tag: &mut Option<ViewMessage>,
+    mode: DisplayMode,
+    now_s: f64,
+) {
+    let Some(t) = tag.as_ref() else {
+        return;
+    };
+    match msg.as_ref() {
+        Some((text, error)) if *text == t.text => {
+            let left = t.view != mode;
+            let old = !*error && now_s - t.at_s >= VIEW_MESSAGE_SECS;
+            if left || old {
+                *msg = None;
+                *tag = None;
+            }
+        }
+        _ => *tag = None,
     }
 }
 
@@ -651,8 +779,14 @@ pub fn install_panic_hook() {
             log::warn!("process scan thread panicked: {info}");
             return;
         }
+        // Stop the start-up splash first, without letting it clear the
+        // screen, so it cannot draw over or erase the message below.
+        splash::abandon();
         let _ = disable_raw_mode();
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableFocusChange);
+        // Leave the alternate screen and turn focus reports off (the bytes
+        // crossterm's `LeaveAlternateScreen` and `DisableFocusChange` write),
+        // through the splash's writer so a test can see their order.
+        splash::emit_for_hook(b"\x1b[?1049l\x1b[?1004l");
         crate::logging::enable_stderr();
         original_hook(info);
     }));
@@ -675,6 +809,7 @@ pub fn start_bus_after_panic_hook(
 }
 
 pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
+    crate::startup_log::begin();
     // Check if we have a TTY available
     if !std::io::stdout().is_terminal() {
         return Err(TTTopError::Terminal(
@@ -683,6 +818,10 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
                 .to_string()
         ));
     }
+
+    // The start-up splash (`splash`): it draws only if the first frame takes
+    // longer than 150 ms, and the guard gives the screen back on an error.
+    let splash_guard = splash::start();
 
     // Create backend config
     let config = BackendConfig::new()
@@ -697,10 +836,16 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
 
     // Create initial backend
     let backend_type = cli.effective_backend();
+    splash::set_step(if backend_type == BackendType::Json {
+        splash::Step::ReadingTtSmi
+    } else {
+        splash::Step::LookingForChips
+    });
     let mut backend =
         factory::create_backend(backend_type, config.clone(), cli).map_err(TTTopError::Backend)?;
 
     log::info!("TUI started with {:?} backend", backend_type);
+    crate::startup_log::phase("backend ready");
 
     // Disable stderr log output BEFORE entering raw mode. Once the terminal is
     // in raw mode, a stray `\n` from a log line doesn't return the cursor to
@@ -715,6 +860,7 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // to a dead socket) reports on a normal terminal.
     let bus_opts =
         crate::bus::tui_bus::TuiBusOptions::from_cli(cli, backend_type, &backend.backend_info());
+    splash::set_step(splash::Step::StartingBus);
     let mut tui_bus = match start_bus_after_panic_hook(&bus_opts, backend.as_ref()) {
         Ok(b) => b,
         Err(e) => {
@@ -730,7 +876,10 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // to the status line (see `cmd_message` in `run_app`), and a bad
     // `[arcade]` keeps the default layout. Pinned by
     // `config_read_tests::the_config_is_read_before_raw_mode`.
-    let loaded_config = crate::config::load_config();
+    crate::startup_log::phase("bus started");
+    let mut loaded_config = crate::config::load_config();
+    // `--arcade-layout NAME` wins over `[arcade] layout`.
+    crate::config::choose_layout(&mut loaded_config, cli.arcade_layout.as_deref());
 
     // Setup terminal
     enable_raw_mode().map_err(|e| {
@@ -755,6 +904,8 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         .clear()
         .map_err(|e| TTTopError::Terminal(e.to_string()))?;
 
+    splash::handover();
+    crate::startup_log::phase("alt screen");
     // Create app state and run
     let res = run_app(
         &mut terminal,
@@ -765,6 +916,10 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         &mut tui_bus,
         &loaded_config,
     );
+
+    // Stop the splash if no frame was ever drawn, before the screen is
+    // restored below.
+    drop(splash_guard);
 
     // Re-enable stderr output before exiting
     crate::logging::enable_stderr();
@@ -809,8 +964,22 @@ fn run_app(
     for p in &loaded_config.problems {
         log::warn!("config: {p}");
     }
-    let arcade_config = loaded_config.arcade.clone();
-    let mut arcade_cloudfield = arcade_config.cloudfield;
+    let mut arcade_config = loaded_config.arcade.clone();
+    // Each view's backdrop (`[backdrop]`, `/backdrop`, the `w` key) and the
+    // one the TUI lays over the view on screen (see `backdrop_bus`). The
+    // settings live here, so they hold across a resize.
+    let mut backdrop_settings =
+        crate::animation::backdrop::BackdropSettings::new(loaded_config.backdrop.clone());
+    let mut shared_backdrop = backdrop_bus::SharedBackdrop::default();
+    let backdrop_started = Instant::now();
+    // The layouts `{` and `}` step through (`arcade_presets`). The choice
+    // lives here, so it holds across a resize and when the arcade is left
+    // and entered again; `arcade_config.rows` follows it.
+    let mut arcade_cycle = crate::animation::arcade_presets::LayoutCycle::new(
+        &loaded_config.layouts,
+        loaded_config.start_layout.as_deref(),
+    );
+    arcade_config.rows = arcade_cycle.current().rows.clone();
     let anim_cfg = {
         use crate::config::AnimConfig;
         AnimConfig::from_profile(cli.profile).merge(crate::config::AnimConfigOverrides {
@@ -842,36 +1011,34 @@ fn run_app(
 
     // The 2-second process scan (see `proc_scan`). `Scanner` owns the
     // cross-platform sysinfo process listing and, on Linux with
-    // `linux-procfs`, the /proc TT attribution and the serving probes. One
-    // synchronous scan here fills the panels for the first frame; after that
-    // the scanner moves to a worker thread (`scan_handle`, below) so the
-    // ~135 ms refresh never runs on this render/input thread.
-    let mut scanner = proc_scan::Scanner::new();
-    let initial_scan = {
-        use proc_scan::Scan;
-        scanner.scan(&proc_scan::ScanRequest {
-            // TT-attributed backends (Sysfs/Hybrid/Json/Luwen — anything but
-            // --host/--mock) show the TT-filtered list from the first frame.
-            only_tt: crate::cli::backend_shows_only_tt(backend_type),
-            // The prober has no verdicts before its first cycle.
-            verdicts: std::collections::HashMap::new(),
-            // No reset scan at start-up, as before.
-            want_processes: false,
-            want_trainer: false,
-        })
-    };
+    // `linux-procfs`, the /proc TT attribution and the serving probes. It
+    // runs on a worker thread (`scan_handle`) from the start, so the first
+    // frame does not wait for it: the first scan is asked for here and its
+    // result is applied by the loop like every later one, a few hundred
+    // milliseconds in (`TT_TOPLIKE_STARTUP_LOG` writes the timeline; see
+    // `crate::startup_log`).
+    crate::ui::tui::splash::set_step(crate::ui::tui::splash::Step::ScanningProcesses);
+    let mut scan_handle = proc_scan::ScannerHandle::spawn_with(proc_scan::Scanner::new);
+    scan_handle.request(proc_scan::ScanRequest {
+        // TT-attributed backends (Sysfs/Hybrid/Json/Luwen — anything but
+        // --host/--mock) show the TT-filtered list.
+        only_tt: crate::cli::backend_shows_only_tt(backend_type),
+        // The prober has no verdicts before its first cycle.
+        verdicts: std::collections::HashMap::new(),
+        // No reset scan and no trainer search in the first scan, as before.
+        want_processes: false,
+        want_trainer: false,
+        devices: proc_scan::device_keys(backend.devices()),
+    });
     // Background liveness prober: confirms server runtimes (vllm, ollama) via
-    // their local API off the render path. First cycle has no verdicts yet, so
-    // rows() relies on the cheap snapshot tier until the worker reports back.
+    // their local API off the render path. It gets its first targets when
+    // the first scan result is applied.
     let liveness_prober = crate::workload::LivenessProber::spawn();
-    liveness_prober.submit(initial_scan.runtimes);
     // Background inference-server monitor: probes detected TT inference-server
-    // containers (docker stats + /health) off the render path. Not yet read by
-    // any panel — used by the [i] panel in the next task.
+    // containers (docker stats + /health) off the render path. Its first
+    // targets also come with the first scan result.
     #[cfg(target_os = "linux")]
     let inference_monitor = crate::workload::InferenceServerMonitor::spawn();
-    #[cfg(target_os = "linux")]
-    inference_monitor.submit(initial_scan.inference_servers);
     // Multi-model roster lines for the `[i]` view, recomputed each monitor tick
     // (in the InferenceMonitor update branch). Held here so the render pass —
     // which must reserve the same number of rows the snake was sized against —
@@ -886,20 +1053,17 @@ fn run_app(
     // Background model-catalog refresher: curl-refreshes the compatibility
     // catalog off the render path; feeds the cold-trail starfield screensaver.
     let catalog_refresher = crate::workload::CatalogRefresher::spawn();
-    // Linux `/proc` builds also keep the start-up serving metrics; the
-    // loop's `serving_metrics` is seeded from them further down.
-    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-    let initial_serving_metrics = initial_scan.serving_metrics;
-    let mut proc_rows: Vec<ProcRow> = initial_scan.proc_rows;
-    // From here on every scan runs on the worker. The loop asks for one at
-    // the 2 s cadence and applies each result when it arrives.
-    let mut scan_handle = proc_scan::ScannerHandle::spawn(scanner);
+    // Empty until the first scan result is applied.
+    let mut proc_rows: Vec<ProcRow> = Vec::new();
+    // The loop asks for the next scan 2 s from now and applies each result
+    // when it arrives.
     let mut last_proc_rows_update = Instant::now();
 
     // Host CPU / RAM monitoring — sampled on the same 2s cadence as processes.
     // Cross-platform: the bars are useful on macOS too. sysinfo needs two calls
-    // separated in time to compute meaningful CPU%; we call it twice at init
-    // (with a tiny sleep) so the first frame shows real data rather than zeros.
+    // separated in time to compute a CPU%. The first is made here; the second
+    // when the first scan result arrives (`host_cpu_primed`), so start-up
+    // does not sleep for it. Until then the CPU bar reads 0.
     let (mut sys_monitor, mut host_cpu_pct, mut host_mem_used, mut host_mem_total) = {
         use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
         let mut s = System::new_with_specifics(
@@ -909,16 +1073,14 @@ fn run_app(
         );
         s.refresh_cpu_usage();
         s.refresh_memory();
-        // A brief pause lets the kernel accumulate CPU ticks for a real sample.
-        std::thread::sleep(Duration::from_millis(200));
-        s.refresh_cpu_usage();
-        s.refresh_memory();
         let cpu = s.global_cpu_usage();
         let used = s.used_memory();
         let tot = s.total_memory();
         (s, cpu, used, tot)
     };
+    let mut host_cpu_primed = false;
 
+    crate::startup_log::phase("loop setup");
     // UI state - initialize from CLI --mode option if provided
     let mut display_mode = cli
         .mode
@@ -1047,8 +1209,13 @@ fn run_app(
     // so it works from every mode without mode-specific plumbing.
     let mut cmd_mode = false;
     let mut cmd_buf = String::new();
-    let mut cmd_message: Option<(String, bool)> =
-        crate::config::problem_summary(&loaded_config.problems).map(|m| (m, true)); // (text, is_error)
+    // (text, is_error)
+    let mut cmd_message: Option<(String, bool)> = crate::config::status_message(loaded_config);
+    // The view `cmd_message` belongs to, if it belongs to one, and the
+    // animation clock its lifetime runs on: the nominal frame time of each
+    // tick, so a stalled loop does not age it.
+    let mut cmd_message_view: Option<ViewMessage> = None;
+    let mut message_clock_s = 0.0f64;
 
     // `/remote` discovery picker: boxes from the most recent `/remote` (no-arg)
     // discovery, retained so `/remote <n>` can select by list position. Empty
@@ -1150,7 +1317,7 @@ fn run_app(
     let mut inference_engine = InferenceEngine::new();
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut serving_metrics: std::collections::HashMap<i32, ServingMetrics> =
-        initial_serving_metrics;
+        std::collections::HashMap::new();
     // Cross-platform: the unified render path reads these. They're only mutated
     // by the Linux-gated process-navigation / kill key handlers; off-Linux they
     // stay at their defaults (cursor 0, no kill dialog).
@@ -1217,6 +1384,7 @@ fn run_app(
     let mut last_takeover_tick = Instant::now();
 
     loop {
+        let iter_start = Instant::now();
         // Decide whether to advance animations this iteration.
         // nvtop-style trick: input always polls at INPUT_POLL_MS (16 ms) so
         // keystrokes are never delayed.  Viz updates are gated separately so
@@ -1262,6 +1430,7 @@ fn run_app(
             } else {
                 last_data_render = Instant::now();
             }
+            message_clock_s += render_interval.as_secs_f64();
         }
 
         // Whether to redraw this iteration: on the mode's FPS tick, or once
@@ -1397,7 +1566,6 @@ fn run_app(
                             size.height as usize,
                             &arcade_config,
                         );
-                        arc.set_cloudfield(arcade_cloudfield);
                         arc.initialize_from_devices(backend.devices());
                         // Forward sensitivity so --profile paranoid (or any non-default profile)
                         // takes effect inside Arcade just like it does in the standalone modes.
@@ -1484,8 +1652,8 @@ fn run_app(
                     if let Some(ref mut arc) = arcade {
                         arc.set_serving(serving);
                         arc.set_activities(activities);
-                        // The Training and inference panels and the
-                        // cloudfield; the Die 3D panel's clock.
+                        // The Training and inference panels; the Die 3D
+                        // panel's clock.
                         arc.set_services(service_rows);
                         arc.set_train_state(train_state);
                         arc.set_clock(arcade_clock.elapsed().as_secs_f64());
@@ -1774,6 +1942,58 @@ fn run_app(
                 }
             }
 
+            // The backdrops (see `backdrop_bus`): the views' own painters
+            // follow their settings, and the TUI's layer is fed for the view
+            // on screen.
+            snake.set_atmosphere(backdrop_bus::own_painter(&backdrop_settings, "inference"));
+            if let Some(tv) = train_view.as_mut() {
+                tv.set_sky(backdrop_bus::own_painter(&backdrop_settings, "training"));
+            }
+            if let Some(dv) = die3d.as_mut() {
+                dv.set_clouds(backdrop_bus::own_painter(&backdrop_settings, "die3d"));
+            }
+            shared_backdrop.update(
+                &backdrop_settings,
+                view_name(display_mode),
+                overlay == Some(OverlayPanel::Legend),
+                |want_rows| {
+                    // The scene follows the rows the arcade and `i` use.
+                    #[cfg(target_os = "linux")]
+                    let local_rows = || inference_monitor.snapshot();
+                    #[cfg(not(target_os = "linux"))]
+                    let local_rows = Vec::new;
+                    // The synthetic roster's clock exists on Linux alone (see
+                    // `mock_started`); elsewhere the mock has no roster.
+                    #[cfg(target_os = "linux")]
+                    let mock_rows = || {
+                        crate::workload::inference_server::mock::mock_services(
+                            mock_started.elapsed().as_secs_f32(),
+                        )
+                    };
+                    #[cfg(not(target_os = "linux"))]
+                    let mock_rows = Vec::new;
+                    let rows = if !want_rows {
+                        Vec::new()
+                    } else if let Some(r) = inference_bus::attached_rows(tui_bus, backend.as_ref())
+                    {
+                        r
+                    } else if backend_type == BackendType::Mock {
+                        mock_rows()
+                    } else if backend_type == BackendType::Remote {
+                        Vec::new()
+                    } else {
+                        local_rows()
+                    };
+                    crate::animation::backdrop::BackdropSignals::gather(
+                        Some(&tui_bus.read()),
+                        backend.as_ref(),
+                        rows,
+                        backdrop_started.elapsed().as_secs_f64(),
+                        backend_type == BackendType::Mock,
+                    )
+                },
+            );
+
             // Unattended rotation: advance once this view has had its dwell.
             // Placed after the per-mode update so the activity flags reflect
             // the tick just processed, and inside `should_tick` so the
@@ -1836,6 +2056,14 @@ fn run_app(
             }
         } // end if should_tick
 
+        // A message that belongs to a view goes when the view is left, and
+        // an informational one after a few seconds.
+        tidy_view_message(
+            &mut cmd_message,
+            &mut cmd_message_view,
+            display_mode,
+            message_clock_s,
+        );
         // Clear terminal when switching modes to remove artifacts
         if display_mode != prev_display_mode {
             // Single choke point for tearing down the HivemindSweeper engine:
@@ -1978,7 +2206,10 @@ fn run_app(
             // `remote_proc_rows` (computed above) is `None` under `--remote` —
             // i.e. the list below is still LOCAL processes, not the remote
             // box's. See `remote_local_fallback_note`.
-            let remote_note = remote_local_fallback_note(backend_type, has_remote_proc_rows);
+            // Before the first scan lands (`host_cpu_primed` is set then)
+            // the panel says it is scanning (`SCANNING_NOTE`).
+            let remote_note = remote_local_fallback_note(backend_type, has_remote_proc_rows)
+                .or((!host_cpu_primed).then_some(SCANNING_NOTE));
             // The rows the panel actually renders this frame: the remote list
             // when present, else the local scan.
             let display_proc_rows: &[ProcRow] = remote_proc_rows.as_deref().unwrap_or(&proc_rows);
@@ -2003,6 +2234,14 @@ fn run_app(
             let bus_world = bus_world
                 .as_ref()
                 .map(|w| w as &dyn tt_toplike_bus::WorldRead);
+            // The legend's backdrop line: the view's setting, and whether its
+            // signals are estimates.
+            let backdrop_legend = (
+                backdrop_settings.choice(view_name(display_mode)),
+                shared_backdrop.estimated(),
+            );
+            // The splash (if it is up) stops and clears before the first frame.
+            splash::first_frame();
             let draw_start = Instant::now();
             terminal
                 .draw(|f| {
@@ -2121,6 +2360,10 @@ fn run_app(
                         }
                     }
 
+                    // The shared backdrop, in the blank cells the view left.
+                    let backdrop_area = backdrop_bus::area(f.area(), STATUS_BAR_ROWS as u16);
+                    shared_backdrop.draw(f.buffer_mut(), backdrop_area, view_name(display_mode));
+
                     // ── Global status bar (all modes) ─────────────────────────
                     render_global_statusbar(
                         f,
@@ -2141,7 +2384,7 @@ fn run_app(
 
                     // ── Floating overlay panel (legend / help / explain) ───────
                     if let Some(kind) = overlay {
-                        render_overlay_panel(f, kind, display_mode);
+                        render_overlay_panel_with(f, kind, display_mode, backdrop_legend);
                     }
 
                     // ── Reset takeover (full-screen, drawn over everything) ──
@@ -2151,6 +2394,7 @@ fn run_app(
                 })
                 .map_err(|e| TTTopError::Terminal(e.to_string()))?;
             perf_meter.record_frame(draw_start.elapsed());
+            crate::startup_log::frame(draw_start.elapsed(), draw_start - iter_start);
         } // end if do_draw
 
         // Input always polls at 16 ms so keystrokes respond immediately.
@@ -2559,22 +2803,50 @@ fn run_app(
                                         }
                                     }
                                 } else if verb == "arcade" {
-                                    // `/arcade cloudfield on|off`: the setting lives
-                                    // here, so it holds across a resize.
+                                    // `/arcade layout ...`; the old `/arcade
+                                    // cloudfield` only says the arcade carries no
+                                    // backdrop.
                                     let arg = cmd_buf
                                         .trim()
                                         .trim_start_matches('/')
                                         .split_once(char::is_whitespace)
                                         .map(|(_, rest)| rest)
                                         .unwrap_or("");
-                                    let (msg, err) = crate::animation::arcade_layout::command(
-                                        arg,
-                                        &mut arcade_cloudfield,
+                                    cmd_message = arcade_switch(
+                                        ArcadeInput::Command(arg),
+                                        display_mode,
+                                        ArcadeSwitch {
+                                            arcade: &mut arcade,
+                                            config: &mut arcade_config,
+                                            cycle: &mut arcade_cycle,
+                                        },
+                                        backend.as_ref(),
                                     );
-                                    if let Some(arc) = arcade.as_mut() {
-                                        arc.set_cloudfield(arcade_cloudfield);
-                                    }
-                                    cmd_message = Some((msg, err));
+                                    cmd_message_view = ViewMessage::tag(
+                                        &cmd_message,
+                                        display_mode,
+                                        message_clock_s,
+                                    );
+                                    force_redraw = true;
+                                } else if verb == "backdrop" {
+                                    // `/backdrop [off|scene|sky|clouds]` for the view
+                                    // on screen; the next update applies it.
+                                    let arg = cmd_buf
+                                        .trim()
+                                        .trim_start_matches('/')
+                                        .split_once(char::is_whitespace)
+                                        .map(|(_, rest)| rest)
+                                        .unwrap_or("");
+                                    cmd_message = Some(crate::animation::backdrop::command(
+                                        arg,
+                                        view_name(display_mode),
+                                        &mut backdrop_settings,
+                                    ));
+                                    cmd_message_view = ViewMessage::tag(
+                                        &cmd_message,
+                                        display_mode,
+                                        message_clock_s,
+                                    );
                                     force_redraw = true;
                                 } else if crate::animation::die3d::commands::is_command(&verb) {
                                     // A Die 3D setting. It belongs to the open view, so it
@@ -2589,11 +2861,24 @@ fn run_app(
                                         .trim()
                                         .to_string();
                                     cmd_message = Some(match (display_mode, die3d.as_mut()) {
-                                        (DisplayMode::Die3d, Some(dv)) => dv.command(
-                                            &verb,
-                                            &arg,
-                                            die3d_started.elapsed().as_secs_f64(),
-                                        ),
+                                        (DisplayMode::Die3d, Some(dv)) => {
+                                            let out = dv.command(
+                                                &verb,
+                                                &arg,
+                                                die3d_started.elapsed().as_secs_f64(),
+                                            );
+                                            // `/clouds` is the view's backdrop
+                                            // setting: clouds or off.
+                                            if verb == "clouds" {
+                                                let _ = backdrop_settings.set(
+                                                    "die3d",
+                                                    dv.clouds_on().then_some(
+                                                        crate::animation::backdrop::BackdropKind::Clouds,
+                                                    ),
+                                                );
+                                            }
+                                            out
+                                        }
                                         _ => (
                                             format!(
                                                 "/{verb} is a {} command (press 3 to open it)",
@@ -2937,21 +3222,38 @@ fn run_app(
                                 display_mode = next_display_mode(display_mode);
                                 log::info!("Switched to {:?} mode", display_mode);
                             }
-                            KeyCode::Char(crate::animation::arcade_layout::CLOUDFIELD_KEY)
-                                if display_mode == DisplayMode::Arcade =>
-                            {
-                                // Flip the arcade's cloudfield (the atmosphere
-                                // backdrop). The key does nothing in other views.
-                                arcade_cloudfield = !arcade_cloudfield;
-                                if let Some(arc) = arcade.as_mut() {
-                                    arc.set_cloudfield(arcade_cloudfield);
-                                }
+                            KeyCode::Char(crate::animation::backdrop::KEY) => {
+                                // The next backdrop for the view on screen
+                                // (see `backdrop::key_message`).
                                 cmd_message = Some((
-                                    crate::animation::arcade_layout::cloudfield_message(
-                                        arcade_cloudfield,
+                                    crate::animation::backdrop::key_message(
+                                        view_name(display_mode),
+                                        &mut backdrop_settings,
                                     ),
                                     false,
                                 ));
+                                cmd_message_view =
+                                    ViewMessage::tag(&cmd_message, display_mode, message_clock_s);
+                            }
+                            // `}` and `{`: the next and previous arcade layout,
+                            // in Arcade only (`arcade_step_for` is `None`
+                            // elsewhere, so nothing else is shadowed). The
+                            // arcade is laid out again at once, so the next
+                            // draw shows the new layout.
+                            KeyCode::Char(c) if arcade_step_for(display_mode, c).is_some() => {
+                                cmd_message = arcade_switch(
+                                    ArcadeInput::Key(c),
+                                    display_mode,
+                                    ArcadeSwitch {
+                                        arcade: &mut arcade,
+                                        config: &mut arcade_config,
+                                        cycle: &mut arcade_cycle,
+                                    },
+                                    backend.as_ref(),
+                                );
+                                cmd_message_view =
+                                    ViewMessage::tag(&cmd_message, display_mode, message_clock_s);
+                                force_redraw = true;
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
                                 // Jump directly to Defrag mode. If the sweeper happens
@@ -3317,6 +3619,21 @@ fn run_app(
                 &mut serving_metrics,
             );
             let scanned_processes = applied.processes;
+            // The second CPU sample, taken once, when the first scan lands.
+            if !std::mem::replace(&mut host_cpu_primed, true) {
+                sys_monitor.refresh_cpu_usage();
+                host_cpu_pct = sys_monitor.global_cpu_usage();
+            }
+            // The Wafer Waffler's process events, from this machine's /proc
+            // (never on --mock or --remote, whose chips are not these).
+            if crate::cli::backend_shows_only_tt(backend_type) {
+                for dv in [die3d.as_mut(), insights_inset.as_mut()]
+                    .into_iter()
+                    .flatten()
+                {
+                    dv.set_proc_holders(applied.holders.clone());
+                }
+            }
             // The worker's trainer search result: for Arcade's lane, and for the
             // rotation's idea of whether Training has anything to show.
             rotation_activity.note_trainer(&applied.trainer);
@@ -3458,6 +3775,7 @@ fn run_app(
                 // if one exists. The worker finds it (the `maps` reads must
                 // stay off this thread).
                 want_trainer: scan_wants_trainer(display_mode, rotate_enabled, backend_type),
+                devices: proc_scan::device_keys(backend.devices()),
             });
 
             sys_monitor.refresh_cpu_usage();
@@ -4210,7 +4528,11 @@ fn render_command_bar(f: &mut Frame, cmd_buf: &str, msg: Option<(&str, bool)>) {
         height: bar_h,
     };
 
-    // Clear the bar rows with a dark background, then render text.
+    // Clear the bar rows, then give them a dark background, then render
+    // text. A `Block` style only recolours a cell and keeps its symbol, so
+    // without the `Clear` a backdrop glyph laid in these rows (the shared
+    // backdrop draws before the bar) showed to the right of each line.
+    f.render_widget(ratatui::widgets::Clear, bar_area);
     f.render_widget(
         Block::default().style(Style::default().bg(colors::rgb(15, 20, 30))),
         bar_area,
@@ -4420,7 +4742,29 @@ fn overlay_row_target(kind: OverlayPanel) -> usize {
 /// The panel composites over whatever view is underneath — it does not consume
 /// any layout rows.  Width adapts to the widest content line (clamped to the
 /// terminal) so legend/help text is never clipped; height grows with content.
+#[cfg(test)]
 fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
+    render_overlay_panel_with(f, kind, mode, default_backdrop_legend(mode));
+}
+
+#[cfg(test)]
+/// The legend's backdrop line for `mode` with no setting changed: its
+/// default backdrop, no estimate.
+fn default_backdrop_legend(mode: DisplayMode) -> (crate::animation::backdrop::Choice, bool) {
+    (
+        crate::animation::backdrop::BackdropConfig::default().choice(view_name(mode)),
+        false,
+    )
+}
+
+/// [`render_overlay_panel`] with the view's backdrop as it is now (its
+/// choice and whether its signals are estimates), for the legend's line.
+fn render_overlay_panel_with(
+    f: &mut Frame,
+    kind: OverlayPanel,
+    mode: DisplayMode,
+    backdrop: (crate::animation::backdrop::Choice, bool),
+) {
     let area = f.area();
     // Enforce minimum terminal size — skip if it would leave no room.
     if area.width < 24 || area.height < 6 {
@@ -4428,7 +4772,7 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
     }
 
     // Prose panels wrap to the budget `overlay_wrap_cols` sets for this width.
-    let lines = overlay_lines(kind, mode, overlay_wrap_cols(area.width));
+    let lines = overlay_lines_with(kind, mode, overlay_wrap_cols(area.width), backdrop);
 
     // Title + accent per panel kind (used for the header and to size the panel).
     let (title, border_color) = match kind {
@@ -4513,7 +4857,19 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
 ///
 /// Lines must fit within PANEL_W - 2 visible columns (no right border means content
 /// needs to respect the panel width itself).  Each line is prefixed with `║ ` (2 cols).
+#[cfg(test)]
 fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line<'static>> {
+    overlay_lines_with(kind, mode, cols, default_backdrop_legend(mode))
+}
+
+/// [`overlay_lines`] with the view's backdrop as it is now: the legend ends
+/// with its line.
+fn overlay_lines_with(
+    kind: OverlayPanel,
+    mode: DisplayMode,
+    cols: usize,
+    backdrop: (crate::animation::backdrop::Choice, bool),
+) -> Vec<Line<'static>> {
     let bg = colors::rgb(8, 14, 22);
     let bar = colors::rgb(40, 55, 70);
     let dim = colors::rgb(90, 100, 120);
@@ -4563,57 +4919,41 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 ln!(spans)
             };
             let waffler = crate::animation::DIE3D_DISPLAY_NAME;
-            // The global keys, three to a line.
+            // The global keys, four to a line: twenty keys in five rows.
+            // The last cell of a row has no padding, so each row's longest
+            // description goes last.
             let keys = |kc| {
+                let row = |items: &[(&str, &str)]| cells(items, 4, 16, kc);
                 vec![
-                    cells(
-                        &[("v", "next view"), ("l", "legend"), ("?", "this help")],
-                        5,
-                        18,
-                        kc,
-                    ),
-                    cells(
-                        &[("!", "explain view"), ("/", "command bar"), ("q", "quit")],
-                        5,
-                        18,
-                        kc,
-                    ),
-                    cells(
-                        &[
-                            ("Esc", "back, or quit"),
-                            ("r", "refresh data"),
-                            ("b", "next backend"),
-                        ],
-                        5,
-                        18,
-                        kc,
-                    ),
-                    cells(
-                        &[("a A", "Arcade"), ("d D", "Defrag"), ("g", "Grid")],
-                        5,
-                        18,
-                        kc,
-                    ),
-                    cells(
-                        &[
-                            ("i I", "Inference"),
-                            ("~", "HivemindSweeper"),
-                            ("t", "Training"),
-                        ],
-                        5,
-                        18,
-                        kc,
-                    ),
-                    cells(
-                        &[
-                            ("3", waffler),
-                            ("R", "rotate (kiosk)"),
-                            ("c", "Arcade clouds"),
-                        ],
-                        5,
-                        18,
-                        kc,
-                    ),
+                    row(&[
+                        ("!", "explain view"),
+                        ("v", "next view"),
+                        ("?", "this help"),
+                        ("l", "legend"),
+                    ]),
+                    row(&[
+                        ("/", "command bar"),
+                        ("Esc", "back, or quit"),
+                        ("r", "refresh data"),
+                        ("q", "quit"),
+                    ]),
+                    row(&[
+                        ("b", "next backend"),
+                        ("a A", "Arcade"),
+                        ("d D", "Defrag"),
+                        ("g", "Grid"),
+                    ]),
+                    row(&[
+                        ("i I", "Inference"),
+                        ("~", "HivemindSweeper"),
+                        ("3", waffler),
+                        ("t", "Training"),
+                    ]),
+                    row(&[
+                        ("R", "rotate (kiosk)"),
+                        ("w", "backdrop"),
+                        ("{ }", "Arcade layout"),
+                    ]),
                 ]
             };
             if mode == DisplayMode::Die3d {
@@ -4650,13 +4990,13 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 // The global keys most used here; the full list is `?` in
                 // any other view, which keeps this panel inside 24 rows.
                 help.push(sep!("Everywhere  (every key: ? in another view)"));
-                // Rows 0, 1 and 4: the panels and quit, then the other
+                // Rows 0, 1 and 3: the panels and quit, then the other
                 // key-only views.
                 help.extend(
                     keys(key)
                         .into_iter()
                         .enumerate()
-                        .filter(|(i, _)| [0, 1, 4].contains(i))
+                        .filter(|(i, _)| [0, 1, 3].contains(i))
                         .map(|(_, l)| l),
                 );
                 return help;
@@ -4695,16 +5035,17 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                     ("/watch <path>", "tail a log in ~"),
                     ("/watch pid <n>", "sniff a process"),
                 ]),
-                // Narrower descriptions, so the long /arcade usage fits.
+                // Narrower descriptions, so the /backdrop usage fits.
                 cells(
                     &[
                         ("/legend /explain /help", "l ! ? panels"),
-                        ("/arcade cloudfield on|off", "Arcade clouds"),
+                        ("/backdrop [kind]", "off sky scene clouds"),
                     ],
                     19,
                     13,
                     lbl,
                 ),
+                cmd(&[("/arcade layout", "next prev <name> list")]),
                 cmd(&[("/board /scene /cells …", &settings)]),
                 sep!("Status bar"),
                 cells(
@@ -4727,8 +5068,9 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
         }
 
         OverlayPanel::Legend => {
-            // Per-view symbol legend — Arcade shows all four combined.
-            match mode {
+            // Per-view symbol legend — Arcade shows all four combined. The
+            // last line is the view's backdrop, in a view that takes one.
+            let mut v = match mode {
                 DisplayMode::Starfield => {
                     let mut v = starfield_legend_lines(bar, bg, dim, key);
                     v.extend(crate::animation::starfield_bus::legend_lines(bar, bg, dim));
@@ -4780,7 +5122,17 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
                 }
                 DisplayMode::Die3d => die3d_legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => arcade_legend_lines(bar, bg, dim),
+            };
+            if crate::animation::backdrop::takes_backdrop(view_name(mode)) {
+                v.push(ln!(vec![Span::styled(
+                    format!(
+                        "  {}",
+                        crate::animation::backdrop::legend_line(backdrop.0, backdrop.1)
+                    ),
+                    Style::default().fg(dim)
+                )]));
             }
+            v
         }
 
         // Each mode's `!` text: what the screen is and what moves it, then
@@ -5903,8 +6255,7 @@ fn die3d_legend_lines(
         "  fill       purple from the DRAM edges inward while a model",
         "             loads, by its phase and progress; with no",
         "             progress, a sweep (decoration)",
-        "  pulse      the PCIe connector glows teal on requests",
-        "             completed, fading over a second",
+        "  pulse      PCIe connector glows teal on requests completed, 1 s",
         "  GDDR       each block in its channel's own temperature; dim",
         "             when harvested; a red flash when its ECC count",
         "             rises. Rows: channels 0-3 west, 4-7 east, in",
@@ -7620,6 +7971,12 @@ fn bar_color(frac: f32) -> ratatui::style::Color {
     }
 }
 
+/// The process panel's note before the first process scan has landed. It
+/// travels in the `remote_note` slot and is not added to the header. With no
+/// rows, the panel shows it as the empty-state line, so the panel does not
+/// say "No processes ..." before any scan has run.
+const SCANNING_NOTE: &str = "scanning processes";
+
 /// Render the process panel over cross-platform `ProcRow`s.
 ///
 /// Always shows PID / CPU% / MEM / NAME and an inference tag. When a row carries
@@ -7705,7 +8062,7 @@ fn render_process_panel(
         Span::raw("  "),
         Span::styled("Processes", Style::default().fg(Color::Gray)),
     ];
-    if let Some(note) = remote_note {
+    if let Some(note) = remote_note.filter(|n| *n != SCANNING_NOTE) {
         header_spans.push(Span::styled(
             format!(" · {note}"),
             Style::default()
@@ -7716,7 +8073,9 @@ fn render_process_panel(
     lines.push(Line::from(header_spans));
 
     if rows.is_empty() {
-        let empty_msg = if tt_filtered {
+        let empty_msg = if remote_note == Some(SCANNING_NOTE) {
+            SCANNING_NOTE
+        } else if tt_filtered {
             "No processes using TT devices detected"
         } else {
             "nothing is feeding the chips right now"
@@ -7930,6 +8289,14 @@ fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
     };
 
     f.render_widget(Clear, dialog_rect);
+    // A background of its own: the shared backdrop is laid after the view
+    // and fills only blank cells (a space on the canvas black or Reset), so
+    // a dialog left at Reset would take backdrop glyphs between its lines.
+    f.render_widget(
+        ratatui::widgets::Block::default()
+            .style(Style::default().bg(crate::ui::colors::rgb(8, 14, 22))),
+        dialog_rect,
+    );
 
     let content_w = (DIALOG_W.saturating_sub(1)) as usize; // ║ takes 1 col
     let name_short = truncate(&kc.name, 14);
@@ -9903,6 +10270,266 @@ mod display_mode_tests {
         }
     }
 
+    /// The `{` `}` key arm and `/arcade` both run `arcade_switch`. A switch
+    /// lays the arcade out from the new rows,
+    /// and updates it once, so the first frame after it shows the devices
+    /// and services (review S1 and S4). Outside Arcade the keys change
+    /// nothing.
+    #[test]
+    fn a_layout_switch_updates_the_new_arcade_before_it_is_drawn() {
+        use super::{arcade_switch, ArcadeInput, ArcadeSwitch};
+        use crate::animation::arcade_layout::ArcadeConfig;
+        use crate::animation::arcade_presets::{preset, LayoutCycle};
+        use crate::animation::bus_test_support::Fixed;
+        use crate::animation::ArcadeVisualization;
+        use crate::backend::TelemetryBackend;
+        let b = Fixed::new(2);
+        let mut cycle = LayoutCycle::new(&[], None);
+        let mut config = ArcadeConfig::default();
+        let mut a = ArcadeVisualization::with_config(120, 40, &config);
+        a.initialize_from_devices(b.devices());
+        a.initialize_topology(&b);
+        for i in 0..3 {
+            a.set_services(crate::workload::inference_server::mock::mock_services(
+                100.0 + i as f32,
+            ));
+            a.update(&b);
+        }
+        let mut arcade = Some(a);
+        let text = |a: &ArcadeVisualization| {
+            a.render(&b)
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // Outside Arcade: no change.
+        let none = arcade_switch(
+            ArcadeInput::Key('}'),
+            DisplayMode::Grid,
+            ArcadeSwitch {
+                arcade: &mut arcade,
+                config: &mut config,
+                cycle: &mut cycle,
+            },
+            &b,
+        );
+        assert_eq!(none, None);
+        assert_eq!(cycle.current().name, "classic");
+        // `}` in Arcade: now-serving, its rows, a real frame.
+        let (msg, err) = arcade_switch(
+            ArcadeInput::Key('}'),
+            DisplayMode::Arcade,
+            ArcadeSwitch {
+                arcade: &mut arcade,
+                config: &mut config,
+                cycle: &mut cycle,
+            },
+            &b,
+        )
+        .expect("a layout key");
+        assert!(
+            !err && msg.starts_with("layout: now-serving (2/8)"),
+            "{msg}"
+        );
+        let ns = preset("now-serving").unwrap();
+        let a = arcade.as_ref().unwrap();
+        assert_eq!(config.rows, ns.rows);
+        assert_eq!(a.config().rows, ns.rows);
+        let t = text(a);
+        assert!(!t.contains("no Tenstorrent device found"), "{t}");
+        assert!(!t.contains("0 of 0 models"), "{t}");
+        // `/arcade layout classic` goes back.
+        let (msg, err) = arcade_switch(
+            ArcadeInput::Command("layout classic"),
+            DisplayMode::Arcade,
+            ArcadeSwitch {
+                arcade: &mut arcade,
+                config: &mut config,
+                cycle: &mut cycle,
+            },
+            &b,
+        )
+        .unwrap();
+        assert!(!err && msg.starts_with("layout: classic (1/8)"), "{msg}");
+        assert_eq!(arcade.as_ref().unwrap().config().rows, cycle.current().rows);
+    }
+
+    /// The shared backdrop does not show inside the Insights kill dialog,
+    /// which the view draws itself, nor to the right of a multi-line
+    /// command-bar message, which is drawn after the backdrop (review S3).
+    #[test]
+    fn the_backdrop_stays_out_of_the_kill_dialog_and_the_command_bar() {
+        use super::{render_command_bar, render_kill_dialog, KillConfirmState};
+        use crate::animation::backdrop::{Backdrop, BackdropKind, BackdropSignals};
+        use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+        let mut b = Backdrop::new(Some(BackdropKind::Clouds));
+        for i in 0..40 {
+            b.observe(&BackdropSignals {
+                now_s: i as f64 / 4.0,
+                pcie_bps: Some(4e9),
+                load: Some(1.0),
+                ..Default::default()
+            });
+        }
+        let glyph = |c: &str| ["░", "▒", "▓"].contains(&c);
+        let (w, h) = (100u16, 40u16);
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let kc = KillConfirmState {
+            pid: 42,
+            name: "python".into(),
+            device_idx: 0,
+        };
+        t.draw(|f| {
+            let area = f.area();
+            render_kill_dialog(f, area, &kc);
+            b.layer_buffer(f.buffer_mut(), area);
+        })
+        .unwrap();
+        let buf = t.backend().buffer().clone();
+        // The dialog is 42x8, centred.
+        let d = Rect::new((w - 42) / 2, (h - 8) / 2, 42, 8);
+        let mut outside = 0;
+        for y in 0..h {
+            for x in 0..w {
+                let inside = d.contains((x, y).into());
+                let g = glyph(buf[(x, y)].symbol());
+                assert!(
+                    !(inside && g),
+                    "a backdrop glyph at ({x},{y}) in the dialog"
+                );
+                outside += usize::from(g && !inside);
+            }
+        }
+        assert!(outside > 0, "the backdrop draws around the dialog");
+        // A three-line message over a laid backdrop.
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| {
+            let area = f.area();
+            b.layer_buffer(f.buffer_mut(), area);
+            render_command_bar(f, "", Some(("one\ntwo lines\nthree", false)));
+        })
+        .unwrap();
+        let buf = t.backend().buffer().clone();
+        for y in h - 3..h {
+            for x in 0..w {
+                assert!(
+                    !glyph(buf[(x, y)].symbol()),
+                    "a backdrop glyph at ({x},{y}) in the command bar"
+                );
+            }
+        }
+    }
+
+    /// A layout message belongs to the arcade: it goes when the arcade is
+    /// left and after its lifetime; a global message stays; an error in its
+    /// own view stays until the next command. The clock is a number, so no
+    /// wall time is read.
+    #[test]
+    fn a_view_message_goes_with_its_view_and_its_lifetime() {
+        use super::{
+            arcade_switch, tidy_view_message, ArcadeInput, ArcadeSwitch, ViewMessage,
+            VIEW_MESSAGE_SECS,
+        };
+        use crate::animation::arcade_layout::ArcadeConfig;
+        use crate::animation::arcade_presets::LayoutCycle;
+        use crate::animation::bus_test_support::Fixed;
+        let b = Fixed::new(2);
+        let mut cycle = LayoutCycle::new(&[], None);
+        let mut config = ArcadeConfig::default();
+        let mut arcade = None;
+        let mut msg = arcade_switch(
+            ArcadeInput::Key('}'),
+            DisplayMode::Arcade,
+            ArcadeSwitch {
+                arcade: &mut arcade,
+                config: &mut config,
+                cycle: &mut cycle,
+            },
+            &b,
+        );
+        let mut tag = ViewMessage::tag(&msg, DisplayMode::Arcade, 10.0);
+        // Still in the arcade, inside the lifetime: it stays.
+        tidy_view_message(&mut msg, &mut tag, DisplayMode::Arcade, 11.0);
+        assert!(msg.as_ref().unwrap().0.starts_with("layout: now-serving"));
+        // Another view: it goes.
+        tidy_view_message(&mut msg, &mut tag, DisplayMode::Grid, 11.0);
+        assert_eq!(msg, None);
+        // A global message (no tag) survives a view change.
+        let mut global = Some(("rotation: on".to_string(), false));
+        let mut none = None;
+        tidy_view_message(&mut global, &mut none, DisplayMode::Grid, 99.0);
+        assert!(global.is_some());
+        // A tag left by an older message does not clear a newer global one.
+        let mut stale = ViewMessage::tag(
+            &Some(("backdrop (grid): sky".to_string(), false)),
+            DisplayMode::Grid,
+            0.0,
+        );
+        tidy_view_message(&mut global, &mut stale, DisplayMode::Arcade, 99.0);
+        assert!(global.is_some() && stale.is_none());
+        // The lifetime clears an informational message and keeps an error.
+        let mut info = Some(("backdrop (grid): sky".to_string(), false));
+        let mut t = ViewMessage::tag(&info, DisplayMode::Grid, 1.0);
+        tidy_view_message(
+            &mut info,
+            &mut t,
+            DisplayMode::Grid,
+            1.0 + VIEW_MESSAGE_SECS - 0.1,
+        );
+        assert!(info.is_some());
+        tidy_view_message(
+            &mut info,
+            &mut t,
+            DisplayMode::Grid,
+            1.0 + VIEW_MESSAGE_SECS,
+        );
+        assert_eq!(info, None);
+        let mut err = Some((
+            "/backdrop: expected off, scene, sky or clouds".to_string(),
+            true,
+        ));
+        let mut t = ViewMessage::tag(&err, DisplayMode::Grid, 1.0);
+        tidy_view_message(&mut err, &mut t, DisplayMode::Grid, 1000.0);
+        assert!(err.is_some(), "an error stays in its view");
+        tidy_view_message(&mut err, &mut t, DisplayMode::Starfield, 1000.0);
+        assert_eq!(err, None, "and goes with it");
+    }
+
+    /// `}` and `{` step the arcade's layout in Arcade and do nothing in any
+    /// other view.
+    #[test]
+    fn the_layout_keys_work_only_in_the_arcade() {
+        use super::arcade_step_for;
+        use crate::animation::arcade_presets::Step;
+        assert_eq!(arcade_step_for(DisplayMode::Arcade, '}'), Some(Step::Next));
+        assert_eq!(arcade_step_for(DisplayMode::Arcade, '{'), Some(Step::Prev));
+        for c in ['[', ']', 'c', 'a', '(', ')'] {
+            assert_eq!(arcade_step_for(DisplayMode::Arcade, c), None, "{c}");
+        }
+        for m in [
+            DisplayMode::Insights,
+            DisplayMode::Grid,
+            DisplayMode::Starfield,
+            DisplayMode::MemoryCastle,
+            DisplayMode::MemoryFlow,
+            DisplayMode::Defrag,
+            DisplayMode::InferenceMonitor,
+            DisplayMode::HivemindSweeper,
+            DisplayMode::Training,
+            DisplayMode::Die3d,
+        ] {
+            for c in ['{', '}'] {
+                assert_eq!(arcade_step_for(m, c), None, "{c} in {m:?}");
+            }
+        }
+    }
+
     #[test]
     fn the_arrows_pan_the_die3d_view_and_nothing_else() {
         use crate::animation::die3d::Die3dKey;
@@ -11399,6 +12026,43 @@ mod host_default_screen_tests {
         );
     }
 
+    /// Help, the Arcade legend and the Arcade explain text name the layout
+    /// keys `{ }`.
+    #[test]
+    fn the_overlays_name_the_layout_keys() {
+        use super::{overlay_lines, overlay_wrap_cols, DisplayMode, OverlayPanel};
+        for kind in [
+            OverlayPanel::Help,
+            OverlayPanel::Legend,
+            OverlayPanel::Explain,
+        ] {
+            let text: String = overlay_lines(kind, DisplayMode::Arcade, overlay_wrap_cols(80))
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("{ }"), "{kind:?}: {text}");
+            // The arcade carries no backdrop: no `c` key, and no backdrop
+            // line or key in its own legend and explain text. Help lists
+            // `w` with the global keys.
+            let words: Vec<&str> = text.split_whitespace().collect();
+            let pair = |a: &str, b: &str| words.windows(2).any(|p| p[0] == a && p[1] == b);
+            assert!(
+                !pair("c", "{") && !pair("c", "backdrop"),
+                "{kind:?}: c: {text}"
+            );
+            assert!(!text.contains("Backdrop:"), "{kind:?}: {text}");
+            if kind != OverlayPanel::Help {
+                assert!(!text.contains("backdrop"), "{kind:?}: {text}");
+            }
+        }
+    }
+
     /// Prints each overlay's line count and the rows it needs at 80 columns.
     /// For the copy review's inventory. Run with
     /// `cargo test --lib --features tui overlay_inventory -- --ignored --nocapture`.
@@ -11998,7 +12662,6 @@ pub fn run_render_bench(
     {
         let mut term = mk_term();
         let cfg = crate::animation::arcade_layout::ArcadeConfig {
-            cloudfield: false,
             rows: crate::animation::arcade_layout::example_rows(),
         };
         let mut arc = ArcadeVisualization::with_config(width as usize, height as usize, &cfg);
@@ -13704,7 +14367,7 @@ mod config_read_tests {
         let src = include_str!("mod.rs");
         let run_tui = src.find("\npub fn run_tui(").expect("run_tui");
         let run_app = src.find("\nfn run_app(").expect("run_app");
-        let read = "let loaded_config = crate::config::load_config();";
+        let read = "loaded_config = crate::config::load_config();";
         let raw = "enable_raw_mode().map_err(";
         let read_at = src[run_tui..run_app]
             .find(read)

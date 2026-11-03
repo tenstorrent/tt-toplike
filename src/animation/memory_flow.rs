@@ -698,7 +698,15 @@ impl MemoryFlowVis {
                 ));
             } else {
                 // Draw core background heat map
-                let in_core_area = x_norm > 0.1 && x_norm < 0.9 && y_norm > 0.2 && y_norm < 0.8;
+                // The grid is sized by the first `update`; a flow drawn
+                // before one (the arcade right after a layout switch) has
+                // no grid yet and draws no heat map.
+                let in_core_area = self.grid_cols > 0
+                    && self.grid_rows > 0
+                    && x_norm > 0.1
+                    && x_norm < 0.9
+                    && y_norm > 0.2
+                    && y_norm < 0.8;
 
                 if in_core_area {
                     // Map position to core grid

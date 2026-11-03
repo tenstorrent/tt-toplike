@@ -219,6 +219,25 @@ impl Clouds {
         }
     }
 
+    /// The density band at pixel (`x`, `y`) with the field shifted right by
+    /// `offset_px`: 0 for clear sky, else 1, 2 or 3 from thin to thick.
+    /// [`draw_in`](Self::draw_in) paints a pixel from the same band; the
+    /// shared backdrop (`animation::backdrop`) reads one band per cell.
+    pub(crate) fn band_at(&self, x: f64, y: f64, offset_px: f64) -> u8 {
+        band_of(self.density(x, y, offset_px))
+    }
+
+    /// The colour of each band at `intensity`, as [`draw_in`](Self::draw_in)
+    /// paints them with the cloud colour of `pal`: index 0 is band 1.
+    pub(crate) fn band_colours(pal: &Palette, intensity: f32) -> [[u8; 3]; 3] {
+        let intensity = if intensity.is_nan() {
+            INTENSITY_MIN
+        } else {
+            intensity.clamp(0.0, 1.0)
+        };
+        BANDS.map(|(_, share)| scale(pal.cloud, share * intensity))
+    }
+
     /// The cloud density at pixel (`x`, `y`) with the field shifted right by
     /// `offset_px`: the octaves' weighted sum, in 0..1.
     fn density(&self, x: f64, y: f64, offset_px: f64) -> f32 {

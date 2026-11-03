@@ -96,13 +96,7 @@ pub struct ArcadeVisualization {
     layout: Layout,
     /// The config the layout came from.
     config: ArcadeConfig,
-    /// Whether the atmosphere backdrop is drawn behind the whole arcade.
-    cloudfield: bool,
-    /// The backdrop the cloudfield draws, following the featured inference
-    /// service as the `i` view's backdrop does.
-    atmosphere: crate::animation::atmosphere::Atmosphere,
-    /// The inference service rows of this tick, for the inference panel and
-    /// the cloudfield.
+    /// The inference service rows of this tick, for the inference panel.
     services: Vec<crate::workload::inference_server::ServiceState>,
     /// The training run of this tick, for the Training panel.
     train_state: Option<crate::workload::train::TrainState>,
@@ -168,6 +162,10 @@ pub struct ArcadeVisualization {
     bus_state: ArcadeBusState,
     /// The bus time of the last `set_bus`: the time the frames are drawn at.
     bus_now: u64,
+
+    /// The sensitivity multiplier last set with `set_sensitivity`, kept so
+    /// [`ArcadeVisualization::relayout`] can hand it to the new panels.
+    sensitivity: f32,
 }
 
 impl ArcadeVisualization {
@@ -229,8 +227,6 @@ impl ArcadeVisualization {
             snake,
             layout,
             config: config.clone(),
-            cloudfield: config.cloudfield,
-            atmosphere: crate::animation::atmosphere::Atmosphere::new(),
             services: Vec::new(),
             train_state: None,
             idle_train: crate::workload::train::TrainState::default(),
@@ -261,7 +257,86 @@ impl ArcadeVisualization {
             bus_fx: ArcadeFx::default(),
             bus_state: ArcadeBusState::default(),
             bus_now: 0,
+            sensitivity: 1.0,
         }
+    }
+
+    /// This arcade laid out again from `config` at `width` x `height`: a
+    /// switch to another named layout (`arcade_presets`), or the same
+    /// layout at a new size.
+    ///
+    /// The panels are built new at their new sizes, set up as the TUI sets
+    /// up a new arcade (devices, sensitivity, topology). Everything that
+    /// does not depend on the layout is kept: the hero's place, target and
+    /// trail (scaled to the new size), its expression flags and speed, the
+    /// frame count and the clock, the power baseline
+    /// and peak, the duel, the activity lanes and their pulse counts, the
+    /// service rows and training run of the last tick, and the bus state.
+    /// Keeping the bus state means events already seen before the switch
+    /// make no new pulse after it (port contract rule 3).
+    ///
+    /// The result draws without an update first, so the TUI can draw it on
+    /// the same keypress.
+    pub fn relayout(
+        self,
+        width: usize,
+        height: usize,
+        config: &ArcadeConfig,
+        backend: &dyn TelemetryBackend,
+    ) -> Self {
+        let mut next = Self::with_config(width, height, config);
+        next.initialize_from_devices(backend.devices());
+        next.set_sensitivity(self.sensitivity);
+        next.initialize_topology(backend);
+        // Scale a position from the old size to the new one.
+        let sx = if self.width == 0 {
+            1.0
+        } else {
+            width as f32 / self.width as f32
+        };
+        let sy = if self.height == 0 {
+            1.0
+        } else {
+            height as f32 / self.height as f32
+        };
+        next.hero_x = self.hero_x * sx;
+        next.hero_y = self.hero_y * sy;
+        next.hero_target_x = self.hero_target_x * sx;
+        next.hero_target_y = self.hero_target_y * sy;
+        next.hero_trail = self
+            .hero_trail
+            .into_iter()
+            .map(|t| TrailPosition {
+                x: t.x * sx,
+                y: t.y * sy,
+                ..t
+            })
+            .collect();
+        next.hero_lerp_speed = self.hero_lerp_speed;
+        next.hero_trail_length = self.hero_trail_length;
+        next.hero_throttled = self.hero_throttled;
+        next.hero_faulted = self.hero_faulted;
+        next.hero_arc_stalled = self.hero_arc_stalled;
+        next.hero_undervolt = self.hero_undervolt;
+        next.hero_harvested = self.hero_harvested;
+        next.hero_gddr_temp = self.hero_gddr_temp;
+        next.frame = self.frame;
+        next.clock_s = self.clock_s;
+        next.baseline = self.baseline;
+        next.power_peak = self.power_peak;
+        next.serving = self.serving;
+        next.duel = self.duel;
+        next.activities = self.activities;
+        next.last_pulse = self.last_pulse;
+        next.services = self.services;
+        next.train_state = self.train_state;
+        next.bus_fx = self.bus_fx;
+        next.bus_state = self.bus_state;
+        next.bus_now = self.bus_now;
+        // The Die 3D panel, if the new layout has one, draws its overlay at
+        // the last bus time until the next `set_bus` feeds it.
+        next.die3d_bus_now = self.die3d_bus_now.filter(|_| next.die3d.is_some());
+        next
     }
 
     /// Row `i` of the layout as the old region fields gave it: its rule and
@@ -283,19 +358,9 @@ impl ArcadeVisualization {
         &self.config
     }
 
-    /// Whether the cloudfield (the atmosphere backdrop) is drawn.
-    pub fn cloudfield(&self) -> bool {
-        self.cloudfield
-    }
-
-    /// Switch the cloudfield on or off from the next frame.
-    pub fn set_cloudfield(&mut self, on: bool) {
-        self.cloudfield = on;
-    }
-
     /// Hand the arcade this tick's inference service rows (the rows the `i`
     /// view draws, from `inference_bus::attached_rows` when attached). They
-    /// feed the inference panel and the cloudfield.
+    /// feed the inference panel.
     pub fn set_services(&mut self, rows: Vec<crate::workload::inference_server::ServiceState>) {
         self.services = rows;
     }
@@ -481,6 +546,7 @@ impl ArcadeVisualization {
     }
 
     pub fn set_sensitivity(&mut self, s: f32) {
+        self.sensitivity = s;
         if let Some(v) = self.starfield.as_mut() {
             v.set_sensitivity(s);
         }
@@ -936,23 +1002,17 @@ impl ArcadeVisualization {
         // Row 1 carries the single shared telemetry strip (the embedded sections
         // no longer print their own W/°C).  The topology diagram shares the row
         // when both fit; otherwise the strip wins.
-        lines.push(self.render_header(backend));
-        lines.push(self.render_row1(backend));
+        // On a terminal narrower than either, it is cut at the edge, so no
+        // row of any layout runs past the terminal. (Only rows that are too
+        // wide change, which is below about 30 columns.)
+        lines.push(fit_width(self.render_header(backend), self.width));
+        lines.push(fit_width(self.render_row1(backend), self.width));
 
         // Each configured row: its rule, then its panels side by side.
         for row in &self.layout.rows {
             lines.push(self.render_separator(row.label(), row.height));
             self.compose_row(row, backend, &mut lines);
         }
-
-        // The cloudfield: the atmosphere behind every blank cell. Off, or
-        // with nothing featured, this changes nothing.
-        let mut lines = if self.cloudfield && self.atmosphere.active() {
-            let backdrop = self.atmosphere.render_backdrop(self.width, lines.len());
-            crate::animation::atmosphere::composite(&backdrop, lines, self.width)
-        } else {
-            lines
-        };
 
         // The bus effects (see `arcade_bus`), under the hero and the lanes.
         // With no bus this does nothing.
@@ -976,6 +1036,10 @@ impl ArcadeVisualization {
                 }
             }
         }
+        // No row ends in a right-side border, at any width.
+        for line in lines.iter_mut() {
+            clear_right_edge(line, self.width);
+        }
         lines
     }
 
@@ -994,7 +1058,6 @@ impl ArcadeVisualization {
         if let Some(t) = self.train.as_mut() {
             t.update();
         }
-        self.atmosphere.observe(&self.services);
         if let (Some(snake), Some(p)) = (self.snake.as_mut(), self.layout.find(View::Inference)) {
             let chips: Vec<crate::animation::ChipReading> = backend
                 .devices()
@@ -1560,6 +1623,10 @@ impl ArcadeVisualization {
         for pos in &self.hero_trail {
             let row = pos.y as usize;
             let col = pos.x as usize;
+            // Nothing is drawn past the right edge (a 0-column arcade).
+            if col >= self.width {
+                continue;
+            }
 
             let fade = 1.0 - (pos.age as f32 / max_age);
             let fade_exp = fade * fade; // exponential: rapid initial fade, lingering tail
@@ -1625,9 +1692,82 @@ impl ArcadeVisualization {
         let hero_color = hsv_to_rgb(hero_hue, 1.0, value);
         let hero_style = Style::default().fg(hero_color).add_modifier(Modifier::BOLD);
 
-        Self::splice_char(&mut lines, row, col, hero_char, hero_style);
+        if col < self.width {
+            Self::splice_char(&mut lines, row, col, hero_char, hero_style);
+        }
 
         lines
+    }
+}
+
+/// `line` cut to `w` display columns when it is wider; unchanged otherwise.
+fn fit_width(mut line: Line<'static>, w: usize) -> Line<'static> {
+    let cols: usize = line
+        .spans
+        .iter()
+        .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+        .sum();
+    if cols > w {
+        line.spans = clamp_spans_to_width(std::mem::take(&mut line.spans), w);
+    }
+    line
+}
+
+/// Glyphs that draw a right-side border when they sit in a row's last
+/// column. The user's rule is no right-side border characters, at any width.
+///
+/// The list is every box-drawing character with a vertical stroke and no
+/// stroke to the right (verticals, dashed verticals, half verticals, right
+/// corners and right-edge joints, in light, heavy, double and rounded
+/// forms), the two right-hand block pieces `▐` and `▕`, and the ASCII bar
+/// `|`. The arcade's guard ([`clear_right_edge`]), the frame sweeps in
+/// `arcade_preset_frame_tests`, the panel test and the docs-sketch test all
+/// read this one list.
+///
+/// In order: the light, heavy, double and dashed verticals; the half and
+/// mixed verticals; the top-right corners; the bottom-right corners; the
+/// right-edge joints; the right-hand block pieces; the ASCII bar.
+#[rustfmt::skip]
+pub(crate) const RIGHT_EDGE_GLYPHS: &[char] = &[
+    '│', '┃', '║', '╎', '╏', '┆', '┇', '┊', '┋',
+    '╵', '╷', '╹', '╻', '╽', '╿',
+    '┐', '┑', '┒', '┓', '╕', '╖', '╗', '╮',
+    '┘', '┙', '┚', '┛', '╛', '╜', '╝', '╯',
+    '┤', '┥', '┦', '┧', '┨', '┩', '┪', '┫', '╡', '╢', '╣',
+    '▐', '▕',
+    '|',
+];
+
+/// Put a space for the glyph in column `w - 1` of `line` when it is one of
+/// [`RIGHT_EDGE_GLYPHS`]: a panel divider, a field separator, a panel's
+/// wall, a stage card's right corner or a scene's scaffold beam that has
+/// landed in the terminal's last column. Nothing else changes: the space
+/// keeps the glyph's style, and no other column is touched.
+fn clear_right_edge(line: &mut Line<'static>, w: usize) {
+    if w == 0 {
+        return;
+    }
+    let mut col = 0usize;
+    for span in line.spans.iter_mut() {
+        let mut out = String::with_capacity(span.content.len());
+        let mut changed = false;
+        for ch in span.content.chars() {
+            let cw = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if col == w - 1 && cw == 1 && RIGHT_EDGE_GLYPHS.contains(&ch) {
+                out.push(' ');
+                changed = true;
+            } else {
+                out.push(ch);
+            }
+            col += cw;
+        }
+        if changed {
+            span.content = out.into();
+            return;
+        }
+        if col >= w {
+            return;
+        }
     }
 }
 
@@ -2186,3 +2326,7 @@ mod bus_tests;
 #[cfg(test)]
 #[path = "arcade_panel_tests.rs"]
 mod panel_tests;
+
+#[cfg(test)]
+#[path = "arcade_preset_frame_tests.rs"]
+mod preset_frame_tests;
