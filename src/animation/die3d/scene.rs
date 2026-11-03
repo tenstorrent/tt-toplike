@@ -1011,6 +1011,11 @@ pub(super) fn corner_outside(
     })
 }
 
+// Ledger ruling R10: the saga's Blackhole floor against these constants.
+#[cfg(test)]
+#[path = "saga_floor_tests.rs"]
+mod saga_floor_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;

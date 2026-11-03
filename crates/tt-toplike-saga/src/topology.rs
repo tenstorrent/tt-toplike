@@ -9,9 +9,10 @@
 //! # Where the Blackhole numbers come from
 //!
 //! The saga crate cannot depend on the root crate, so the dimensions are
-//! copied here. They come from the Die 3D view in the root crate. A test in
-//! the root crate compares them against Die 3D once that crate depends on
-//! this one (plan Task 1.13).
+//! copied here. They come from the Die 3D view in the root crate. The root
+//! crate's `src/animation/die3d/saga_floor_tests.rs` (ledger ruling R10)
+//! computes each one from Die 3D's own tables and constants and compares it
+//! with [`FloorSpec::for_chip`], so a change on either side fails there.
 //!
 //! * `BLACKHOLE_COLS` = 17 and `BLACKHOLE_ROWS` = 12. Copied from
 //!   `src/animation/die3d/layout.rs:143` (test `blackhole_layout_is_17_by_12`),
