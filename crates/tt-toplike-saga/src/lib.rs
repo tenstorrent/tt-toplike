@@ -23,9 +23,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod event;
 pub mod maze;
 pub mod observe;
 pub mod rng;
 pub mod seed;
 pub mod stats;
 pub mod topology;
+pub mod world;
+
+pub use event::{Biome, EndWhy, SagaEvent};
