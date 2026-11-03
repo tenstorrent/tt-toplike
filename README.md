@@ -443,6 +443,17 @@ Arcade's rows and panels (starfield, castle, flow, defrag, Wafer Waffler, traini
 
 The Inference view, the Training view and the Wafer Waffler each carry a backdrop behind what they show: the scene (forge, storm, aurora), the sky, and the clouds, each following real signals. Each draws its own by default and can be switched to another of the three or off, in the `[backdrop]` section of the same file or with `w` and `/backdrop` at run time. Other views, the arcade among them, carry no backdrop. See [docs/backdrop.md](docs/backdrop.md).
 
+Saga, the quest view, tells a story from the signal bus: a world per stretch of activity, a dungeon floor per chip, a hero whose health follows the chips. The TUI runs its story on a small background thread from start-up, whether or not the view is on screen, so the story has no gaps. The `[saga]` section of the same file sets it:
+
+```toml
+[saga]
+enabled = true          # false starts no saga thread at all
+names = "real"          # or "generated": lexicon names in place of model and process names
+season_minutes = 20     # quiet minutes that end a world, 1 to 1440
+```
+
+The minutes become backend ticks at the TUI's update interval (`--interval`, 100 ms by default). A TUI attached to a `--headless` host counts 10 ticks a second, because the host's snapshot does not say its interval. `--check-config` prints the saga's settings and reports each bad value with its line; a bad value keeps that key's default.
+
 Command bar verbs (type `/` then the verb): `/fps <1–120>`, `/datafps <1–30>`, `/mode <insights\|grid\|starfield\|castle\|flow\|arcade\|defrag>`, `/theme <grayskull\|default>` (bare `/theme` toggles), `/legend` (`l`), `/explain`, `/throttle`, `/idle-on-blur`, `/backdrop [off\|scene\|sky\|clouds]` (`w`, in the Inference, Training and Waffler views), `/arcade layout next\|prev\|<name>\|list` (`{` `}` in Arcade), `/help` (`?`), `/quit` (`q`).
 
 **Insights mode only:**

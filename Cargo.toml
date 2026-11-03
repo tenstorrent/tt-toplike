@@ -111,6 +111,10 @@ serde_json = "1.0"
 # Signal bus record types (workspace member)
 tt-toplike-bus = { path = "crates/tt-toplike-bus" }
 
+# Saga, the quest view's deterministic core (workspace member). The root
+# crate runs it on a driver thread (src/saga/) and draws its state.
+tt-toplike-saga = { path = "crates/tt-toplike-saga" }
+
 # CLI parsing
 clap = { version = "4.5", features = ["derive", "cargo"] }
 

@@ -165,6 +165,63 @@ pub struct LoadedConfig {
     /// `--arcade-layout` flag through [`choose_layout`]. Always a known
     /// name; `None` starts with the first layout of the cycle.
     pub start_layout: Option<String>,
+    /// The `[saga]` settings: whether the quest view's story runs, whose
+    /// names it uses, and how long a season lasts. A bad value keeps that
+    /// key's default.
+    pub saga: SagaSettings,
+}
+
+/// Which names the saga's chronicle uses (`[saga] names`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SagaNames {
+    /// Real model and process names (the default).
+    #[default]
+    Real,
+    /// Names drawn from the lexicon in place of every real name, for a
+    /// shared screen.
+    Generated,
+}
+
+impl SagaNames {
+    /// The word the config file uses.
+    pub fn name(self) -> &'static str {
+        match self {
+            SagaNames::Real => "real",
+            SagaNames::Generated => "generated",
+        }
+    }
+}
+
+/// The shortest season `[saga] season_minutes` accepts.
+pub const SAGA_SEASON_MIN: u32 = 1;
+/// The longest season `[saga] season_minutes` accepts: one day.
+pub const SAGA_SEASON_MAX: u32 = 1440;
+/// The season when the file sets none (spec 3.5: 12,000 ticks at 10 Hz).
+pub const SAGA_SEASON_DEFAULT: u32 = 20;
+
+/// The `[saga]` section. The root crate turns it into the saga core's own
+/// config with `crate::saga::saga_config`, which converts the minutes into
+/// ticks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SagaSettings {
+    /// `enabled`: the TUI runs the saga's driver thread from start-up
+    /// (ledger ruling R24). `false` starts no thread at all.
+    pub enabled: bool,
+    /// `names`: `"real"` or `"generated"`.
+    pub names: SagaNames,
+    /// `season_minutes`: quiet minutes that end a world,
+    /// [`SAGA_SEASON_MIN`] to [`SAGA_SEASON_MAX`].
+    pub season_minutes: u32,
+}
+
+impl Default for SagaSettings {
+    fn default() -> Self {
+        SagaSettings {
+            enabled: true,
+            names: SagaNames::Real,
+            season_minutes: SAGA_SEASON_DEFAULT,
+        }
+    }
 }
 
 /// The status line's text for `problems`: the first problem, and how many
@@ -194,7 +251,8 @@ pub fn status_message(loaded: &LoadedConfig) -> Option<(String, bool)> {
 
 /// Write the `--check-config` report for `loaded` to `out` and return the
 /// exit code: 0 with no problem, 1 with any. The report names the files
-/// read, the arcade layout in use, and every problem as `file:line: message`.
+/// read, the arcade layout in use, the backdrops, the `[saga]` settings, and
+/// every problem as `file:line: message`.
 pub fn write_check_report(loaded: &LoadedConfig, out: &mut dyn std::io::Write) -> i32 {
     let _ = (|| -> std::io::Result<()> {
         // A file that exists but cannot be read is a problem, printed
@@ -278,6 +336,19 @@ pub fn write_check_report(loaded: &LoadedConfig, out: &mut dyn std::io::Write) -
                 .filter_map(|v| builtin(v).map(|k| format!("{v} {}", k.name())))
                 .collect();
             writeln!(out, "  built in: {} (unless set above)", own.join(", "))?;
+        }
+        // The saga: on or off, its names and its season.
+        let s = &loaded.saga;
+        if s.enabled {
+            writeln!(
+                out,
+                "saga: on, names {}, season {} minute{}",
+                s.names.name(),
+                s.season_minutes,
+                if s.season_minutes == 1 { "" } else { "s" }
+            )?;
+        } else {
+            writeln!(out, "saga: off ([saga] enabled = false)")?;
         }
         match loaded.problems.len() {
             0 => writeln!(out, "ok")?,
@@ -440,12 +511,13 @@ fn one_line(message: &str) -> String {
 }
 
 /// The keys allowed at the top of a config file.
-const TOP_KEYS: [&str; 5] = [
+const TOP_KEYS: [&str; 6] = [
     "sensitivity",
     "max_particles_scale",
     "tt_smi_reset_behavior",
     "arcade",
     "backdrop",
+    "saga",
 ];
 
 /// Merge config `sources` (each a path and its text), later ones winning per
@@ -642,6 +714,16 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
                     });
                 }
             }
+        }
+        if let Some(item) = top.get("saga") {
+            let mut saga_report = |span: Option<std::ops::Range<usize>>, message: String| {
+                out.problems.push(ConfigProblem {
+                    file: path.clone(),
+                    line: span.map(|s| line_of(text, s.start)),
+                    message,
+                });
+            };
+            parse_saga(item, &mut out.saga, &mut saga_report);
         }
         // This file's problems in line order.
         out.problems[first_problem..].sort_by_key(|p| p.line.unwrap_or(0));
@@ -1263,6 +1345,67 @@ fn parse_backdrop(
     }
 }
 
+/// The `[saga]` table, read into `saga` key by key. A key that is set and
+/// valid replaces the value already there (a later file wins); a key with a
+/// problem keeps it. Every problem goes to `report`.
+fn parse_saga(item: &toml_edit::Item, saga: &mut SagaSettings, report: &mut Report<'_>) {
+    let Some(table) = item.as_table_like() else {
+        report(item.span(), "`saga` must be a table: [saga]".into());
+        return;
+    };
+    for (k, _) in table.iter() {
+        if !["enabled", "names", "season_minutes"].contains(&k) {
+            let span = table.get_key_value(k).and_then(|(key, _)| key.span());
+            report(
+                span,
+                format!("unknown key `saga.{k}` (expected enabled, names or season_minutes)"),
+            );
+        }
+    }
+    if let Some(v) = table.get("enabled") {
+        match v.as_bool() {
+            Some(b) => saga.enabled = b,
+            None => report(
+                v.span(),
+                "`saga.enabled` must be true or false; the saga stays on".into(),
+            ),
+        }
+    }
+    if let Some(v) = table.get("names") {
+        match v.as_str() {
+            Some("real") => saga.names = SagaNames::Real,
+            Some("generated") => saga.names = SagaNames::Generated,
+            Some(other) => report(
+                v.span(),
+                format!(
+                    "unknown saga.names {other:?} (expected \"real\" or \"generated\"); the saga uses real"
+                ),
+            ),
+            None => report(
+                v.span(),
+                "`saga.names` must be \"real\" or \"generated\"; the saga uses real".into(),
+            ),
+        }
+    }
+    if let Some(v) = table.get("season_minutes") {
+        let range = SAGA_SEASON_MIN..=SAGA_SEASON_MAX;
+        match v.as_integer() {
+            Some(n) if (i64::from(SAGA_SEASON_MIN)..=i64::from(SAGA_SEASON_MAX)).contains(&n) => {
+                // In range, so the cast cannot truncate.
+                saga.season_minutes = n as u32;
+            }
+            _ => report(
+                v.span(),
+                format!(
+                    "`saga.season_minutes` must be a whole number from {} to {}; the saga uses {SAGA_SEASON_DEFAULT}",
+                    range.start(),
+                    range.end()
+                ),
+            ),
+        }
+    }
+}
+
 /// A height or width weight: a whole number of at least 1, 1 when absent.
 fn weight(item: Option<&toml_edit::Item>, what: &str, report: &mut Report<'_>) -> Option<u32> {
     let Some(item) = item else {
@@ -1713,6 +1856,107 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
         assert_eq!(
             p,
             vec!["/x/config.toml:2: unknown key `arcade.nope` (expected cloudfield, row, layout or layouts)"]
+        );
+    }
+
+    /// With no `[saga]` section the saga runs with real names and a
+    /// 20-minute season (ledger ruling R24: on by default).
+    #[test]
+    fn no_saga_section_gives_the_saga_defaults() {
+        let l = load(&[]);
+        assert_eq!(
+            l.saga,
+            SagaSettings {
+                enabled: true,
+                names: SagaNames::Real,
+                season_minutes: 20,
+            }
+        );
+        let l = load(&[("c.toml", "[arcade]\ncloudfield = true\n")]);
+        assert_eq!(l.saga, SagaSettings::default());
+    }
+
+    #[test]
+    fn a_saga_section_sets_each_key() {
+        let l = load(&[(
+            "c.toml",
+            "[saga]\nenabled = false\nnames = \"generated\"\nseason_minutes = 1440\n",
+        )]);
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(
+            l.saga,
+            SagaSettings {
+                enabled: false,
+                names: SagaNames::Generated,
+                season_minutes: 1440,
+            }
+        );
+        let l = load(&[("c.toml", "[saga]\nnames = \"real\"\nseason_minutes = 1\n")]);
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(l.saga.names, SagaNames::Real);
+        assert_eq!(l.saga.season_minutes, 1);
+    }
+
+    /// Every bad `[saga]` value is a problem with its line, and that key
+    /// keeps its default while the good keys still apply.
+    #[test]
+    fn bad_saga_values_are_reported_with_their_lines_and_keep_the_defaults() {
+        let text =
+            "[saga]\nenabled = \"yes\"\nnames = \"secret\"\nseason_minutes = 0\nhost = true\n";
+        let l = load(&[("c.toml", text)]);
+        let p: Vec<String> = l.problems.iter().map(|p| p.to_string()).collect();
+        assert_eq!(
+            p,
+            vec![
+                "c.toml:2: `saga.enabled` must be true or false; the saga stays on",
+                "c.toml:3: unknown saga.names \"secret\" (expected \"real\" or \"generated\"); the saga uses real",
+                "c.toml:4: `saga.season_minutes` must be a whole number from 1 to 1440; the saga uses 20",
+                "c.toml:5: unknown key `saga.host` (expected enabled, names or season_minutes)",
+            ]
+        );
+        assert_eq!(l.saga, SagaSettings::default());
+        for bad in ["1441", "-5", "2.5", "\"20\""] {
+            let l = load(&[("c.toml", &format!("[saga]\nseason_minutes = {bad}\n"))]);
+            assert_eq!(l.problems.len(), 1, "{bad}: {:?}", l.problems);
+            assert_eq!(l.problems[0].line, Some(2), "{bad}");
+            assert_eq!(l.saga.season_minutes, 20, "{bad}");
+        }
+        let l = load(&[("c.toml", "[saga]\nnames = 3\nseason_minutes = 5\n")]);
+        assert_eq!(l.problems.len(), 1, "{:?}", l.problems);
+        assert_eq!(l.saga.season_minutes, 5, "a good key still applies");
+        let p = problems(&[("c.toml", "saga = 1\n")]);
+        assert_eq!(p, vec!["c.toml:1: `saga` must be a table: [saga]"]);
+    }
+
+    #[test]
+    fn check_config_lists_the_saga_settings() {
+        let report = |text: &str| {
+            let l = load(&[("c.toml", text)]);
+            let mut out = Vec::new();
+            let code = write_check_report(&l, &mut out);
+            (code, String::from_utf8(out).unwrap())
+        };
+        let (code, out) = report("");
+        assert_eq!(code, 0);
+        assert!(
+            out.contains("\nsaga: on, names real, season 20 minutes\n"),
+            "{out}"
+        );
+        let (_, out) = report("[saga]\nnames = \"generated\"\nseason_minutes = 1\n");
+        assert!(
+            out.contains("\nsaga: on, names generated, season 1 minute\n"),
+            "{out}"
+        );
+        let (_, out) = report("[saga]\nenabled = false\n");
+        assert!(
+            out.contains("\nsaga: off ([saga] enabled = false)\n"),
+            "{out}"
+        );
+        let (code, out) = report("[saga]\nseason_minutes = 0\n");
+        assert_eq!(code, 1);
+        assert!(
+            out.contains("c.toml:2: `saga.season_minutes` must be a whole number"),
+            "{out}"
         );
     }
 

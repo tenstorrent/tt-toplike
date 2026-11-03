@@ -102,6 +102,11 @@ pub mod config;
 // UI module - contains both TUI and GUI implementations
 pub mod ui;
 
+// Saga, the quest view: the `[saga]` config and the driver thread that feeds
+// the saga core from the bus. TUI-side only, like the views that read it.
+#[cfg(feature = "tui")]
+pub mod saga;
+
 // Re-exports for convenience
 pub use backend::{BackendConfig, TelemetryBackend};
 pub use error::{Result, TTTopError};
