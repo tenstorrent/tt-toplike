@@ -1454,11 +1454,36 @@ fn the_panel_map_and_hud_are_the_views_own() {
             .map(Row::line)
             .collect();
         assert_eq!(frame_hash(&lines[1..]), frame_hash(&want));
-        let status = text(&[status_row(state, &memory, &look, 80).line()]).remove(0);
-        let hud = text(&lines[..1]).remove(0);
-        let after_mark = hud.strip_prefix(" (mock)").expect("the mark comes first");
-        assert!(status.starts_with(after_mark), "{hud:?} vs {status:?}");
+        // Where the whole status row fits up to the quest (70 columns
+        // here), the HUD is the status row after the mark.
+        let wide = render_saga_panel(&feed, &memory, (70, 16), 5);
+        let status = text(&[status_row(state, &memory, &look, 63).line()]).remove(0);
+        let hud = text(&wide[..1]).remove(0);
+        assert_eq!(hud, format!(" (mock){status}"));
     })
+}
+
+/// A HUD too narrow for the status row keeps the mark, the hero, the
+/// vitality as a percentage and the quest: the whole name when it fits,
+/// else its first word. At 20 columns the row is cut at the edge.
+#[test]
+fn a_narrow_hud_keeps_the_hero_the_vitality_and_the_quest() {
+    let state = busy_state();
+    let name = state.hero.name.clone();
+    let first = name.split(' ').next().unwrap().to_string();
+    let quest = quest_text(&state);
+    let pct = format!("{:>3.0}%", state.hero.vitality.clamp(0.0, 1.0) * 100.0);
+    let hud = |w: u16| text(&tc(|| panel(&state, false, (w, 11))))[0].clone();
+    // " (mock)" is 7 columns; " name 100% • quest" adds the rest.
+    let roomy = (7 + 1 + name.chars().count() + 5 + 3 + quest.chars().count()) as u16;
+    assert!(
+        roomy < 60,
+        "the busy hero's short form is narrower than the full row"
+    );
+    assert_eq!(hud(roomy), format!(" (mock) {name} {pct} • {quest}"));
+    assert_eq!(hud(roomy - 1), format!(" (mock) {first} {pct} • {quest}"));
+    assert!(hud(20).starts_with(" (mock) "), "{:?}", hud(20));
+    assert!(!hud(roomy).contains('▰') && !hud(roomy).contains('▱'));
 }
 
 /// Generated names reach the panel exactly as they reach the view: no real
@@ -1515,11 +1540,18 @@ fn golden_panel_frames() -> Vec<u64> {
 
 /// The hashes of [`golden_panel_frames`], pinned when the panel was added
 /// in 0.16.4 and looked at in a 140x40 and an 80x24 tmux capture.
+///
+/// Re-pinned before the first commit's merge, after the tmux capture at
+/// 80x24 showed the 39-column HUD cut inside the vitality bar: the HUD
+/// got its short form ([`hud_row`]). Three frames moved, the ones whose
+/// status row does not fit to the end of its quest: 70x16 at the half cut
+/// (its quest names the sage) and 20x6 at both cuts. 70x16 at the end of
+/// the log did not move.
 const GOLDEN_PANEL: [u64; 4] = [
-    12009227563986411993,
-    13429898114650174554,
+    12214383344375690488,
+    14813228560897824468,
     1019373424927296806,
-    11240896677602126856,
+    413437031925912577,
 ];
 
 /// Prints the hashes for [`GOLDEN_PANEL`]. Run with

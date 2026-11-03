@@ -199,7 +199,11 @@ has seen, so the map it shows is the map the full view shows.
 
 The HUD is the full view's status row after the label: `(mock)` or `(replay)` when the story has
 one, the hero's name, the `▰▱` vitality bar, the quest, how much of the floor is mapped, and the
-tick. The segments at the end are dropped when they do not fit.
+tick. The segments at the end are dropped when they do not fit. A panel too narrow for the row up
+to the end of the quest gets a short form: the label, the hero's name, its vitality as a
+percentage and the quest, for example ` (mock) Yarrow 99% • exploring` in the 39-column panel of
+`now-serving` at 80x24. The short form drops the hero's title ("the Well-Cached") when the whole
+name does not fit.
 
 When there is no map to draw, the panel says why on one line, wrapped when the panel is narrow:
 

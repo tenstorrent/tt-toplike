@@ -1611,20 +1611,9 @@ fn status_row(state: &SagaState, memory: &SagaMemory, look: &Look, w: usize) -> 
 fn status_after(mut row: Row, state: &SagaState, memory: &SagaMemory, look: &Look) -> Row {
     let p = &look.p;
     let hero = &state.hero;
-    let v = if hero.vitality.is_finite() {
-        hero.vitality.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
+    let (v, bar_style) = vitality(state, look);
     let filled = ((v * VITALITY_CELLS as f32).round() as usize).min(VITALITY_CELLS);
-    let bar_style = if v >= 0.75 {
-        fg(p.green)
-    } else if v >= REST_BELOW {
-        fg(p.yellow)
-    } else {
-        fg(p.orange)
-    };
-    let sep = fg(mix(p.base, p.accent, 80));
+    let sep = separator(look);
     row.push(" ", Style::default())
         .push(&hero.name, look.name)
         .push("  ", Style::default())
@@ -1652,6 +1641,32 @@ fn status_after(mut row: Row, state: &SagaState, memory: &SagaMemory, look: &Loo
         row.push("  • ", sep).push(&tick, look.dim);
     }
     row
+}
+
+/// The hero's vitality, clamped to 0..=1 (0 when it is not a number), and
+/// the bar's style for it: green from 75%, yellow from [`REST_BELOW`],
+/// orange under it.
+fn vitality(state: &SagaState, look: &Look) -> (f32, Style) {
+    let p = &look.p;
+    let raw = state.hero.vitality;
+    let v = if raw.is_finite() {
+        raw.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let style = if v >= 0.75 {
+        fg(p.green)
+    } else if v >= REST_BELOW {
+        fg(p.yellow)
+    } else {
+        fg(p.orange)
+    };
+    (v, style)
+}
+
+/// The `•` between the status row's segments.
+fn separator(look: &Look) -> Style {
+    fg(mix(look.p.base, look.p.accent, 80))
 }
 
 /// The quest in words: `exploring`, `resting`, `visiting the sage NAME`,
@@ -1833,14 +1848,47 @@ pub fn render_saga_panel(
     out
 }
 
-/// The panel's HUD: the label mark, then the full view's status row.
+/// The panel's HUD: the label mark, then the full view's status row when
+/// it fits up to the end of the quest. A narrower panel (the Saga panel of
+/// `now-serving` at 80x24 is 39 columns) gets a short form that keeps the
+/// three things the HUD is for: the hero, its vitality as a percentage in
+/// the bar's colour, and the quest. The short form drops the hero's title
+/// (`Yarrow` for `Yarrow the Well-Cached`) when the whole name does not
+/// fit. The label mark comes first in both, so a narrow panel keeps it.
 fn hud_row(state: &SagaState, memory: &SagaMemory, look: &Look, w: usize) -> Row {
+    let cols = |s: &str| -> usize {
+        s.chars()
+            .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+            .sum()
+    };
     let mut row = Row::new(w);
-    if let Some(mark) = state.label.mark() {
+    let mark = state.label.mark();
+    if let Some(mark) = mark {
         row.push(" ", Style::default())
             .push(mark, fg(look.p.yellow).add_modifier(Modifier::BOLD));
     }
-    status_after(row, state, memory, look)
+    let lead = mark.map_or(0, |m| 1 + cols(m));
+    let name = state.hero.name.as_str();
+    let quest = quest_text(state);
+    // " name  ▰▰▰▰▰▰▰▰▰▰  99%  • quest", as `status_after` draws it.
+    let full = lead + 1 + cols(name) + 2 + VITALITY_CELLS + 5 + 4 + cols(&quest);
+    if full <= w {
+        return status_after(row, state, memory, look);
+    }
+    // " name 99% • quest".
+    let short = |n: &str| lead + 1 + cols(n) + 5 + 3 + cols(&quest);
+    let first = name.split(' ').next().unwrap_or(name);
+    let shown = if short(name) <= w { name } else { first };
+    let (v, bar_style) = vitality(state, look);
+    row.push(" ", Style::default())
+        .push(shown, look.name)
+        .push(
+            &format!(" {:>3.0}%", v * 100.0),
+            bar_style.add_modifier(Modifier::BOLD),
+        )
+        .push(" • ", separator(look))
+        .push(&quest, look.quest);
+    row
 }
 
 /// A note in the panel: ` text` in the arcade's note colour, wrapped to
