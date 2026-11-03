@@ -1189,6 +1189,11 @@ fn run_app(
     // itself runs on the driver's thread (`saga`).
     let mut saga_why = false;
     let mut saga_frame: u64 = 0;
+    // What the Saga view remembers between frames: the cells its hero has
+    // lit, its trail and its chip's temperature (`saga_view::SagaMemory`).
+    // Fed on every update in every view, so the map is still remembered
+    // when Saga comes back on screen.
+    let mut saga_memory = saga_view::SagaMemory::new();
     // The Die 3D inset beside the Insights process table (see
     // `insights_inset_rect`), with its own clock. It exists only on Insights,
     // once there is room and a Blackhole chip; it is hidden but kept while
@@ -2025,6 +2030,22 @@ fn run_app(
                 // own animation clock moves on.
                 DisplayMode::Saga => saga_frame = saga_frame.wrapping_add(1),
             }
+            // The Saga view's memory follows the story in every view (see
+            // `saga_memory` above), and takes the temperature of the hero's
+            // chip from the backend, matched by its bus key.
+            if let Some(d) = saga {
+                let state = d.published().state;
+                saga_memory.observe(&state);
+                let heat = saga_view::hero_chip(&state).and_then(|chip| {
+                    backend
+                        .devices()
+                        .iter()
+                        .find(|dev| tt_toplike_bus::EntityKey::chip(&dev.bus_id) == *chip)
+                        .and_then(|dev| backend.telemetry(dev.index))
+                        .and_then(|t| t.asic_temperature)
+                });
+                saga_memory.set_heat(heat);
+            }
 
             // The backdrops (see `backdrop_bus`): the views' own painters
             // follow their settings, and the TUI's layer is fed for the view
@@ -2430,7 +2451,14 @@ fn run_app(
                             }
                         }
                         DisplayMode::Saga => {
-                            ui_saga(f, saga, loaded_config.saga.enabled, saga_why, saga_frame);
+                            ui_saga(
+                                f,
+                                saga,
+                                &saga_memory,
+                                loaded_config.saga.enabled,
+                                saga_why,
+                                saga_frame,
+                            );
                         }
                         DisplayMode::Training => {
                             // Under `--mock` the state comes from the
@@ -4262,6 +4290,7 @@ fn ui_die3d(
 fn ui_saga(
     f: &mut Frame,
     saga: Option<&crate::saga::SagaDriver>,
+    memory: &saga_view::SagaMemory,
     enabled: bool,
     why: bool,
     frame: u64,
@@ -4280,7 +4309,7 @@ fn ui_saga(
                 stopped: p.stopped,
                 why,
             };
-            saga_view::render_saga(&p.state, flags, size, frame)
+            saga_view::render_saga(&p.state, memory, flags, size, frame)
         }
         None => saga_view::render_saga_off(size, enabled),
     };
