@@ -63,20 +63,24 @@ pub enum SagaEvent {
     /// A hero named `name` was born in world `world`, on floor `floor` (an
     /// index into the world's floors).
     HeroBorn { world: u64, name: String, floor: u8 },
-    /// The hero set out on a quest: `verb`, about `target`, because of
-    /// `reason`.
+    /// The hero on floor `floor` set out on a quest: `verb`, about
+    /// `target`, because of `reason`.
     QuestStarted {
         world: u64,
+        floor: u8,
         verb: Verb,
         target: Option<EntityKey>,
         reason: Cause,
     },
-    /// The hero reached the goal of its `verb` quest.
-    QuestDone { world: u64, verb: Verb },
-    /// The chronicle wrote a line (`saga.beat`): its tone, its text, and
-    /// the signal behind it. See [`crate::chronicle`].
+    /// The hero on floor `floor` reached the goal of its `verb` quest.
+    QuestDone { world: u64, floor: u8, verb: Verb },
+    /// The chronicle wrote a line (`saga.beat`): the floor it belongs to,
+    /// its tone, its text, and the signal behind it. A hero's or a quest's
+    /// line carries the hero's floor. A world's line (born or ended) carries
+    /// `None`. See [`crate::chronicle`].
     Beat {
         world: u64,
+        floor: Option<u8>,
         tone: Tone,
         text: String,
         cause: Cause,

@@ -19,8 +19,9 @@
 //!
 //! * `solo.jsonl` and `party4.jsonl`: written by `tests/support/party.rs` (one
 //!   chip and four chips). `tests/party.rs` keeps them in step with the
-//!   generator. Their digests were pinned on the single-chip code before the
-//!   party (0.16.4).
+//!   generator. Their digests were first pinned on the single-chip code
+//!   before the party (0.16.4), then re-pinned with the others for digest
+//!   version 2.
 //!
 //! In generated-name mode the published beats carry aliased causes (ledger
 //! ruling R17), so the digests differ between the two name modes and every
@@ -32,7 +33,7 @@ use tt_toplike_bus::Record;
 use tt_toplike_saga::chronicle::NameMode;
 use tt_toplike_saga::{Label, Saga, SagaConfig};
 
-/// The three fixtures, by file name.
+/// The five fixtures, by file name.
 const FIXTURES: [&str; 5] = [
     "quiet.jsonl",
     "bringup.jsonl",
@@ -237,14 +238,20 @@ fn one_temperature_bit_changes_the_first_world() {
 /// purpose, re-pin them deliberately (run the test, copy the printed values)
 /// and say in the commit which rule changed. An unexplained change here means
 /// the story changed for the same log, which breaks replay.
+///
+/// Every row was re-pinned for digest version 2 (the party addendum, section
+/// 3.6): the version item moves all of them, and the floor fields on quest
+/// events, beats and lines move every fixture that births a world. The
+/// stories themselves did not change (`tests/party.rs` pins the solo story
+/// print and trace, and they held).
 #[test]
 fn a_snapshot_of_the_digests_matches() {
     let golden: [(&str, u64, u64); 5] = [
-        ("quiet.jsonl", 0x42ae3da4810092ce, 0x42ae3da4810092ce),
-        ("bringup.jsonl", 0xffa0c7d46fb3aae2, 0xffa0c7d46fb3aae2),
-        ("busy.jsonl", 0xc704fe05f6f97267, 0xc49371dd78c6084b),
-        ("solo.jsonl", 0x6d401ae1a7a9e9f1, 0xa9188a23f3126849),
-        ("party4.jsonl", 0x1e0708a50b65a1bb, 0x35c454fd53d24f42),
+        ("quiet.jsonl", 0x72af063987e6e20f, 0x72af063987e6e20f),
+        ("bringup.jsonl", 0x88bb8d2b104511c3, 0x88bb8d2b104511c3),
+        ("busy.jsonl", 0xdcf06ed096288f90, 0xb1487e977ac6bc22),
+        ("solo.jsonl", 0xe9ed5f1dae160dfa, 0x5a73462b53067a2a),
+        ("party4.jsonl", 0x219ccb84610ebdec, 0x8a36b896111d0fa7),
     ];
     let mut actual = Vec::new();
     for (name, _, _) in golden {

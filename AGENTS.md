@@ -2170,15 +2170,16 @@ rulings (R1 to R28) that amended the plan, then a final whole-branch review and 
 ### Re-pinning the digest goldens
 
 `crates/tt-toplike-saga/tests/determinism.rs`, `a_snapshot_of_the_digests_matches`, pins one digest
-per fixture (`quiet.jsonl`, `bringup.jsonl`, `busy.jsonl`) for each name mode. A change to the
-seed rule, the maze, the walk, quest planning, the grammar, the lexicon or the event order changes
+per fixture (`quiet.jsonl`, `bringup.jsonl`, `busy.jsonl`, `solo.jsonl`, `party4.jsonl`) for each
+name mode. A change to the digest encoding, the seed rule, the maze, the walk, quest planning, the
+grammar, the lexicon or the event order changes
 them. Re-pin only on purpose: run `cargo test -p tt-toplike-saga --test determinism`, copy the
 values the failure prints, and name the rule that changed in the commit message. An unexplained
 change means the same log now tells another story, which breaks replay. The view's golden frames
 in `src/ui/tui/saga_view_tests.rs` hash the drawing and follow the same rule. After changing
 `tests/support/busy.rs`, regenerate the fixture with the ignored test `write_busy_fixture`.
 
-Re-pins so far (the final fix wave, Nov 2 2026). Each was made in the commit of the change that
+Re-pins so far (the final fix wave, Nov 2 2026, then the party tasks). Each was made in the commit of the change that
 moved it, and each diff is explained by that change:
 
 | Commit | Change | Moved |
@@ -2186,9 +2187,12 @@ moved it, and each diff is explained by that change:
 | `fix(saga): ViewChanged events and gaps take no ordinal` | C1 | `busy.jsonl` (both modes): it holds one `ViewChanged`, at record 1,506. All 8 view frames: both cut points come after it. `quiet` and `bringup` hold none. |
 | `fix(saga): the seed ring keeps each value's whole 64-bit pattern` | I1 | `quiet.jsonl` and `busy.jsonl` (both modes) and all 8 view frames: every world seed changed. `bringup.jsonl` births no world and did not move. |
 | the I2, I3 and I4 commits | pacemaker, first record, season tag | nothing: the fixtures sweep only chips and never lose the pacemaker, the core tests feed records directly, and the fixtures carry no season tag. |
+| `feat(saga): digest version 2, with a floor on every beat and quest event` (party Task A.2, Nov 3 2026) | the digest encoding: a version item first, a floor on `QuestStarted`, `QuestDone`, `Beat` and each chronicle line, and a member count in the end item | every row, both modes: `quiet`, `bringup`, `busy`, `solo` and `party4`. `bringup` births no world, so only the version item and the end item's count move it. The story print and trace of `solo.jsonl` and all 8 view frames did not move. |
 
-Pinned now: `quiet.jsonl` 0x42ae3da4810092ce (both modes), `bringup.jsonl` 0xffa0c7d46fb3aae2 (both),
-`busy.jsonl` 0xc704fe05f6f97267 (real) and 0xc49371dd78c6084b (generated).
+Pinned now (digest version 2): `quiet.jsonl` 0x72af063987e6e20f (both modes), `bringup.jsonl`
+0x88bb8d2b104511c3 (both), `busy.jsonl` 0xdcf06ed096288f90 (real) and 0xb1487e977ac6bc22
+(generated), `solo.jsonl` 0xe9ed5f1dae160dfa and 0x5a73462b53067a2a, `party4.jsonl`
+0x219ccb84610ebdec and 0x8a36b896111d0fa7.
 
 ### Checking the contract with the binary
 

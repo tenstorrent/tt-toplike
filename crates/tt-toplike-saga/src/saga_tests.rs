@@ -3,7 +3,7 @@
 //! `tests/determinism.rs`.
 
 use super::*;
-use crate::chronicle::Tone;
+use crate::chronicle::{Beat, Tone};
 use crate::hero::{AI_CLOCK, TEMPERATURE_BASELINE};
 use crate::maze::Cell;
 use tt_toplike_bus::{Provenance, Sample, Sweep, Value};
@@ -556,8 +556,8 @@ fn a_model_that_goes_away_takes_its_sage_hook_with_it() {
     assert!(saga.hooks.iter().all(|h| h.target.as_ref() != Some(&sage)));
 }
 
-/// One event of each variant. The match in
-/// `every_event_variant_has_its_own_tag` has no wildcard, so a new variant
+/// One event of each variant, with a `Beat` for each floor option. The match
+/// in `every_event_variant_has_its_own_tag` has no wildcard, so a new variant
 /// does not compile until it is listed there and given a tag.
 fn one_of_each() -> Vec<SagaEvent> {
     let cause = Cause {
@@ -581,16 +581,26 @@ fn one_of_each() -> Vec<SagaEvent> {
         },
         SagaEvent::QuestStarted {
             world: 1,
+            floor: 2,
             verb: Verb::Rest,
             target: None,
             reason: cause.clone(),
         },
         SagaEvent::QuestDone {
             world: 1,
+            floor: 3,
             verb: Verb::Rest,
         },
         SagaEvent::Beat {
             world: 1,
+            floor: Some(4),
+            tone: Tone::Calm,
+            text: "t".to_string(),
+            cause: cause.clone(),
+        },
+        SagaEvent::Beat {
+            world: 1,
+            floor: None,
             tone: Tone::Calm,
             text: "t".to_string(),
             cause,
@@ -612,15 +622,98 @@ fn every_event_variant_has_its_own_tag() {
             SagaEvent::Beat { .. } => 0x06,
         };
         assert_eq!(event_tag(&ev), table, "{ev:?}");
-        seen.push(table);
+        if !seen.contains(&table) {
+            seen.push(table);
+        }
     }
-    let mut unique = seen.clone();
-    unique.sort();
-    unique.dedup();
-    assert_eq!(unique.len(), seen.len(), "two variants share a tag");
-    for other in [TAG_SEED, TAG_LINE, TAG_END] {
+    assert_eq!(seen.len(), 6, "two variants share a tag");
+    for other in [TAG_VERSION, TAG_SEED, TAG_LINE, TAG_END] {
         assert!(!seen.contains(&other), "an event tag equals a stream tag");
     }
+}
+
+/// The bytes of `one_of_each()[i]` at tick 9, written out by hand from the
+/// module comment's table (digest version 2).
+fn one_of_each_by_hand() -> Vec<Vec<u8>> {
+    // Tick 9 and world 1, 8 bytes little-endian each.
+    let tick_world = [9, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+    // The cause "chip:0000:01:00.0" / "s" / ordinal 1.
+    let mut cause = vec![17, 0, 0, 0];
+    cause.extend_from_slice(b"chip:0000:01:00.0");
+    cause.extend_from_slice(&[1, 0, 0, 0, b's']);
+    cause.extend_from_slice(&[1, 0, 0, 0, 0, 0, 0, 0]);
+    let item = |tag: u8, fields: &[&[u8]]| {
+        let mut v = vec![tag];
+        v.extend_from_slice(&tick_world);
+        for f in fields {
+            v.extend_from_slice(f);
+        }
+        v
+    };
+    vec![
+        // WorldBorn: biome Dungeon 0.
+        item(0x01, &[&[0]]),
+        // WorldEnded: why Season 2.
+        item(0x02, &[&[2]]),
+        // HeroBorn: name "n", floor 0.
+        item(0x03, &[&[1, 0, 0, 0, b'n'], &[0]]),
+        // QuestStarted: floor 2, verb Rest 1, target absent, the cause.
+        item(0x04, &[&[2], &[1], &[0], &cause]),
+        // QuestDone: floor 3, verb Rest 1.
+        item(0x05, &[&[3], &[1]]),
+        // Beat: floor present 4, tone Calm 0, text "t", the cause.
+        item(0x06, &[&[1, 4], &[0], &[1, 0, 0, 0, b't'], &cause]),
+        // Beat: floor absent, tone Calm 0, text "t", the cause.
+        item(0x06, &[&[0], &[0], &[1, 0, 0, 0, b't'], &cause]),
+    ]
+}
+
+#[test]
+fn the_encoding_table_matches_the_code() {
+    // Every event, one at a time, against the table.
+    for (ev, hand) in one_of_each().iter().zip(one_of_each_by_hand()) {
+        let mut encoded = Vec::new();
+        encode_event(&mut encoded, 9, ev);
+        assert_eq!(encoded, hand, "{ev:?}");
+    }
+    // A chronicle line: tag, floor option, text.
+    let beat = |floor| Beat {
+        tone: Tone::Tense,
+        text: "hi".to_string(),
+        cause: Cause {
+            entity: chip_a(),
+            signal: String::new(),
+            ordinal: 0,
+        },
+        tick: 4,
+        floor,
+    };
+    for (floor, hand) in [
+        (Some(7), vec![0x20, 1, 7, 2, 0, 0, 0, b'h', b'i']),
+        (None, vec![0x20, 0, 2, 0, 0, 0, b'h', b'i']),
+    ] {
+        let mut encoded = Vec::new();
+        encode_line(&mut encoded, &beat(floor));
+        assert_eq!(encoded, hand, "line with floor {floor:?}");
+    }
+    // The end: tag, world seed 0x0102, one member, its floor, x and y.
+    let mut encoded = Vec::new();
+    encode_end(&mut encoded, 0x0102, &[(5, 6, 7)]);
+    assert_eq!(encoded, [0x30, 2, 1, 0, 0, 0, 0, 0, 0, 1, 5, 6, 7]);
+    // The version item.
+    assert_eq!((TAG_VERSION, DIGEST_VERSION), (0x00, 2));
+}
+
+#[test]
+fn an_empty_saga_digest_has_the_version_item() {
+    // A saga that has seen nothing hashes the version item, then the end
+    // item: the placeholder's seed 0, one member, and its floor and cell.
+    let saga = Saga::new(config(NameMode::Real, Label::Live));
+    let (x, y) = saga.state.hero.pos;
+    let mut hand = vec![0x00, 0x02, 0x30];
+    hand.extend_from_slice(&[0; 8]);
+    hand.extend_from_slice(&[1, saga.state.hero.floor, x, y]);
+    assert_eq!(saga.digest(), crate::seed::fnv1a64(&hand));
 }
 
 #[test]
@@ -641,6 +734,7 @@ fn the_digest_encoding_matches_a_hand_written_byte_string() {
             6,
             SagaEvent::QuestStarted {
                 world: 1,
+                floor: 0,
                 verb: Verb::VisitSage,
                 target: Some(EntityKey::model("ab")),
                 reason: Cause {
@@ -654,6 +748,7 @@ fn the_digest_encoding_matches_a_hand_written_byte_string() {
             7,
             SagaEvent::QuestDone {
                 world: 1,
+                floor: 1,
                 verb: Verb::Rest,
             },
         ),
@@ -661,6 +756,7 @@ fn the_digest_encoding_matches_a_hand_written_byte_string() {
             300,
             SagaEvent::Beat {
                 world: 1,
+                floor: Some(1),
                 tone: Tone::Tense,
                 text: "hi".to_string(),
                 cause: Cause {
@@ -671,12 +767,15 @@ fn the_digest_encoding_matches_a_hand_written_byte_string() {
             },
         ),
     ];
-    let mut hand: Vec<u8> = Vec::new();
+    // The version item comes first, once.
+    let mut hand: Vec<u8> = vec![0x00, 0x02];
     // WorldBorn: tag, tick 5, world 1, Forge.
     hand.extend_from_slice(&[0x01, 5, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1]);
-    // QuestStarted: tag, tick 6, world 1, VisitSage, target present
+    // QuestStarted: tag, tick 6, world 1, floor 0, VisitSage, target present
     // "model:ab", reason "model:ab" / "ModelReady" / ordinal 3.
-    hand.extend_from_slice(&[0x04, 6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 1]);
+    hand.extend_from_slice(&[
+        0x04, 6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 2, 1,
+    ]);
     hand.extend_from_slice(&[8, 0, 0, 0]);
     hand.extend_from_slice(b"model:ab");
     hand.extend_from_slice(&[8, 0, 0, 0]);
@@ -684,12 +783,12 @@ fn the_digest_encoding_matches_a_hand_written_byte_string() {
     hand.extend_from_slice(&[10, 0, 0, 0]);
     hand.extend_from_slice(b"ModelReady");
     hand.extend_from_slice(&[3, 0, 0, 0, 0, 0, 0, 0]);
-    // QuestDone: tag, tick 7, world 1, Rest.
-    hand.extend_from_slice(&[0x05, 7, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1]);
-    // Beat: tag, tick 300 (0x012c), world 1, Tense, "hi", cause "chip:x" /
-    // "t" / ordinal 258 (0x0102).
+    // QuestDone: tag, tick 7, world 1, floor 1, Rest.
+    hand.extend_from_slice(&[0x05, 7, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1]);
+    // Beat: tag, tick 300 (0x012c), world 1, floor present 1, Tense, "hi",
+    // cause "chip:x" / "t" / ordinal 258 (0x0102).
     hand.extend_from_slice(&[
-        0x06, 0x2c, 0x01, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1,
+        0x06, 0x2c, 0x01, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1,
     ]);
     hand.extend_from_slice(&[2, 0, 0, 0]);
     hand.extend_from_slice(b"hi");
@@ -699,26 +798,136 @@ fn the_digest_encoding_matches_a_hand_written_byte_string() {
     hand.extend_from_slice(b"t");
     hand.extend_from_slice(&[0x02, 0x01, 0, 0, 0, 0, 0, 0]);
 
-    // The encoder writes exactly these bytes.
-    let mut encoded = Vec::new();
+    // The encoder writes exactly these bytes, after the version item.
+    let mut encoded = vec![0x00, 0x02];
     for (tick, ev) in &events {
         encode_event(&mut encoded, *tick, ev);
     }
     assert_eq!(encoded, hand);
 
     // Through the saga: emit the events at their ticks, with nothing else
-    // in the stream. The digest then ends with the end item: tag 0x30, the
-    // placeholder world's seed 0, and the hero's floor and cell.
+    // in the stream, and write one chronicle line on floor 1. The digest
+    // then hashes that line (tag 0x20, floor present 1, its text) and the
+    // end item: tag 0x30, the placeholder world's seed 0, one member, and
+    // the hero's floor and cell.
     let mut saga = Saga::new(config(NameMode::Real, Label::Live));
     for (tick, ev) in events {
         saga.state.tick = tick;
         saga.emit(ev);
     }
+    let mut ctx = saga.ctx(
+        Tone::Calm,
+        None,
+        NameRole::Service,
+        None,
+        None,
+        &Cause {
+            entity: chip_a(),
+            signal: String::new(),
+            ordinal: 0,
+        },
+    );
+    ctx.floor = Some(1);
+    saga.write_beat(BeatKind::WorldBorn, &ctx);
+    let text = saga.state.chronicle.lines(1).next().unwrap().text.clone();
+    hand.extend_from_slice(&[0x20, 1, 1]);
+    hand.extend_from_slice(&u32::try_from(text.len()).unwrap().to_le_bytes());
+    hand.extend_from_slice(text.as_bytes());
     let (x, y) = saga.state.hero.pos;
     hand.push(0x30);
     hand.extend_from_slice(&[0; 8]);
-    hand.extend_from_slice(&[saga.state.hero.floor, x, y]);
+    hand.extend_from_slice(&[1, saga.state.hero.floor, x, y]);
     assert_eq!(saga.digest(), crate::seed::fnv1a64(&hand));
+}
+
+/// The floor a beat should carry, from the event raised just before it: a
+/// world's event gives `None`, a hero's or a quest's event gives the floor
+/// it names.
+fn floor_after(ev: &SagaEvent) -> Option<u8> {
+    match ev {
+        SagaEvent::WorldBorn { .. } | SagaEvent::WorldEnded { .. } => None,
+        SagaEvent::HeroBorn { floor, .. }
+        | SagaEvent::QuestStarted { floor, .. }
+        | SagaEvent::QuestDone { floor, .. } => Some(*floor),
+        SagaEvent::Beat { .. } => panic!("two beats in a row"),
+    }
+}
+
+#[test]
+fn quest_and_beat_events_carry_the_floor() {
+    // A two-chip world. The hero is moved to floor 1's entrance, so a floor
+    // copied from the hero differs from the 0 a hard-coded floor would give.
+    let mut saga = Saga::new(config(NameMode::Real, Label::Live));
+    saga.feed(&sample(&chip_b(), ASIC_TEMPERATURE, Value::F64(46.0)));
+    run_ticks(&mut saga, 5);
+    assert_eq!(saga.state.world.floors.len(), 2);
+    saga.state.hero.floor = 1;
+    saga.state.hero.pos = saga.state.world.floors[1].entrance;
+    saga.drain_events();
+    saga.dwell_until = None;
+    saga.start_quest(false);
+    run_ticks(&mut saga, 400);
+    let events = saga.drain_events();
+
+    let (mut started, mut done) = (0, 0);
+    for e in &events {
+        match e {
+            SagaEvent::QuestStarted { floor, .. } => {
+                assert_eq!(*floor, 1, "{e:?}");
+                started += 1;
+            }
+            SagaEvent::QuestDone { floor, .. } => {
+                assert_eq!(*floor, 1, "{e:?}");
+                done += 1;
+            }
+            _ => {}
+        }
+    }
+    assert!(started >= 2 && done >= 1, "{started} started, {done} done");
+    // Each quest's beat comes right after its event and carries the floor.
+    for w in events.windows(2) {
+        if let SagaEvent::Beat { floor, .. } = &w[1] {
+            assert_eq!(*floor, floor_after(&w[0]), "{:?} then {:?}", w[0], w[1]);
+            assert_eq!(*floor, Some(1));
+        }
+    }
+    // The stored lines carry it too.
+    let n = events
+        .iter()
+        .filter(|e| matches!(e, SagaEvent::Beat { .. }))
+        .count();
+    assert!(saga.state.chronicle.lines(n).all(|b| b.floor == Some(1)));
+}
+
+#[test]
+fn world_beats_have_no_floor() {
+    // The busy script births, ends and births again, in both name modes.
+    for names in [NameMode::Real, NameMode::Generated] {
+        let mut saga = Saga::new(config(names, Label::Live));
+        let mut events = Vec::new();
+        for r in busy_script() {
+            saga.feed(&r);
+            events.extend(saga.drain_events());
+        }
+        let (mut world, mut hero) = (0, 0);
+        for w in events.windows(2) {
+            if let SagaEvent::Beat { floor, .. } = &w[1] {
+                let want = floor_after(&w[0]);
+                assert_eq!(*floor, want, "{:?} then {:?}", w[0], w[1]);
+                match want {
+                    None => world += 1,
+                    Some(f) => {
+                        assert_eq!(f, 0, "the hero never leaves floor 0 here");
+                        hero += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            world >= 4 && hero >= 4,
+            "{world} world beats, {hero} hero beats"
+        );
+    }
 }
 
 #[test]

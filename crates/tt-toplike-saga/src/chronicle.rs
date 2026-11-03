@@ -228,6 +228,11 @@ pub struct BeatCtx {
     pub tick: u64,
     /// The signal that caused the beat.
     pub cause: Cause,
+    /// The floor the beat belongs to: the hero's floor for a hero's or a
+    /// quest's beat, `None` for a world's beat (born or ended). It is kept
+    /// beside the text and never written into it, so a template's text does
+    /// not depend on it.
+    pub floor: Option<u8>,
 }
 
 /// One line of the chronicle.
@@ -238,6 +243,8 @@ pub struct Beat {
     /// The signal behind the line, shown when a person asks "why".
     pub cause: Cause,
     pub tick: u64,
+    /// The floor of the beat, copied from [`BeatCtx::floor`].
+    pub floor: Option<u8>,
 }
 
 impl Beat {
@@ -245,6 +252,7 @@ impl Beat {
     pub fn event(&self, world: u64) -> SagaEvent {
         SagaEvent::Beat {
             world,
+            floor: self.floor,
             tone: self.tone,
             text: self.text.clone(),
             cause: self.cause.clone(),
@@ -304,6 +312,7 @@ impl Chronicle {
             text,
             cause,
             tick: ctx.tick,
+            floor: ctx.floor,
         }));
         self.ring
             .back()

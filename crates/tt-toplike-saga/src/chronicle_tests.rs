@@ -35,6 +35,7 @@ fn ctx(name: Option<RealName>, tone: Tone, tick: u64) -> BeatCtx {
         why: Some(EndWhy::ModelDown),
         tick,
         cause: cause(tick),
+        floor: Some(2),
     }
 }
 
@@ -348,6 +349,7 @@ fn a_beat_becomes_a_saga_event() {
         beat.event(3),
         SagaEvent::Beat {
             world: 3,
+            floor: Some(2),
             tone: Tone::Tense,
             text: beat.text.clone(),
             cause: cause(42),

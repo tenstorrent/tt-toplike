@@ -188,28 +188,38 @@
 //! [`Saga::digest`] is FNV-1a 64 over one byte stream, written by hand so
 //! that it is the same on every platform and compiler (ledger ruling R19).
 //! No `Debug` output is hashed. The stream is a sequence of items, each
-//! starting with a one-byte tag:
+//! starting with a one-byte tag. This is version 2 of the encoding
+//! ([`DIGEST_VERSION`]; the party addendum, section 3.6):
 //!
 //! | Tag | Item | Fields after the tag, in order |
 //! |---|---|---|
+//! | `0x00` | the encoding version, once, first (hashed by [`Saga::new`]) | version (2) |
 //! | `0x01` | `WorldBorn` event | tick, world, biome |
 //! | `0x02` | `WorldEnded` event | tick, world, why |
 //! | `0x03` | `HeroBorn` event | tick, world, name, floor |
-//! | `0x04` | `QuestStarted` event | tick, world, verb, target, reason |
-//! | `0x05` | `QuestDone` event | tick, world, verb |
-//! | `0x06` | `Beat` event | tick, world, tone, text, cause |
+//! | `0x04` | `QuestStarted` event | tick, world, floor, verb, target, reason |
+//! | `0x05` | `QuestDone` event | tick, world, floor, verb |
+//! | `0x06` | `Beat` event | tick, world, floor option, tone, text, cause |
 //! | `0x10` | a world's seed, at its birth (before its `WorldBorn`) | seed |
-//! | `0x20` | one chronicle line, oldest first (only in [`Saga::digest`]) | text |
-//! | `0x30` | the end (only in [`Saga::digest`]) | current world seed, hero floor, hero x, hero y |
+//! | `0x20` | one chronicle line, oldest first (only in [`Saga::digest`]) | floor option, text |
+//! | `0x30` | the end (only in [`Saga::digest`]) | current world seed, member count, then floor, x and y for each member in index order |
+//!
+//! Today the party has one member, the hero, so the end item's count is 1.
+//! Version 1 (0.16.x) had no version item, no floors on quest events, beats
+//! or lines, and the hero's floor, x and y in place of the count and
+//! triples.
 //!
 //! Field encodings:
 //!
 //! * `tick`, `world`, `seed` and ordinals: `u64`, 8 bytes little-endian.
-//! * `floor`, hero x and y: one byte.
+//! * the version, `floor`, the member count, and a member's x and y: one
+//!   byte.
 //! * strings and entity keys: the UTF-8 length as a `u32`, 4 bytes
 //!   little-endian, then the UTF-8 bytes.
 //! * an `Option`: one presence byte (0 absent, 1 present), then the value
-//!   when present.
+//!   when present. A floor option is two bytes when present (1, then the
+//!   floor) and one byte when absent (0). A world's beat (born or ended)
+//!   has no floor; a hero's or a quest's beat has the hero's floor.
 //! * a cause: entity key, signal string, ordinal.
 //! * an `f32` (none yet; phase 2 intensities): `to_bits()`, 4 bytes
 //!   little-endian.
@@ -228,7 +238,7 @@ use std::collections::{BTreeMap, VecDeque};
 use tt_toplike_bus::{EntityKey, Event, Payload, Record};
 
 use crate::chronicle::{
-    BeatCtx, BeatKind, Chronicle, NameMode, NameRole, RealName, Tone, CAPACITY,
+    Beat, BeatCtx, BeatKind, Chronicle, NameMode, NameRole, RealName, Tone, CAPACITY,
 };
 use crate::event::{Biome, EndWhy, SagaEvent};
 use crate::hero::{
@@ -386,8 +396,9 @@ pub struct Saga {
     events: VecDeque<SagaEvent>,
     /// Events dropped from a full buffer before they were drained.
     dropped_events: u64,
-    /// The FNV-1a 64 state after the digest stream so far: world seeds and
-    /// events (see "The digest" in the module comment).
+    /// The FNV-1a 64 state after the digest stream so far: the version
+    /// item, world seeds and events (see "The digest" in the module
+    /// comment).
     trace: u64,
     /// Scratch buffer for the digest's encoding.
     enc: Vec<u8>,
@@ -408,7 +419,8 @@ struct Moment {
 }
 
 impl Saga {
-    /// A saga that has seen nothing.
+    /// A saga that has seen nothing. Its digest stream starts with the
+    /// version item ([`DIGEST_VERSION`]).
     pub fn new(cfg: SagaConfig) -> Saga {
         let chip = EntityKey::chip(NO_CHIP);
         let floor = maze::generate(&FloorSpec::generic(&chip), 0, 0.0);
@@ -438,7 +450,9 @@ impl Saga {
             wrote_first: false,
             events: VecDeque::new(),
             dropped_events: 0,
-            trace: fnv1a64(&[]),
+            // The version item goes in first, so a saga that has seen
+            // nothing already has a version 2 digest.
+            trace: fnv1a64(&[TAG_VERSION, DIGEST_VERSION]),
             enc: Vec::new(),
             obs: Vec::new(),
             world_events: Vec::new(),
@@ -516,15 +530,16 @@ impl Saga {
         let mut buf = Vec::new();
         for beat in self.state.chronicle.lines(CAPACITY) {
             buf.clear();
-            buf.push(TAG_LINE);
-            put_str(&mut buf, &beat.text);
+            encode_line(&mut buf, beat);
             h = fnv1a64_extend(h, &buf);
         }
         buf.clear();
-        buf.push(TAG_END);
-        put_u64(&mut buf, self.state.world.seed);
         let (x, y) = self.state.hero.pos;
-        buf.extend_from_slice(&[self.state.hero.floor, x, y]);
+        encode_end(
+            &mut buf,
+            self.state.world.seed,
+            &[(self.state.hero.floor, x, y)],
+        );
         fnv1a64_extend(h, &buf)
     }
 
@@ -753,14 +768,18 @@ impl Saga {
     fn on_world_ended(&mut self, world: u64, why: EndWhy, moment: &Moment) {
         self.emit(SagaEvent::WorldEnded { world, why });
         let tone = self.tone(moment.collapse, false);
-        let ctx = self.ctx(
-            tone,
-            None,
-            NameRole::Service,
-            None,
-            Some(why),
-            &moment.cause,
-        );
+        // A world's beat: no floor.
+        let ctx = BeatCtx {
+            floor: None,
+            ..self.ctx(
+                tone,
+                None,
+                NameRole::Service,
+                None,
+                Some(why),
+                &moment.cause,
+            )
+        };
         self.beat(BeatKind::WorldEnded, &ctx);
     }
 
@@ -814,14 +833,19 @@ impl Saga {
         };
 
         self.emit(SagaEvent::WorldBorn { world: id, biome });
-        let ctx = self.ctx(tone, model_name, role, None, None, &moment.cause);
+        // A world's beat: no floor.
+        let ctx = BeatCtx {
+            floor: None,
+            ..self.ctx(tone, model_name, role, None, None, &moment.cause)
+        };
         self.beat(BeatKind::WorldBorn, &ctx);
 
         self.emit(SagaEvent::HeroBorn {
             world: id,
             name,
-            floor: 0,
+            floor: self.state.hero.floor,
         });
+        // The hero's beat, on its floor.
         let ctx = self.ctx(tone, None, NameRole::Service, None, None, &moment.cause);
         self.beat(BeatKind::HeroBorn, &ctx);
 
@@ -872,6 +896,7 @@ impl Saga {
         };
         self.emit(SagaEvent::QuestStarted {
             world: self.state.world.id,
+            floor: self.state.hero.floor,
             verb: quest.verb,
             target,
             reason,
@@ -907,6 +932,7 @@ impl Saga {
             }
             self.emit(SagaEvent::QuestDone {
                 world: self.state.world.id,
+                floor: self.state.hero.floor,
                 verb: quest.verb,
             });
             let tone = self.tone(false, true);
@@ -946,7 +972,9 @@ impl Saga {
         }
     }
 
-    /// A beat context in the current world.
+    /// A beat context in the current world, on the hero's floor. A world's
+    /// beat (born or ended) belongs to no floor and sets `floor` to `None`
+    /// itself.
     fn ctx(
         &self,
         tone: Tone,
@@ -967,6 +995,7 @@ impl Saga {
             why,
             tick: self.state.tick,
             cause: cause.clone(),
+            floor: Some(self.state.hero.floor),
         }
     }
 
@@ -1023,6 +1052,14 @@ impl Saga {
 // compile until it has a code.
 // ---------------------------------------------------------------------------
 
+/// The version of the digest's byte encoding, hashed first by every saga.
+/// Version 2 added the version item itself and a floor on every quest event,
+/// beat and chronicle line, and gave the end item one triple per member
+/// (the addendum, section 3.6). Version 1, the encoding of 0.16.x, had no
+/// version item.
+pub const DIGEST_VERSION: u8 = 2;
+/// Stream tag of the version item.
+const TAG_VERSION: u8 = 0x00;
 /// Stream tag of a world seed.
 const TAG_SEED: u8 = 0x10;
 /// Stream tag of a chronicle line.
@@ -1063,11 +1100,13 @@ fn encode_event(out: &mut Vec<u8>, tick: u64, ev: &SagaEvent) {
         }
         SagaEvent::QuestStarted {
             world,
+            floor,
             verb,
             target,
             reason,
         } => {
             put_u64(out, *world);
+            out.push(*floor);
             out.push(verb_code(*verb));
             match target {
                 Some(key) => {
@@ -1078,21 +1117,53 @@ fn encode_event(out: &mut Vec<u8>, tick: u64, ev: &SagaEvent) {
             }
             put_cause(out, reason);
         }
-        SagaEvent::QuestDone { world, verb } => {
+        SagaEvent::QuestDone { world, floor, verb } => {
             put_u64(out, *world);
+            out.push(*floor);
             out.push(verb_code(*verb));
         }
         SagaEvent::Beat {
             world,
             tone,
+            floor,
             text,
             cause,
         } => {
             put_u64(out, *world);
+            put_opt_u8(out, *floor);
             out.push(tone_code(*tone));
             put_str(out, text);
             put_cause(out, cause);
         }
+    }
+}
+
+/// Appends one chronicle line item: its tag, the line's floor option, then
+/// its text.
+fn encode_line(out: &mut Vec<u8>, beat: &Beat) {
+    out.push(TAG_LINE);
+    put_opt_u8(out, beat.floor);
+    put_str(out, &beat.text);
+}
+
+/// Appends the end item: its tag, the current world's seed, the number of
+/// members as one byte, then each member's floor, x and y in index order.
+/// The party has at most [`crate::world::MAX_FLOORS`] (32) members, so the
+/// count fits a byte; a longer list would record 255.
+fn encode_end(out: &mut Vec<u8>, seed: u64, members: &[(u8, u8, u8)]) {
+    out.push(TAG_END);
+    put_u64(out, seed);
+    out.push(u8::try_from(members.len()).unwrap_or(u8::MAX));
+    for &(floor, x, y) in members {
+        out.extend_from_slice(&[floor, x, y]);
+    }
+}
+
+/// One presence byte (0 absent, 1 present), then the byte when present.
+fn put_opt_u8(out: &mut Vec<u8>, v: Option<u8>) {
+    match v {
+        Some(b) => out.extend_from_slice(&[1, b]),
+        None => out.push(0),
     }
 }
 
