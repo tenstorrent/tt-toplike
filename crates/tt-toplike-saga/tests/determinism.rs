@@ -3,9 +3,11 @@
 //!
 //! The three fixtures in `tests/fixtures/`:
 //!
-//! * `quiet.jsonl`: a five-second recording of `tt-toplike-tui --headless
-//!   --mock` made without `--mock-workloads` (ledger ruling R6), so it holds
-//!   three mock chips and their DRAM channels and no process or host names.
+//! * `quiet.jsonl`: a six-second recording (60 ticks) of `tt-toplike-tui
+//!   --headless --mock` made without `--mock-workloads` (ledger ruling R6), so
+//!   it holds three mock chips and their DRAM channels and no process or host
+//!   names. It was recorded after the mock's ARC heartbeat began counting up
+//!   on every update (ruling R18), so its chips look alive to the saga.
 //! * `bringup.jsonl`: a copy of the bus crate's fixture: a model loading, a
 //!   reset and request completions, as plain samples. It has no sweeps, so it
 //!   has no ticks and no world is ever born from it; its digest pins that a
@@ -114,7 +116,7 @@ fn renumbered_and_retimed_records_give_the_same_digest() {
 #[test]
 fn a_snapshot_of_the_digests_matches() {
     let golden: [(&str, u64, u64); 3] = [
-        ("quiet.jsonl", 0x6c67306276c306f4, 0x6c67306276c306f4),
+        ("quiet.jsonl", 0x631b150c250d83cf, 0x631b150c250d83cf),
         ("bringup.jsonl", 0xffa0c7d46fb3aae2, 0xffa0c7d46fb3aae2),
         ("busy.jsonl", 0xdadaf6bc34cc12cc, 0xc6b86da5892118a4),
     ];

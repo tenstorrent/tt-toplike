@@ -14,7 +14,8 @@
 //! - Variable power consumption (with random fluctuations)
 //! - Temperature changes correlated with power
 //! - DDR training status progression
-//! - ARC firmware heartbeats
+//! - ARC firmware heartbeats (a counter per device that advances on every
+//!   update)
 //! - Multiple device architectures
 
 use crate::backend::{BackendConfig, TelemetryBackend};
@@ -85,6 +86,17 @@ pub struct MockBackend {
 
     /// Base temperature values for each device
     base_temp: HashMap<usize, f32>,
+
+    /// The ARC heartbeat of each device, by index. It counts up by one on
+    /// every update (see [`next_heartbeat`]), as a real chip's does: a
+    /// constant value looks stalled to anything that watches it advance.
+    heartbeats: Vec<u32>,
+}
+
+/// The heartbeat after `h`: one more, and back to 1 after `u32::MAX`. It
+/// never becomes 0, the value every reader takes as a stalled ARC.
+fn next_heartbeat(h: u32) -> u32 {
+    h.checked_add(1).unwrap_or(1)
 }
 
 impl MockBackend {
@@ -110,6 +122,7 @@ impl MockBackend {
             update_count: 0,
             base_power: HashMap::new(),
             base_temp: HashMap::new(),
+            heartbeats: Vec::new(),
         }
     }
 
@@ -125,6 +138,7 @@ impl MockBackend {
             update_count: 0,
             base_power: HashMap::new(),
             base_temp: HashMap::new(),
+            heartbeats: Vec::new(),
         }
     }
 
@@ -157,6 +171,7 @@ impl MockBackend {
             update_count: 0,
             base_power: HashMap::new(),
             base_temp: HashMap::new(),
+            heartbeats: Vec::new(),
         }
     }
 
@@ -229,6 +244,8 @@ impl MockBackend {
             self.base_power.insert(idx, base_power);
             self.base_temp.insert(idx, base_temp);
         }
+        // Each device's heartbeat starts at 1 and counts up per update.
+        self.heartbeats = vec![1; self.device_count];
     }
 
     /// Generate realistic telemetry for a device
@@ -276,7 +293,8 @@ impl MockBackend {
             power: Some(power),
             asic_temperature: Some(temperature),
             aiclk: Some(aiclk),
-            heartbeat: Some(1), // Always healthy in mock
+            // Counts up per update, never 0: a healthy, advancing ARC.
+            heartbeat: Some(self.heartbeats.get(device_idx).copied().unwrap_or(1)),
             timestamp: Utc::now(),
             board_power,
         }
@@ -498,6 +516,9 @@ impl TelemetryBackend for MockBackend {
 
     fn update(&mut self) -> BackendResult<()> {
         self.update_count += 1;
+        for h in &mut self.heartbeats {
+            *h = next_heartbeat(*h);
+        }
 
         // Update telemetry for all devices
         for idx in 0..self.device_count {
@@ -611,6 +632,43 @@ mod tests {
 
         // Device 2: Blackhole (12 channels)
         assert_eq!(backend.devices()[2].memory_channels(), 12);
+    }
+
+    /// The ARC heartbeat counts up on every update, separately per device,
+    /// as a real chip's does (ledger ruling R18). A constant heartbeat looks
+    /// stalled to anything that watches it advance (the saga core marks a
+    /// chip stalled when its `toplike.heartbeat` has not changed for 20
+    /// ticks). It is never 0, the value every reader takes as stalled.
+    #[test]
+    fn the_heartbeat_counts_up_on_every_update() {
+        let mut backend = MockBackend::new(3);
+        backend.init().unwrap();
+        let beats = |b: &MockBackend| -> Vec<u32> {
+            (0..3)
+                .map(|i| b.telemetry(i).unwrap().heartbeat.unwrap())
+                .collect()
+        };
+        let mut last = beats(&backend);
+        assert!(last.iter().all(|&h| h > 0), "{last:?}");
+        for _ in 0..50 {
+            backend.update().unwrap();
+            let now = beats(&backend);
+            for (i, (a, b)) in last.iter().zip(&now).enumerate() {
+                assert_eq!(*b, a + 1, "device {i} did not count up by one");
+            }
+            last = now;
+        }
+        for i in 0..3 {
+            assert!(backend.telemetry(i).unwrap().arc_healthy());
+        }
+    }
+
+    /// At the top of its range the counter wraps to 1, skipping 0.
+    #[test]
+    fn the_heartbeat_wraps_past_zero() {
+        assert_eq!(next_heartbeat(1), 2);
+        assert_eq!(next_heartbeat(u32::MAX - 1), u32::MAX);
+        assert_eq!(next_heartbeat(u32::MAX), 1);
     }
 
     #[test]
