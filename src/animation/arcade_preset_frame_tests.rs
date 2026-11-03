@@ -18,7 +18,6 @@ fn tc<R>(f: impl FnOnce() -> R) -> R {
 
 fn config_of(l: &NamedLayout) -> ArcadeConfig {
     ArcadeConfig {
-        cloudfield: false,
         rows: l.rows.clone(),
     }
 }
@@ -31,10 +30,9 @@ fn arcade_of(l: &NamedLayout, w: usize, h: usize, b: &Fixed) -> ArcadeVisualizat
     a
 }
 
-/// A few updates with a serving model, a training run and the cloudfield
-/// on, so every panel has something to draw.
+/// A few updates with a serving model and a training run, so every panel
+/// has something to draw.
 fn busy(a: &mut ArcadeVisualization, b: &Fixed) {
-    a.set_cloudfield(true);
     let run = crate::workload::train::MockTrainRun::new();
     for i in 0..4 {
         a.set_services(mock_services(100.0 + i as f32));
@@ -74,7 +72,6 @@ fn every_layout() -> Vec<NamedLayout> {
         name: "mine".into(),
         description: String::new(),
         rows: crate::animation::arcade_layout::example_rows(),
-        backdrop: None,
     };
     LayoutCycle::new(&[mine], None).layouts().to_vec()
 }
@@ -168,8 +165,6 @@ fn each_preset_draws_every_panel_it_names() {
             // footer row for this frame.
             a.hero_trail.clear();
             (a.hero_x, a.hero_y) = (199.0, 59.0);
-            // The cloudfield fills blank cells, the spaces of a label too.
-            a.set_cloudfield(false);
             let lines = a.render(&b);
             for (i, row) in l.rows.iter().enumerate() {
                 let laid = &a.layout().rows[i];
@@ -268,9 +263,6 @@ fn a_switch_keeps_the_hero_the_backdrop_and_the_bus_state() {
         let frame = a.frame;
         let trail = a.hero_trail.len();
         assert!(trail > 0);
-        // A kind other than the old cloudfield, so the whole backdrop is
-        // seen to move over.
-        a.set_backdrop(Some(crate::animation::backdrop::BackdropKind::Clouds));
 
         let a = a.relayout(120, 40, &config_of(deck), &b);
         assert_eq!(a.layout(), &arcade_layout::layout(&deck.rows, 120, 40));
@@ -279,11 +271,6 @@ fn a_switch_keeps_the_hero_the_backdrop_and_the_bus_state() {
         assert_eq!((a.hero_x, a.hero_y), (30.0, 20.0));
         assert_eq!((a.hero_target_x, a.hero_target_y), (33.0, 21.0));
         assert_eq!(a.hero_trail.len(), trail);
-        assert_eq!(
-            a.backdrop().kind(),
-            Some(crate::animation::backdrop::BackdropKind::Clouds),
-            "the backdrop is kept"
-        );
         assert_eq!(a.sensitivity, 2.5);
         assert_eq!(a.bus_now, 77);
         assert_eq!(a.power_peak, 123.0);

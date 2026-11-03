@@ -171,17 +171,12 @@ pub struct RowSpec {
 /// The arcade's settings from the config file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArcadeConfig {
-    /// Whether the atmosphere backdrop (`animation::atmosphere`) is drawn
-    /// behind the whole arcade. Off by default: the arcade has never drawn
-    /// one, and the default must draw what it always drew.
-    pub cloudfield: bool,
     pub rows: Vec<RowSpec>,
 }
 
 impl Default for ArcadeConfig {
     fn default() -> Self {
         ArcadeConfig {
-            cloudfield: false,
             rows: default_rows(),
         }
     }
@@ -515,57 +510,36 @@ fn fit_row(row: &RowSpec, width: usize, height: usize) -> Fitted {
 
 // ---- Commands ----------------------------------------------------------------
 
-/// The command bar's `/arcade` command: `/arcade cloudfield on|off` (or
-/// `toggle`, or no value to flip it). Sets `cloudfield` and returns the
-/// message for the status line and whether it is an error.
-pub fn command(arg: &str, cloudfield: &mut bool) -> (String, bool) {
-    let mut words = arg.split_whitespace();
-    match (words.next(), words.next(), words.next()) {
-        (Some("cloudfield"), value, None) => {
-            let v = match value {
-                None | Some("toggle") => !*cloudfield,
-                Some("on") | Some("true") => true,
-                Some("off") | Some("false") => false,
-                Some(other) => {
-                    return (
-                        format!("/arcade cloudfield: expected on or off, got {other:?}"),
-                        true,
-                    )
-                }
-            };
-            *cloudfield = v;
-            (cloudfield_message(v), false)
-        }
+/// The command bar's `/arcade` command other than `layout`: `/arcade
+/// cloudfield ...` is still understood, and only says that the arcade
+/// carries no backdrop; it changes nothing. Returns the message for the
+/// status line and whether it is an error (anything else is the usage).
+pub fn command(arg: &str) -> (String, bool) {
+    match arg.split_whitespace().next() {
+        Some("cloudfield") => (NO_BACKDROP_NOTE.to_string(), false),
         _ => (USAGE.to_string(), true),
     }
 }
 
-/// The usage line for `/arcade`.
-pub const USAGE: &str =
-    "/arcade cloudfield on|off   the old name for /backdrop scene|off in the arcade";
+/// The note for every old arcade backdrop setting: `/arcade cloudfield`,
+/// `[arcade] cloudfield` and a layout's `backdrop` or `cloudfield`.
+pub const NO_BACKDROP_NOTE: &str = "the arcade carries no backdrop";
 
-/// The status-line message for a cloudfield change.
-pub fn cloudfield_message(on: bool) -> String {
-    format!("arcade cloudfield: {}", if on { "on" } else { "off" })
-}
-
-/// The key that flips the cloudfield (the scene backdrop) while the arcade
-/// is on screen. `w` cycles every backdrop in every view.
-pub const CLOUDFIELD_KEY: char = 'c';
+/// The usage line for `/arcade` without a layout verb.
+pub const USAGE: &str = "/arcade layout next|prev|<name>|list";
 
 // ---- Legend and explain text --------------------------------------------------
 
 /// The text after the `▦ Layout` heading of the arcade legend: the layout
-/// keys, the backdrop key, the mark for a panel taken out, and where your
-/// own layouts go. The backdrop has its own line at the end of the legend.
-pub const LEGEND_HEAD: &str = "{ } layouts  c backdrop  ◌ NAME too small  [arcade] in config.toml";
+/// keys, the mark for a panel taken out, and where your own layouts go.
+pub const LEGEND_HEAD: &str = "{ } layouts  ◌ NAME too small  [arcade] in config.toml";
 
 /// The arcade legend's lines on the layout, under [`LEGEND_HEAD`]: none,
-/// so the legend fits 30 rows at 80 columns with the backdrop line.
+/// so the legend fits 30 rows at 80 columns.
 pub const LEGEND_TEXT: &[&str] = &[];
 
 /// The arcade explain text's line on the layout. The detail is in the docs.
-pub const EXPLAIN_TEXT: &[&str] = &["", "Keys: { } layouts, c backdrop on/off, w backdrop kind."];
+pub const EXPLAIN_TEXT: &[&str] = &["", "Keys: { } step through the layouts."];
 
 /// The legend lines for [`LEGEND_TEXT`], with the overlay's left bar.
 pub fn legend_lines(

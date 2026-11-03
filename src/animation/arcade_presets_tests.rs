@@ -7,19 +7,12 @@
 
 use super::*;
 use crate::animation::arcade_layout::{default_rows, layout, PanelSpec, RowSpec, View};
-use crate::animation::backdrop::{BackdropKind, BackdropSettings};
-
-/// The arcade's backdrop in `s`.
-fn arcade(s: &BackdropSettings) -> crate::animation::backdrop::Choice {
-    s.choice("arcade")
-}
 
 fn named(name: &str, rows: Vec<RowSpec>) -> NamedLayout {
     NamedLayout {
         name: name.into(),
         description: format!("{name} for a test"),
         rows,
-        backdrop: None,
     }
 }
 
@@ -169,18 +162,16 @@ fn the_status_line_names_the_layout_its_place_and_its_description() {
     c.next();
     let d = &preset("defrag-wide").unwrap().description;
     assert_eq!(c.status(), format!("layout: defrag-wide (3/8) — {d}"));
-    // A layout that sets a backdrop names it before the description.
     c.prev();
     assert_eq!(
         c.status(),
-        "layout: now-serving (2/8), clouds — inference over Wafer Waffler and defrag"
+        "layout: now-serving (2/8) — inference over Wafer Waffler and defrag"
     );
     let mut c = LayoutCycle::new(
         &[NamedLayout {
             name: "bare".into(),
             description: String::new(),
             rows: flow_only(),
-            backdrop: None,
         }],
         None,
     );
@@ -191,60 +182,55 @@ fn the_status_line_names_the_layout_its_place_and_its_description() {
 
 #[test]
 fn the_layout_command_steps_selects_and_lists() {
-    let mut cf = BackdropSettings::default();
     let mut c = LayoutCycle::new(&[], None);
-    let r = command("layout next", &mut cf, &mut c);
+    let r = command("layout next", &mut c);
     assert_eq!(c.current().name, "now-serving");
     assert!(!r.error && r.relayout);
     assert_eq!(r.message, c.status());
-    let r = command("layout prev", &mut cf, &mut c);
+    let r = command("layout prev", &mut c);
     assert_eq!(c.current().name, "classic");
     assert!(r.relayout);
-    let r = command("layout memory-lane", &mut cf, &mut c);
+    let r = command("layout memory-lane", &mut c);
     assert_eq!(c.current().name, "memory-lane");
     assert!(r.relayout && !r.error);
-    let r = command("layout list", &mut cf, &mut c);
+    let r = command("layout list", &mut c);
     assert!(!r.relayout && !r.error);
     assert_eq!(
         r.message,
         "layouts, now memory-lane (8/8):\n  classic, now-serving, defrag-wide, waffler, workload, deck, skyline,\n  memory-lane"
     );
-    assert_eq!(command("layout", &mut cf, &mut c).message, r.message);
-    let r = command("layout castel", &mut cf, &mut c);
+    assert_eq!(command("layout", &mut c).message, r.message);
+    let r = command("layout castel", &mut c);
     assert!(r.error && !r.relayout);
     assert_eq!(
         r.message,
         "no arcade layout `castel`\n/arcade layout list names them"
     );
     // A typed control character is shown escaped.
-    let r = command("layout a\u{1b}[2J", &mut cf, &mut c);
+    let r = command("layout a\u{1b}[2J", &mut c);
     assert!(r.error && !r.message.contains('\u{1b}'), "{:?}", r.message);
     assert_eq!(
         c.current().name,
         "memory-lane",
         "a bad name changes nothing"
     );
-    assert!(command("layout next please", &mut cf, &mut c).error);
+    assert!(command("layout next please", &mut c).error);
 }
 
+/// `/arcade cloudfield` is still understood and says the arcade carries no
+/// backdrop; it changes nothing.
 #[test]
-fn the_command_still_sets_the_cloudfield() {
-    let mut cf = BackdropSettings::default();
+fn the_old_cloudfield_command_only_says_there_is_no_backdrop() {
     let mut c = LayoutCycle::new(&[], None);
-    let r = command("cloudfield on", &mut cf, &mut c);
-    assert_eq!(arcade(&cf), Some(BackdropKind::Scene), "on is the scene");
-    assert!(!r.error && !r.relayout);
-    assert_eq!(c.index(), 0);
-    command("cloudfield off", &mut cf, &mut c);
-    assert_eq!(arcade(&cf), None);
-    let r = command("sparkle", &mut cf, &mut c);
+    for arg in ["cloudfield on", "cloudfield off", "cloudfield maybe"] {
+        let r = command(arg, &mut c);
+        assert_eq!(r.message, "the arcade carries no backdrop", "{arg}");
+        assert!(!r.error && !r.relayout, "{arg}");
+        assert_eq!(c.index(), 0);
+    }
+    let r = command("sparkle", &mut c);
     assert!(r.error);
-    assert!(r.message.contains("/arcade layout"), "{}", r.message);
-    // A bad command leaves a sky or clouds backdrop alone.
-    cf.set("arcade", Some(BackdropKind::Clouds)).unwrap();
-    assert!(command("sparkle", &mut cf, &mut c).error);
-    assert!(command("cloudfield maybe", &mut cf, &mut c).error);
-    assert_eq!(arcade(&cf), Some(BackdropKind::Clouds));
+    assert_eq!(r.message, USAGE);
 }
 
 #[test]
@@ -392,11 +378,7 @@ fn the_docs_sketch_every_preset_with_no_right_border() {
 }
 
 #[test]
-fn only_now_serving_sets_a_backdrop_and_it_has_no_starfield() {
-    for l in presets() {
-        let want = (l.name == "now-serving").then_some(Some(BackdropKind::Clouds));
-        assert_eq!(l.backdrop, want, "{}", l.name);
-    }
+fn now_serving_has_no_starfield() {
     let ns = preset("now-serving").unwrap();
     let views: Vec<View> = ns
         .rows
@@ -404,71 +386,6 @@ fn only_now_serving_sets_a_backdrop_and_it_has_no_starfield() {
         .flat_map(|r| r.panels.iter().map(|p| p.view))
         .collect();
     assert_eq!(views, vec![View::Inference, View::Die3d, View::Defrag]);
-}
-
-/// A layout with a backdrop applies it when selected; a layout without
-/// one leaves the session's setting alone, so `c`, `w` and `/backdrop`
-/// still hold.
-#[test]
-fn a_layouts_backdrop_applies_on_selection_and_none_leaves_it() {
-    let clouds = Some(BackdropKind::Clouds);
-    let mut cf = BackdropSettings::default();
-    let mut c = LayoutCycle::new(&[], None);
-    // Back from classic is memory-lane, then the others down to
-    // defrag-wide: none of them set it.
-    for _ in 0..6 {
-        step_and_apply(&mut c, Step::Prev, &mut cf);
-        assert_eq!(arcade(&cf), None, "{}", c.current().name);
-    }
-    assert_eq!(c.current().name, "defrag-wide");
-    step_and_apply(&mut c, Step::Prev, &mut cf);
-    assert_eq!(c.current().name, "now-serving");
-    assert_eq!(arcade(&cf), clouds, "now-serving sets the clouds");
-    // The user picks the sky (`w`); a switch to a layout with no backdrop
-    // keeps that.
-    cf.set("arcade", Some(BackdropKind::Sky)).unwrap();
-    step_and_apply(&mut c, Step::Prev, &mut cf);
-    assert_eq!(c.current().name, "classic");
-    assert_eq!(arcade(&cf), Some(BackdropKind::Sky));
-    // Back to now-serving applies its backdrop again, by key and by command.
-    step_and_apply(&mut c, Step::Next, &mut cf);
-    assert_eq!(arcade(&cf), clouds);
-    cf.set("arcade", None).unwrap();
-    command("layout classic", &mut cf, &mut c);
-    assert_eq!(arcade(&cf), None);
-    let r = command("layout now-serving", &mut cf, &mut c);
-    assert!(r.relayout);
-    assert_eq!(arcade(&cf), clouds);
-    cf.set("arcade", None).unwrap();
-    command("layout next", &mut cf, &mut c);
-    command("layout prev", &mut cf, &mut c);
-    assert_eq!(arcade(&cf), clouds, "prev to now-serving");
-    // A layout that turns it off.
-    let off = NamedLayout {
-        backdrop: Some(None),
-        ..named("dark", flow_only())
-    };
-    apply_backdrop(&off, &mut cf);
-    assert_eq!(arcade(&cf), None);
-}
-
-/// `c` turns the arcade's backdrop off when one is drawn, and back on as
-/// the layout's own kind, or the scene when the layout has none.
-#[test]
-fn the_c_key_turns_the_layouts_backdrop_on_and_off() {
-    let ns = preset("now-serving").unwrap();
-    let classic = preset("classic").unwrap();
-    assert_eq!(toggled_backdrop(ns, None), Some(BackdropKind::Clouds));
-    assert_eq!(toggled_backdrop(classic, None), Some(BackdropKind::Scene));
-    for k in BackdropKind::ALL {
-        assert_eq!(toggled_backdrop(ns, Some(k)), None);
-        assert_eq!(toggled_backdrop(classic, Some(k)), None);
-    }
-    let off = NamedLayout {
-        backdrop: Some(None),
-        ..named("dark", flow_only())
-    };
-    assert_eq!(toggled_backdrop(&off, None), Some(BackdropKind::Scene));
 }
 
 /// Every built-in layout's status line fits an 80-column status bar
@@ -491,21 +408,15 @@ fn every_status_line_fits_80_columns() {
         name: "n".repeat(MAX_NAME),
         description: "d".repeat(MAX_DESCRIPTION),
         rows: flow_only(),
-        backdrop: Some(Some(BackdropKind::Clouds)),
     };
     let c = LayoutCycle::new(&[long], None);
     let s = c.status();
     assert_eq!(s.chars().count(), STATUS_MAX, "{s}");
-    assert!(s.ends_with('…') && s.contains(", clouds — "), "{s}");
+    assert!(s.ends_with('…') && s.contains(") — "), "{s}");
     // The list, the usage and the reply to an unknown name (at its longest
     // shown name, re-review M4) are lines of at most 78 characters.
     let mut c = LayoutCycle::new(&[], None);
-    let mut settings = crate::animation::backdrop::BackdropSettings::default();
-    let unknown = command(
-        &format!("layout {}", "x".repeat(100)),
-        &mut settings,
-        &mut c,
-    );
+    let unknown = command(&format!("layout {}", "x".repeat(100)), &mut c);
     assert!(unknown.error && unknown.message.contains("/arcade layout list"));
     for text in [c.wrapped_names(), USAGE.to_string(), unknown.message] {
         for line in text.lines() {

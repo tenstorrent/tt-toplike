@@ -96,17 +96,7 @@ pub struct ArcadeVisualization {
     layout: Layout,
     /// The config the layout came from.
     config: ArcadeConfig,
-    /// The shared backdrop behind the whole arcade (`animation::backdrop`):
-    /// off by default, the scene with `arcade.cloudfield = true` or
-    /// `[backdrop.views] arcade`.
-    backdrop: crate::animation::backdrop::Backdrop,
-    /// The chip and training signals the backdrop follows, read from the
-    /// world in `set_bus`; `None` until then (the backend's are used).
-    backdrop_signals: Option<crate::animation::backdrop::BackdropSignals>,
-    /// Each chip's load scale for the backdrop's clouds (the Waffler's rule).
-    load_scales: crate::animation::backdrop::LoadScales,
-    /// The inference service rows of this tick, for the inference panel and
-    /// the backdrop.
+    /// The inference service rows of this tick, for the inference panel.
     services: Vec<crate::workload::inference_server::ServiceState>,
     /// The training run of this tick, for the Training panel.
     train_state: Option<crate::workload::train::TrainState>,
@@ -237,13 +227,6 @@ impl ArcadeVisualization {
             snake,
             layout,
             config: config.clone(),
-            backdrop: crate::animation::backdrop::Backdrop::new(
-                config
-                    .cloudfield
-                    .then_some(crate::animation::backdrop::BackdropKind::Scene),
-            ),
-            backdrop_signals: None,
-            load_scales: Default::default(),
             services: Vec::new(),
             train_state: None,
             idle_train: crate::workload::train::TrainState::default(),
@@ -286,7 +269,7 @@ impl ArcadeVisualization {
     /// up a new arcade (devices, sensitivity, topology). Everything that
     /// does not depend on the layout is kept: the hero's place, target and
     /// trail (scaled to the new size), its expression flags and speed, the
-    /// backdrop (kind, clock and signals), the frame count and the clock, the power baseline
+    /// frame count and the clock, the power baseline
     /// and peak, the duel, the activity lanes and their pulse counts, the
     /// service rows and training run of the last tick, and the bus state.
     /// Keeping the bus state means events already seen before the switch
@@ -337,11 +320,6 @@ impl ArcadeVisualization {
         next.hero_undervolt = self.hero_undervolt;
         next.hero_harvested = self.hero_harvested;
         next.hero_gddr_temp = self.hero_gddr_temp;
-        // The backdrop moves over whole: its kind, its clock and the
-        // signals it last read, so a switch does not restart it.
-        next.backdrop = self.backdrop;
-        next.backdrop_signals = self.backdrop_signals;
-        next.load_scales = self.load_scales;
         next.frame = self.frame;
         next.clock_s = self.clock_s;
         next.baseline = self.baseline;
@@ -380,29 +358,9 @@ impl ArcadeVisualization {
         &self.config
     }
 
-    /// Whether the cloudfield is on: the old name for the scene backdrop.
-    pub fn cloudfield(&self) -> bool {
-        self.backdrop.kind() == Some(crate::animation::backdrop::BackdropKind::Scene)
-    }
-
-    /// The old cloudfield switch: on is the scene backdrop, off is none.
-    pub fn set_cloudfield(&mut self, on: bool) {
-        self.set_backdrop(on.then_some(crate::animation::backdrop::BackdropKind::Scene));
-    }
-
-    /// The arcade's backdrop, from the next frame.
-    pub fn set_backdrop(&mut self, kind: crate::animation::backdrop::Choice) {
-        self.backdrop.set_kind(kind);
-    }
-
-    /// The arcade's backdrop.
-    pub fn backdrop(&self) -> &crate::animation::backdrop::Backdrop {
-        &self.backdrop
-    }
-
     /// Hand the arcade this tick's inference service rows (the rows the `i`
     /// view draws, from `inference_bus::attached_rows` when attached). They
-    /// feed the inference panel and the backdrop.
+    /// feed the inference panel.
     pub fn set_services(&mut self, rows: Vec<crate::workload::inference_server::ServiceState>) {
         self.services = rows;
     }
@@ -459,18 +417,8 @@ impl ArcadeVisualization {
                 if let Some(t) = self.train.as_mut() {
                     t.set_bus(Some(w), backend);
                 }
-                // The backdrop's chip and training signals. The services
-                // are added in `update`.
-                self.backdrop_signals = Some(crate::animation::backdrop::BackdropSignals::gather(
-                    Some(w),
-                    backend,
-                    Vec::new(),
-                    secs,
-                    false,
-                ));
             }
             None => {
-                self.backdrop_signals = None;
                 self.bus_fx = ArcadeFx::default();
                 self.bus_state = ArcadeBusState::default();
                 self.die3d_bus_now = None;
@@ -1066,11 +1014,6 @@ impl ArcadeVisualization {
             self.compose_row(row, backend, &mut lines);
         }
 
-        // The backdrop behind every blank cell. Off, or with nothing to
-        // draw, this changes nothing.
-        let n = lines.len();
-        let mut lines = self.backdrop.layer(lines, self.width, n);
-
         // The bus effects (see `arcade_bus`), under the hero and the lanes.
         // With no bus this does nothing.
         self.draw_bus(&mut lines);
@@ -1115,24 +1058,6 @@ impl ArcadeVisualization {
         if let Some(t) = self.train.as_mut() {
             t.update();
         }
-        // The backdrop: the services of this tick, and the chip signals
-        // `set_bus` read (or the backend's, without a world).
-        let mut signals = self.backdrop_signals.take().unwrap_or_else(|| {
-            crate::animation::backdrop::BackdropSignals::gather(
-                None,
-                backend,
-                Vec::new(),
-                secs,
-                false,
-            )
-        });
-        signals.now_s = secs;
-        signals.services = std::mem::take(&mut self.services);
-        // The rows arrive after `gather`, so their `~` is added here.
-        signals.estimated |= crate::animation::backdrop::services_are_estimated(&signals.services);
-        self.load_scales.apply(&mut signals);
-        self.backdrop.observe(&signals);
-        self.services = std::mem::take(&mut signals.services);
         if let (Some(snake), Some(p)) = (self.snake.as_mut(), self.layout.find(View::Inference)) {
             let chips: Vec<crate::animation::ChipReading> = backend
                 .devices()

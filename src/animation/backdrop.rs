@@ -39,10 +39,13 @@
 //! not). The Inference view's own scene is a separate `Atmosphere` on its
 //! own per-update clock, unchanged.
 //!
-//! Which view uses which kind is a setting ([`BackdropConfig`],
-//! [`BackdropSettings`]): by default the Inference view draws the scene, the
-//! Training view the sky and Die 3D the clouds, each with its own painter as
-//! before, and every other view draws none.
+//! Only the three views that carry a background of their own take a
+//! backdrop: the Inference view, the Training view and the Wafer Waffler
+//! ([`accepts`] is the single table that says so). Each of them draws its own
+//! kind by default with its own painter, as before, and can be set to
+//! another kind or off ([`BackdropConfig`], [`BackdropSettings`]). Every
+//! other view carries none: the `w` key and `/backdrop` there say so and
+//! change nothing, and a config entry for one is ignored with a note.
 
 use super::atmosphere::{self, Atmosphere, Canvas};
 use super::die3d::clouds::{CloudClock, Clouds, CLOCK_STEPS_PER_SEC};
@@ -164,16 +167,44 @@ pub fn builtin(view: &str) -> Choice {
     }
 }
 
-/// Why `view` refuses `kind`, or `None` when it takes it. The Starfield
-/// refuses the scene and the sky: every star in it is a Tensix core, and
-/// both of those draw stars that would look like cores.
-pub fn refusal(view: &str, kind: BackdropKind) -> Option<&'static str> {
-    match (view, kind) {
-        ("starfield", BackdropKind::Scene | BackdropKind::Sky) => {
-            Some("its stars are Tensix cores, and this backdrop draws stars too")
-        }
-        _ => None,
+/// The kinds `view` takes. This is the only place that says which view takes
+/// which backdrop: the three views with a background of their own take
+/// every kind, and every other view takes none. Adding a view is one arm.
+pub fn accepts(view: &str) -> &'static [BackdropKind] {
+    match view {
+        "inference" | "training" | "die3d" => &BackdropKind::ALL,
+        _ => &[],
     }
+}
+
+/// Whether `view` takes any backdrop ([`accepts`]).
+pub fn takes_backdrop(view: &str) -> bool {
+    !accepts(view).is_empty()
+}
+
+/// The message for a view that takes no backdrop.
+pub const NO_BACKDROP: &str = "no backdrop on this view";
+
+/// The views that take a backdrop, for a message: `only inference, training
+/// and Wafer Waffler take a backdrop`, from [`accepts`].
+pub fn takers() -> String {
+    let names: Vec<&str> = VIEWS
+        .iter()
+        .copied()
+        .filter(|v| takes_backdrop(v))
+        .map(view_label)
+        .collect();
+    let list = match names.split_last() {
+        None => return "no view takes a backdrop".into(),
+        Some((last, [])) => last.to_string(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    };
+    format!("only {list} take a backdrop")
+}
+
+/// Why `view` refuses `kind`, or `None` when it takes it ([`accepts`]).
+pub fn refusal(view: &str, kind: BackdropKind) -> Option<&'static str> {
+    (!accepts(view).contains(&kind)).then_some(NO_BACKDROP)
 }
 
 /// The choice after `current` for `view`, in the order off, scene, sky,
@@ -194,6 +225,18 @@ pub fn next_choice(view: &str, current: Choice) -> Choice {
 
 /// The key that cycles the backdrop of the view on screen.
 pub const KEY: char = 'w';
+
+/// The [`KEY`] for `view`: the next backdrop ([`next_choice`]) set in
+/// `settings`, and the status-line message. A view that takes no backdrop
+/// keeps its setting and gets [`NO_BACKDROP`].
+pub fn key_message(view: &str, settings: &mut BackdropSettings) -> String {
+    if !takes_backdrop(view) {
+        return NO_BACKDROP.to_string();
+    }
+    let next = next_choice(view, settings.choice(view));
+    let _ = settings.set(view, next);
+    format!("backdrop ({}): {}", view_label(view), choice_name(next))
+}
 
 /// The legend's line for a view's backdrop. `estimated` puts the `~` marker
 /// in front of the signals, as Die 3D marks an estimated value.
@@ -223,11 +266,20 @@ pub struct BackdropConfig {
 }
 
 impl BackdropConfig {
-    /// The backdrop `view` starts with: its `[backdrop.views]` entry, else
-    /// its own backdrop ([`builtin`]), else `default` when the view takes
-    /// it, else off.
+    /// The backdrop `view` starts with: off for a view that takes none
+    /// ([`accepts`]), else its `[backdrop.views]` entry when the view takes
+    /// it, else its own backdrop ([`builtin`]), else `default` when the view
+    /// takes it, else off. `crate::config` notes the entries it ignores.
     pub fn choice(&self, view: &str) -> Choice {
-        if let Some((_, c)) = self.views.iter().rev().find(|(v, _)| *v == view) {
+        if !takes_backdrop(view) {
+            return None;
+        }
+        let entry = self
+            .views
+            .iter()
+            .rev()
+            .find(|(v, c)| *v == view && c.is_none_or(|k| refusal(view, k).is_none()));
+        if let Some((_, c)) = entry {
             return *c;
         }
         builtin(view).or(self.default_for(view))
@@ -267,12 +319,15 @@ impl BackdropSettings {
         }
     }
 
-    /// Set `view`'s backdrop. Refused, with the reason, when the view
-    /// refuses the kind or is not a view.
+    /// Set `view`'s backdrop. Refused, with the reason, when the view takes
+    /// no backdrop, refuses the kind or is not a view.
     pub fn set(&mut self, view: &str, c: Choice) -> Result<(), String> {
         let Some(v) = canonical_view(view) else {
             return Err(format!("backdrop: no view named {view:?}"));
         };
+        if !takes_backdrop(v) {
+            return Err(NO_BACKDROP.to_string());
+        }
         if let Some(why) = c.and_then(|k| refusal(v, k)) {
             return Err(format!("backdrop: {v} refuses {}: {why}", choice_name(c)));
         }
@@ -289,8 +344,12 @@ impl BackdropSettings {
 
 /// Run the `/backdrop` command for `view`: no argument shows the setting,
 /// `off`, `scene`, `sky` or `clouds` sets it. Returns the status-line
-/// message and whether it is an error.
+/// message and whether it is an error. On a view that takes no backdrop
+/// every form says so and changes nothing.
 pub fn command(arg: &str, view: &str, settings: &mut BackdropSettings) -> (String, bool) {
+    if !takes_backdrop(view) {
+        return (NO_BACKDROP.to_string(), false);
+    }
     let arg = arg.trim();
     if arg.is_empty() {
         let c = settings.choice(view);
@@ -739,12 +798,6 @@ impl Backdrop {
     #[cfg(test)]
     pub(crate) fn cloud_intensity(&self) -> f32 {
         self.cloud_clock.intensity()
-    }
-
-    /// Forget the cached canvas, so the cost measurement draws it afresh.
-    #[cfg(test)]
-    pub(crate) fn clear_cache(&self) {
-        *self.cache.borrow_mut() = None;
     }
 
     /// The legend line for this backdrop.

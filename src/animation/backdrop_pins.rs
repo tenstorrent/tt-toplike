@@ -12,8 +12,8 @@
 //!   snake itself reads the wall clock, so its own frames cannot be hashed);
 //! * the Training view (its aurora and stars) for no run, a run with a log
 //!   and a run with no log, at several sizes and updates;
-//! * the arcade, with the cloudfield off and on, idle, loading and serving,
-//!   at several sizes and updates.
+//! * the arcade (which carries no backdrop), idle, loading and serving, at
+//!   several sizes and updates.
 //!
 //! The Die 3D view's clouds are pinned in `die3d/backdrop_pins.rs`, which can
 //! use that module's test backend.
@@ -206,8 +206,8 @@ pub(crate) fn arcade_rosters() -> Vec<(&'static str, Box<dyn Fn(u64) -> Vec<Serv
     out
 }
 
-/// The default arcade's frames at `w` x `h` with `rows` fed each update,
-/// the cloudfield on or off. `setup` runs once after construction.
+/// The default arcade's frames at `w` x `h` with `rows` fed each update.
+/// `setup` runs once after construction.
 pub(crate) fn arcade_hashes_with(
     rows: &dyn Fn(u64) -> Vec<ServiceState>,
     w: usize,
@@ -247,13 +247,11 @@ pub(crate) fn all_hashes() -> Vec<(String, Vec<u64>)> {
             }
         }
         for (name, rows) in arcade_rosters() {
-            for on in [false, true] {
-                for (w, h) in SIZES {
-                    out.push((
-                        format!("arcade {name} cloudfield {on} {w}x{h}"),
-                        arcade_hashes_with(&*rows, w, h, |a| a.set_cloudfield(on)),
-                    ));
-                }
+            for (w, h) in SIZES {
+                out.push((
+                    format!("arcade {name} {w}x{h}"),
+                    arcade_hashes_with(&*rows, w, h, |_| {}),
+                ));
             }
         }
         out
@@ -285,15 +283,10 @@ fn every_view_that_draws_a_backdrop_draws_its_pinned_frames() {
     assert!(bad.is_empty(), "frames changed:\n{}", bad.join("\n"));
 }
 
-/// The frames at d6560a27, before the shared backdrop, except the eight
-/// `arcade loading|serving cloudfield true` pins: those were taken again
-/// when the shared scene moved to the 4 Hz step clock with banded colours
-/// (with the old clock and no banding they match the d6560a27 frames).
-/// `arcade loading cloudfield true 200x60` was taken once more when the
-/// arcade's right-edge guard took in the ASCII bar: the forge's scaffold
-/// beam stands in column 199, and in each of the three frames its `|`
-/// cells there (12, 18 and 18) are now spaces in the same style. No
-/// other cell of those frames changed.
+/// The frames at d6560a27, before the shared backdrop. The arcade carries
+/// no backdrop, so its pins are the frames it drew with the old cloudfield
+/// off, under their old values; the cloudfield-on pins were removed with
+/// the arcade's backdrop.
 const PINS: &[(&str, [u64; 3])] = &[
     (
         "scene none 40x12",
@@ -584,7 +577,7 @@ const PINS: &[(&str, [u64; 3])] = &[
         ],
     ),
     (
-        "arcade idle cloudfield false 40x12",
+        "arcade idle 40x12",
         [
             7197954536597923748,
             10706632041158650043,
@@ -592,7 +585,7 @@ const PINS: &[(&str, [u64; 3])] = &[
         ],
     ),
     (
-        "arcade idle cloudfield false 80x24",
+        "arcade idle 80x24",
         [
             11082959296705005186,
             17109170901360076133,
@@ -600,7 +593,7 @@ const PINS: &[(&str, [u64; 3])] = &[
         ],
     ),
     (
-        "arcade idle cloudfield false 120x40",
+        "arcade idle 120x40",
         [
             2715560885361463847,
             9886456109182263071,
@@ -608,7 +601,7 @@ const PINS: &[(&str, [u64; 3])] = &[
         ],
     ),
     (
-        "arcade idle cloudfield false 200x60",
+        "arcade idle 200x60",
         [
             7839240221613493132,
             16070939611133602559,
@@ -616,7 +609,7 @@ const PINS: &[(&str, [u64; 3])] = &[
         ],
     ),
     (
-        "arcade idle cloudfield true 40x12",
+        "arcade loading 40x12",
         [
             7197954536597923748,
             10706632041158650043,
@@ -624,7 +617,7 @@ const PINS: &[(&str, [u64; 3])] = &[
         ],
     ),
     (
-        "arcade idle cloudfield true 80x24",
+        "arcade loading 80x24",
         [
             11082959296705005186,
             17109170901360076133,
@@ -632,7 +625,7 @@ const PINS: &[(&str, [u64; 3])] = &[
         ],
     ),
     (
-        "arcade idle cloudfield true 120x40",
+        "arcade loading 120x40",
         [
             2715560885361463847,
             9886456109182263071,
@@ -640,7 +633,7 @@ const PINS: &[(&str, [u64; 3])] = &[
         ],
     ),
     (
-        "arcade idle cloudfield true 200x60",
+        "arcade loading 200x60",
         [
             7839240221613493132,
             16070939611133602559,
@@ -648,7 +641,7 @@ const PINS: &[(&str, [u64; 3])] = &[
         ],
     ),
     (
-        "arcade loading cloudfield false 40x12",
+        "arcade serving 40x12",
         [
             7197954536597923748,
             10706632041158650043,
@@ -656,7 +649,7 @@ const PINS: &[(&str, [u64; 3])] = &[
         ],
     ),
     (
-        "arcade loading cloudfield false 80x24",
+        "arcade serving 80x24",
         [
             11082959296705005186,
             17109170901360076133,
@@ -664,7 +657,7 @@ const PINS: &[(&str, [u64; 3])] = &[
         ],
     ),
     (
-        "arcade loading cloudfield false 120x40",
+        "arcade serving 120x40",
         [
             2715560885361463847,
             9886456109182263071,
@@ -672,107 +665,11 @@ const PINS: &[(&str, [u64; 3])] = &[
         ],
     ),
     (
-        "arcade loading cloudfield false 200x60",
+        "arcade serving 200x60",
         [
             7839240221613493132,
             16070939611133602559,
             4180234795475111666,
-        ],
-    ),
-    (
-        "arcade loading cloudfield true 40x12",
-        [
-            17600810937517185883,
-            5298132627360190466,
-            13522251953021424455,
-        ],
-    ),
-    (
-        "arcade loading cloudfield true 80x24",
-        [
-            6166752679609268426,
-            4548656637848181461,
-            17744006136028677657,
-        ],
-    ),
-    (
-        "arcade loading cloudfield true 120x40",
-        [
-            17485118963406918052,
-            10511013143972236741,
-            8543344910002935063,
-        ],
-    ),
-    (
-        "arcade loading cloudfield true 200x60",
-        [
-            10962629317634343775,
-            18244021966256018733,
-            15616547361110668743,
-        ],
-    ),
-    (
-        "arcade serving cloudfield false 40x12",
-        [
-            7197954536597923748,
-            10706632041158650043,
-            7637469603997005235,
-        ],
-    ),
-    (
-        "arcade serving cloudfield false 80x24",
-        [
-            11082959296705005186,
-            17109170901360076133,
-            1404937221007063206,
-        ],
-    ),
-    (
-        "arcade serving cloudfield false 120x40",
-        [
-            2715560885361463847,
-            9886456109182263071,
-            12677530648568637389,
-        ],
-    ),
-    (
-        "arcade serving cloudfield false 200x60",
-        [
-            7839240221613493132,
-            16070939611133602559,
-            4180234795475111666,
-        ],
-    ),
-    (
-        "arcade serving cloudfield true 40x12",
-        [
-            5559341245018801355,
-            6558307764349356329,
-            8179624805102117375,
-        ],
-    ),
-    (
-        "arcade serving cloudfield true 80x24",
-        [
-            9977941912129369391,
-            5841659665422848906,
-            16178686722491176411,
-        ],
-    ),
-    (
-        "arcade serving cloudfield true 120x40",
-        [
-            11736144332369776670,
-            7192376284964381782,
-            10830265772596426576,
-        ],
-    ),
-    (
-        "arcade serving cloudfield true 200x60",
-        [
-            3514092556317983135,
-            18230619572327720344,
-            14500107786641651981,
         ],
     ),
 ];

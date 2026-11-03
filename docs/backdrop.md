@@ -1,11 +1,14 @@
 # Backdrops
 
-Every full-screen view can draw a backdrop behind what it shows. A backdrop fills only the
-cells the view leaves blank, so it never covers the view's own drawing, and it paints no
-background colour: the canvas stays black, or the terminal's own with
+Three views carry a background of their own: the Inference view, the Training view and the
+Wafer Waffler. The backdrop applies to these three only. Each draws its own kind by default
+and can be set to one of the others or off. Every other view carries no backdrop.
+
+A backdrop fills only the cells the view leaves blank, so it never covers the view's own
+drawing, and it paints no background colour: the canvas stays black, or the terminal's own with
 `TT_TOPLIKE_TRANSPARENT`.
 
-There are three kinds. Each is the painter one view already had, now shared
+There are three kinds. Each is the painter one of those views already had, now shared
 (`src/animation/backdrop.rs`).
 
 | Kind | What it is | What drives it |
@@ -18,23 +21,22 @@ The scene's motions map to signals, except its dream and its slow drift, which m
 atmosphere's own frame count. The sky's and the clouds' shapes are decoration, and the legend
 says so.
 
-## Defaults and refusals
+## Which views take one
 
-With no setting, every view looks as it did:
-
-| View | Default backdrop |
-|---|---|
-| Inference (`i`) | `scene`, drawn by the snake's own painter |
-| Training (`t`) | `sky`, drawn by the Training view's own painter |
-| Wafer Waffler (`3`) | `clouds`, drawn at pixel resolution by the Waffler itself |
-| every other view (Insights, Grid, Starfield, Castle, Flow, Arcade, Defrag, `~`) | off |
+| View | Takes | Default backdrop |
+|---|---|---|
+| Inference (`i`) | every kind | `scene`, drawn by the snake's own painter |
+| Training (`t`) | every kind | `sky`, drawn by the Training view's own painter |
+| Wafer Waffler (`3`) | every kind | `clouds`, drawn at pixel resolution by the Waffler itself |
+| Insights, Grid, Starfield, Castle, Flow, Arcade, Defrag, `~` | none | none |
 
 Choosing another kind for the Inference, Training or Waffler view turns that view's own
 painter off, and the shared backdrop draws the new kind in its blank cells. Choosing
 the view's own kind brings its own painter back.
 
-The Starfield refuses `scene` and `sky`. Every star in the Starfield is a Tensix core, and both
-of those backdrops draw stars that would look like cores. It takes `clouds`.
+One table says which view takes which kind: `accepts` in `src/animation/backdrop.rs`. Letting
+another view take a backdrop is one line there. A Wafer Waffler panel inside an arcade layout
+draws its own clouds, as the view does; the arcade draws nothing behind its panels.
 
 ## Config
 
@@ -45,25 +47,20 @@ In `~/.config/tt-toplike/config.toml`, the only config file:
 default = "off"            # off | scene | sky | clouds
 
 [backdrop.views]
-arcade = "scene"
-castle = "clouds"
 training = "off"           # the Training view without its sky
+waffler = "scene"          # the Wafer Waffler with the Inference view's scene
 ```
 
-* `default` sets every view that has no backdrop of its own. The Inference, Training and
-  Waffler views keep theirs unless `[backdrop.views]` names them. A view that refuses the
-  default stays off: `default = "scene"` or `"sky"` leaves the Starfield off, and the status
-  line and `--check-config` print a note saying so.
 * `[backdrop.views]` takes the view names `insights`, `grid`, `starfield`, `castle`, `flow`,
   `arcade`, `defrag`, `inference`, `hivemind`, `training` and `die3d`. `waffler` is accepted for
-  `die3d` and `"~"` (quoted) for `hivemind`.
-* An arcade layout can set the arcade's backdrop when it is selected (`backdrop = "clouds"` in
-  an `[[arcade.layouts]]` table; `now-serving` does). See `docs/arcade-layout.md`, "A layout's
-  backdrop".
-* The old `[arcade] cloudfield = true` still works. It means `[backdrop.views] arcade =
-  "scene"`; `false` means off. A `[backdrop.views] arcade` entry wins over it. The status line
-  and `--check-config` print a note that it is deprecated; the note does not make
-  `--check-config` fail.
+  `die3d` and `"~"` (quoted) for `hivemind`. An entry for a view that takes no backdrop is
+  ignored, with the note `[backdrop.views] castle is ignored: no backdrop on this view`.
+* `default` is for views that take a backdrop and have none of their own. Today there is no
+  such view, so a `default` other than `off` is ignored, with a note.
+* The old arcade settings, `[arcade] cloudfield` and a layout's `backdrop` or `cloudfield`, are
+  read and ignored, with the note "the arcade carries no backdrop".
+* A note shows on the status line and in `--check-config`, and does not make `--check-config`
+  fail.
 
 `tt-toplike --check-config` prints the backdrop settings and every problem with its line. A bad
 entry is left out and keeps its default; the other entries are used.
@@ -76,30 +73,27 @@ entry is left out and keeps its default; the other entries are used.
 | `views` is not a table | `` `backdrop.views` must be a table: [backdrop.views] `` |
 | an unknown view | ``unknown view `castel` in [backdrop.views] (expected one of insights, grid, ...)`` |
 | a value that is not one of the four | `` `backdrop.views.grid` must be off, scene, sky or clouds `` |
-| a refused kind | `starfield refuses sky: its stars are Tensix cores, and this backdrop draws stars too` |
 | a view set twice (`die3d` and `waffler`) | ``view `die3d` is set twice in [backdrop.views]`` |
 
 ## Keys and commands
 
 | Key or command | What it does |
 |---|---|
-| `w` | The next backdrop for the view on screen: off, scene, sky, clouds, then off again, skipping what the view refuses. Works in every view. |
-| `/backdrop` | Shows the view's backdrop and what it follows. |
-| `/backdrop off\|scene\|sky\|clouds` | Sets the view's backdrop. |
-| `c` (Arcade only) | The arcade's backdrop off when one is drawn, else on as the layout's own kind (the scene when the layout sets none). |
-| `/arcade cloudfield on\|off` | The arcade's scene on or off, by its old name. Alone, it flips. |
-| `{` `}` (Arcade only) | The previous and next layout; a layout with its own backdrop sets it. |
+| `w` | In the Inference, Training and Waffler views, the next backdrop: off, scene, sky, clouds, then off again. In every other view it says "no backdrop on this view" and changes nothing. |
+| `/backdrop` | Shows the view's backdrop and what it follows, or "no backdrop on this view". |
+| `/backdrop off\|scene\|sky\|clouds` | Sets the view's backdrop, in a view that takes one. |
+| `/arcade cloudfield` | Says "the arcade carries no backdrop" and changes nothing. |
 | `/clouds on\|off` (Waffler only) | The Waffler's clouds on or off. It sets the Waffler's backdrop to `clouds` or `off`. |
 
-`w` was free in every view. `c` was the arcade's cloudfield key; a global `c` would have taken
-that key from the arcade, so `c` stays the arcade's backdrop switch and `w` is the global key. The
-Waffler's clouds were once on a key, and are now its `/clouds` command, which still works.
+The arcade's `c` key is gone with its backdrop. The Waffler's clouds were once on a key, and
+are now its `/clouds` command, which still works.
 
 A setting made at run time lasts until you quit and holds across a resize. The message a key
 or `/backdrop` puts on the status line goes away after about 4 seconds, and when you leave the
 view.
 
-The legend (`l`) of every view ends with the view's backdrop line, for example
+The legend (`l`) of the Inference, Training and Waffler views ends with the view's backdrop
+line, for example
 `Backdrop: clouds follows PCIe (drift), load (light); shape is decoration`. When the signals
 are estimates (the mock backend, or a host's estimated model), a `~` stands before them.
 
@@ -112,7 +106,7 @@ The backdrop reads at the data rate (`BackdropSignals::gather`) and draws with a
   10 s) falls back to the backend's own telemetry.
 * The training step time is the newest run's `toplike.train.step_ms`, used while it is at most
   30 s old.
-* The scene reads the same service rows as the arcade: the attached host's models when
+* The scene reads the same service rows as the `i` view: the attached host's models when
   attached, the mock roster under `--mock`, else the local inference monitor. Under `--remote`
   it gets none (the `i` view reads the remote box's own list there).
 * A view the last update did not feed starts a fresh backdrop, so nothing that
@@ -150,31 +144,3 @@ serving and 4 GB/s of PCIe; the sky has no training run here, so it runs at its 
 
 Before the step clock the busy scene sent 248,458 bytes a second at 10 fps. The idle rows are
 the cursor and flush bytes of each frame.
-
-Measured on the arcade at 200 x 60 in a release build, 300 frames at 60 a second, with the
-default layout over a fixed two-chip backend (`backdrop_cost`). Frame time is update, render
-and drawing into a buffer, on a box with a load average near 8, so the times vary by more than
-the backdrops cost. This run is from 2026-11-02, after the step clock.
-
-| Backdrop | Signals | Cells changed per frame | Mean frame ms | 95th percentile ms |
-|---|---|---|---|---|
-| off | idle | 2461 | 3.70 | 8.26 |
-| off | busy | 2461 | 2.18 | 2.88 |
-| scene | idle | 2461 | 2.75 | 3.41 |
-| scene | busy | 2497 | 2.65 | 3.42 |
-| sky | idle | 2479 | 3.43 | 6.48 |
-| sky | busy | 2479 | 4.05 | 8.30 |
-| clouds | idle | 2473 | 2.88 | 3.60 |
-| clouds | busy | 2499 | 3.82 | 7.29 |
-
-The backdrop alone on the busy frame, best of seven batches, from the same run
-(`backdrop_layer_cost`):
-
-| Backdrop | Drawing the canvas, ms | Laying it under the frame, ms |
-|---|---|---|
-| scene | 0.577 | 0.909 |
-| sky | 1.502 | 0.562 |
-| clouds | 1.222 | 0.472 |
-
-The arcade changes about 2461 cells a frame of its own, so on the arcade the backdrops add
-little; the blank-view table shows the cost on a quiet view.

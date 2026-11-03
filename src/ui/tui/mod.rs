@@ -272,11 +272,10 @@ struct ArcadeSwitch<'a> {
     arcade: &'a mut Option<ArcadeVisualization>,
     config: &'a mut crate::animation::arcade_layout::ArcadeConfig,
     cycle: &'a mut crate::animation::arcade_presets::LayoutCycle,
-    settings: &'a mut crate::animation::backdrop::BackdropSettings,
 }
 
 /// The body of the `{` `}` key arm and of `/arcade`: step or select the
-/// layout, apply its backdrop, and lay the arcade out again. Returns the
+/// layout, and lay the arcade out again. Returns the
 /// status-line message and whether it is an error, or `None` for a key
 /// that is not a layout key in `mode`.
 ///
@@ -295,14 +294,10 @@ fn arcade_switch(
     let (message, error, relayout) = match input {
         ArcadeInput::Key(c) => {
             let step = arcade_step_for(mode, c)?;
-            (
-                presets::step_and_apply(s.cycle, step, s.settings),
-                false,
-                true,
-            )
+            (presets::step_status(s.cycle, step), false, true)
         }
         ArcadeInput::Command(arg) => {
-            let r = presets::command(arg, s.settings, s.cycle);
+            let r = presets::command(arg, s.cycle);
             (r.message, r.error, r.relayout)
         }
     };
@@ -314,11 +309,8 @@ fn arcade_switch(
             a.relayout(w, h, config, backend)
         });
     }
-    if let Some(a) = s.arcade.as_mut() {
-        a.set_backdrop(s.settings.choice("arcade"));
-        if relayout {
-            a.update(backend);
-        }
+    if let (true, Some(a)) = (relayout, s.arcade.as_mut()) {
+        a.update(backend);
     }
     Some((message, error))
 }
@@ -328,7 +320,7 @@ fn arcade_switch(
 const VIEW_MESSAGE_SECS: f64 = 4.0;
 
 /// A status-line message that belongs to one view: a layout switch, the
-/// arcade's `c`, the `w` key, a `/backdrop` or `/arcade` reply. It goes
+/// the `w` key, a `/backdrop` or `/arcade` reply. It goes
 /// away when that view is left, and an informational one after
 /// [`VIEW_MESSAGE_SECS`]. A global message (rotation, config problems,
 /// `/mode` errors) has no `ViewMessage` and stays as before.
@@ -960,11 +952,6 @@ fn run_app(
         loaded_config.start_layout.as_deref(),
     );
     arcade_config.rows = arcade_cycle.current().rows.clone();
-    // The start layout's own backdrop, if it has one.
-    crate::animation::arcade_presets::apply_backdrop(
-        arcade_cycle.current(),
-        &mut backdrop_settings,
-    );
     let anim_cfg = {
         use crate::config::AnimConfig;
         AnimConfig::from_profile(cli.profile).merge(crate::config::AnimConfigOverrides {
@@ -1557,7 +1544,6 @@ fn run_app(
                             size.height as usize,
                             &arcade_config,
                         );
-                        arc.set_backdrop(backdrop_settings.choice("arcade"));
                         arc.initialize_from_devices(backend.devices());
                         // Forward sensitivity so --profile paranoid (or any non-default profile)
                         // takes effect inside Arcade just like it does in the standalone modes.
@@ -1644,8 +1630,8 @@ fn run_app(
                     if let Some(ref mut arc) = arcade {
                         arc.set_serving(serving);
                         arc.set_activities(activities);
-                        // The Training and inference panels and the
-                        // cloudfield; the Die 3D panel's clock.
+                        // The Training and inference panels; the Die 3D
+                        // panel's clock.
                         arc.set_services(service_rows);
                         arc.set_train_state(train_state);
                         arc.set_clock(arcade_clock.elapsed().as_secs_f64());
@@ -1944,9 +1930,6 @@ fn run_app(
             if let Some(dv) = die3d.as_mut() {
                 dv.set_clouds(backdrop_bus::own_painter(&backdrop_settings, "die3d"));
             }
-            if let Some(arc) = arcade.as_mut() {
-                arc.set_backdrop(backdrop_settings.choice("arcade"));
-            }
             shared_backdrop.update(
                 &backdrop_settings,
                 view_name(display_mode),
@@ -2219,13 +2202,10 @@ fn run_app(
                 .as_ref()
                 .map(|w| w as &dyn tt_toplike_bus::WorldRead);
             // The legend's backdrop line: the view's setting, and whether its
-            // signals are estimates (the arcade keeps its own).
+            // signals are estimates.
             let backdrop_legend = (
                 backdrop_settings.choice(view_name(display_mode)),
-                match (display_mode, arcade.as_ref()) {
-                    (DisplayMode::Arcade, Some(arc)) => arc.backdrop().estimated(),
-                    _ => shared_backdrop.estimated(),
-                },
+                shared_backdrop.estimated(),
             );
             let draw_start = Instant::now();
             terminal
@@ -2787,9 +2767,9 @@ fn run_app(
                                         }
                                     }
                                 } else if verb == "arcade" {
-                                    // `/arcade layout ...` and `/arcade cloudfield
-                                    // on|off` (the old name for the arcade's
-                                    // scene backdrop).
+                                    // `/arcade layout ...`; the old `/arcade
+                                    // cloudfield` only says the arcade carries no
+                                    // backdrop.
                                     let arg = cmd_buf
                                         .trim()
                                         .trim_start_matches('/')
@@ -2803,7 +2783,6 @@ fn run_app(
                                             arcade: &mut arcade,
                                             config: &mut arcade_config,
                                             cycle: &mut arcade_cycle,
-                                            settings: &mut backdrop_settings,
                                         },
                                         backend.as_ref(),
                                     );
@@ -3207,45 +3186,13 @@ fn run_app(
                                 display_mode = next_display_mode(display_mode);
                                 log::info!("Switched to {:?} mode", display_mode);
                             }
-                            KeyCode::Char(crate::animation::arcade_layout::CLOUDFIELD_KEY)
-                                if display_mode == DisplayMode::Arcade =>
-                            {
-                                // The arcade's backdrop on or off: off when
-                                // one is drawn, else the layout's own kind,
-                                // else the scene. Only in the arcade; `w`
-                                // picks the kind.
-                                let next = crate::animation::arcade_presets::toggled_backdrop(
-                                    arcade_cycle.current(),
-                                    backdrop_settings.choice("arcade"),
-                                );
-                                let _ = backdrop_settings.set("arcade", next);
-                                if let Some(arc) = arcade.as_mut() {
-                                    arc.set_backdrop(next);
-                                }
-                                cmd_message = Some((
-                                    format!(
-                                        "backdrop (arcade): {}",
-                                        crate::animation::backdrop::choice_name(next)
-                                    ),
-                                    false,
-                                ));
-                                cmd_message_view =
-                                    ViewMessage::tag(&cmd_message, display_mode, message_clock_s);
-                            }
                             KeyCode::Char(crate::animation::backdrop::KEY) => {
-                                // The next backdrop for the view on screen, in
-                                // every view (see `backdrop::next_choice`).
-                                let view = view_name(display_mode);
-                                let next = crate::animation::backdrop::next_choice(
-                                    view,
-                                    backdrop_settings.choice(view),
-                                );
-                                let _ = backdrop_settings.set(view, next);
+                                // The next backdrop for the view on screen
+                                // (see `backdrop::key_message`).
                                 cmd_message = Some((
-                                    format!(
-                                        "backdrop ({}): {}",
-                                        crate::animation::backdrop::view_label(view),
-                                        crate::animation::backdrop::choice_name(next)
+                                    crate::animation::backdrop::key_message(
+                                        view_name(display_mode),
+                                        &mut backdrop_settings,
                                     ),
                                     false,
                                 ));
@@ -3265,7 +3212,6 @@ fn run_app(
                                         arcade: &mut arcade,
                                         config: &mut arcade_config,
                                         cycle: &mut arcade_cycle,
-                                        settings: &mut backdrop_settings,
                                     },
                                     backend.as_ref(),
                                 );
@@ -4954,7 +4900,7 @@ fn overlay_lines_with(
                     row(&[
                         ("R", "rotate (kiosk)"),
                         ("w", "backdrop"),
-                        ("c { }", "Arcade backdrop, layout"),
+                        ("{ }", "Arcade layout"),
                     ]),
                 ]
             };
@@ -5047,10 +4993,7 @@ fn overlay_lines_with(
                     13,
                     lbl,
                 ),
-                cmd(&[(
-                    "/arcade layout|cloudfield",
-                    "Arcade layout; scene on or off",
-                )]),
+                cmd(&[("/arcade layout", "next prev <name> list")]),
                 cmd(&[("/board /scene /cells …", &settings)]),
                 sep!("Status bar"),
                 cells(
@@ -5074,7 +5017,7 @@ fn overlay_lines_with(
 
         OverlayPanel::Legend => {
             // Per-view symbol legend — Arcade shows all four combined. The
-            // last line is the view's backdrop.
+            // last line is the view's backdrop, in a view that takes one.
             let mut v = match mode {
                 DisplayMode::Starfield => {
                     let mut v = starfield_legend_lines(bar, bg, dim, key);
@@ -5128,13 +5071,15 @@ fn overlay_lines_with(
                 DisplayMode::Die3d => die3d_legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => arcade_legend_lines(bar, bg, dim),
             };
-            v.push(ln!(vec![Span::styled(
-                format!(
-                    "  {}",
-                    crate::animation::backdrop::legend_line(backdrop.0, backdrop.1)
-                ),
-                Style::default().fg(dim)
-            )]));
+            if crate::animation::backdrop::takes_backdrop(view_name(mode)) {
+                v.push(ln!(vec![Span::styled(
+                    format!(
+                        "  {}",
+                        crate::animation::backdrop::legend_line(backdrop.0, backdrop.1)
+                    ),
+                    Style::default().fg(dim)
+                )]));
+            }
             v
         }
 
@@ -10266,7 +10211,7 @@ mod display_mode_tests {
     }
 
     /// The `{` `}` key arm and `/arcade` both run `arcade_switch`. A switch
-    /// applies the layout's backdrop, lays the arcade out from the new rows,
+    /// lays the arcade out from the new rows,
     /// and updates it once, so the first frame after it shows the devices
     /// and services (review S1 and S4). Outside Arcade the keys change
     /// nothing.
@@ -10275,13 +10220,11 @@ mod display_mode_tests {
         use super::{arcade_switch, ArcadeInput, ArcadeSwitch};
         use crate::animation::arcade_layout::ArcadeConfig;
         use crate::animation::arcade_presets::{preset, LayoutCycle};
-        use crate::animation::backdrop::{BackdropKind, BackdropSettings};
         use crate::animation::bus_test_support::Fixed;
         use crate::animation::ArcadeVisualization;
         use crate::backend::TelemetryBackend;
         let b = Fixed::new(2);
         let mut cycle = LayoutCycle::new(&[], None);
-        let mut settings = BackdropSettings::default();
         let mut config = ArcadeConfig::default();
         let mut a = ArcadeVisualization::with_config(120, 40, &config);
         a.initialize_from_devices(b.devices());
@@ -10304,8 +10247,6 @@ mod display_mode_tests {
                 })
                 .collect::<Vec<_>>()
                 .join("\n")
-                // The clouds fill the blanks between a label's words.
-                .replace(['░', '▒', '▓'], " ")
         };
         // Outside Arcade: no change.
         let none = arcade_switch(
@@ -10315,13 +10256,12 @@ mod display_mode_tests {
                 arcade: &mut arcade,
                 config: &mut config,
                 cycle: &mut cycle,
-                settings: &mut settings,
             },
             &b,
         );
         assert_eq!(none, None);
         assert_eq!(cycle.current().name, "classic");
-        // `}` in Arcade: now-serving, its clouds, its rows, a real frame.
+        // `}` in Arcade: now-serving, its rows, a real frame.
         let (msg, err) = arcade_switch(
             ArcadeInput::Key('}'),
             DisplayMode::Arcade,
@@ -10329,7 +10269,6 @@ mod display_mode_tests {
                 arcade: &mut arcade,
                 config: &mut config,
                 cycle: &mut cycle,
-                settings: &mut settings,
             },
             &b,
         )
@@ -10338,17 +10277,14 @@ mod display_mode_tests {
             !err && msg.starts_with("layout: now-serving (2/8)"),
             "{msg}"
         );
-        assert_eq!(settings.choice("arcade"), Some(BackdropKind::Clouds));
         let ns = preset("now-serving").unwrap();
         let a = arcade.as_ref().unwrap();
         assert_eq!(config.rows, ns.rows);
         assert_eq!(a.config().rows, ns.rows);
-        assert_eq!(a.backdrop().kind(), Some(BackdropKind::Clouds));
         let t = text(a);
         assert!(!t.contains("no Tenstorrent device found"), "{t}");
         assert!(!t.contains("0 of 0 models"), "{t}");
-        // `/arcade layout classic` goes back; the backdrop stays (classic
-        // sets none).
+        // `/arcade layout classic` goes back.
         let (msg, err) = arcade_switch(
             ArcadeInput::Command("layout classic"),
             DisplayMode::Arcade,
@@ -10356,17 +10292,12 @@ mod display_mode_tests {
                 arcade: &mut arcade,
                 config: &mut config,
                 cycle: &mut cycle,
-                settings: &mut settings,
             },
             &b,
         )
         .unwrap();
         assert!(!err && msg.starts_with("layout: classic (1/8)"), "{msg}");
         assert_eq!(arcade.as_ref().unwrap().config().rows, cycle.current().rows);
-        assert_eq!(
-            arcade.as_ref().unwrap().backdrop().kind(),
-            Some(BackdropKind::Clouds)
-        );
     }
 
     /// The shared backdrop does not show inside the Insights kill dialog,
@@ -10447,11 +10378,9 @@ mod display_mode_tests {
         };
         use crate::animation::arcade_layout::ArcadeConfig;
         use crate::animation::arcade_presets::LayoutCycle;
-        use crate::animation::backdrop::BackdropSettings;
         use crate::animation::bus_test_support::Fixed;
         let b = Fixed::new(2);
         let mut cycle = LayoutCycle::new(&[], None);
-        let mut settings = BackdropSettings::default();
         let mut config = ArcadeConfig::default();
         let mut arcade = None;
         let mut msg = arcade_switch(
@@ -10461,7 +10390,6 @@ mod display_mode_tests {
                 arcade: &mut arcade,
                 config: &mut config,
                 cycle: &mut cycle,
-                settings: &mut settings,
             },
             &b,
         );
@@ -12059,17 +11987,19 @@ mod host_default_screen_tests {
                 .collect::<Vec<_>>()
                 .join("\n");
             assert!(text.contains("{ }"), "{kind:?}: {text}");
-            // The arcade's backdrop key and the global one (review M7).
+            // The arcade carries no backdrop: no `c` key, and no backdrop
+            // line or key in its own legend and explain text. Help lists
+            // `w` with the global keys.
             let words: Vec<&str> = text.split_whitespace().collect();
             let pair = |a: &str, b: &str| words.windows(2).any(|p| p[0] == a && p[1] == b);
             assert!(
-                pair("c", "{") || pair("c", "backdrop"),
+                !pair("c", "{") && !pair("c", "backdrop"),
                 "{kind:?}: c: {text}"
             );
-            assert!(
-                pair("w", "backdrop") || text.contains("Backdrop: off (w"),
-                "{kind:?}: w: {text}"
-            );
+            assert!(!text.contains("Backdrop:"), "{kind:?}: {text}");
+            if kind != OverlayPanel::Help {
+                assert!(!text.contains("backdrop"), "{kind:?}: {text}");
+            }
         }
     }
 
@@ -12672,7 +12602,6 @@ pub fn run_render_bench(
     {
         let mut term = mk_term();
         let cfg = crate::animation::arcade_layout::ArcadeConfig {
-            cloudfield: false,
             rows: crate::animation::arcade_layout::example_rows(),
         };
         let mut arc = ArcadeVisualization::with_config(width as usize, height as usize, &cfg);

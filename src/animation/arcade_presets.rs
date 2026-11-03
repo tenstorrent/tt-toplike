@@ -33,15 +33,6 @@ pub struct NamedLayout {
     /// May be empty for a user layout.
     pub description: String,
     pub rows: Vec<RowSpec>,
-    /// The arcade backdrop this layout sets when it is selected
-    /// (`backdrop = "clouds"` in an `[[arcade.layouts]]` table; the older
-    /// `cloudfield = true` is `backdrop = "scene"`). `Some(None)` turns the
-    /// backdrop off; `None` leaves the current one alone. `w`, `c`,
-    /// `/backdrop` and `/arcade cloudfield` still change it for the
-    /// session; the next switch to a layout that has a backdrop applies it
-    /// again. Applied by [`apply_backdrop`] to the TUI's backdrop settings
-    /// for the `arcade` view.
-    pub backdrop: Option<crate::animation::backdrop::Choice>,
 }
 
 /// The name the `[[arcade.row]]` tables get as a layout.
@@ -99,7 +90,6 @@ pub fn presets() -> &'static [NamedLayout] {
             name: name.into(),
             description: description.into(),
             rows,
-            backdrop: None,
         };
         // The cycle order. The user asked for `now-serving` right after
         // `classic` "for now": the set of defaults is still being thought
@@ -112,26 +102,23 @@ pub fn presets() -> &'static [NamedLayout] {
             ),
             // The user's words: "now serving: top: 3 wide inference
             // server, big bottom: left: 3d cube, right: defrag", and "this is
-            // not the default" (no starfield) and "clouds should go behind
-            // the whole arcade" (the layout sets the clouds backdrop, which
-            // draws with or without an inference service). Heights 3:4
-            // keep the inference panel at its 8 rows at 80x24 with the
-            // bottom row the bigger one.
-            NamedLayout {
-                backdrop: Some(Some(crate::animation::backdrop::BackdropKind::Clouds)),
-                ..named(
-                    "now-serving",
-                    concat!(
-                        "inference over ",
-                        crate::die3d_display_name!(),
-                        " and defrag"
-                    ),
-                    vec![
-                        row(3, vec![p(Inference, 1)]),
-                        row(4, vec![p(Die3d, 1), p(Defrag, 1)]),
-                    ],
-                )
-            },
+            // not the default" (no starfield). The arcade carries no
+            // backdrop ("disable the cloud layer behind the arcade mode");
+            // the Die 3D panel draws its own clouds. Heights 3:4 keep the
+            // inference panel at its 8 rows at 80x24 with the bottom row
+            // the bigger one.
+            named(
+                "now-serving",
+                concat!(
+                    "inference over ",
+                    crate::die3d_display_name!(),
+                    " and defrag"
+                ),
+                vec![
+                    row(3, vec![p(Inference, 1)]),
+                    row(4, vec![p(Die3d, 1), p(Defrag, 1)]),
+                ],
+            ),
             named(
                 "defrag-wide",
                 "starfield; castle beside a wide defrag; flow",
@@ -280,21 +267,14 @@ impl LayoutCycle {
     }
 
     /// The status line for the layout on screen:
-    /// `layout: <name> (<i>/<n>), <backdrop> — <description>`. The backdrop
-    /// part is there only for a layout that sets one, and the dash only
-    /// with a description. The line is at most [`STATUS_MAX`] characters,
-    /// so it fits an 80-column status bar with its two-column indent: the
-    /// name, the place and the backdrop come first, and a description that
-    /// does not fit is cut with `…`.
+    /// `layout: <name> (<i>/<n>) — <description>`, the dash only with a
+    /// description. The line is at most [`STATUS_MAX`] characters, so it
+    /// fits an 80-column status bar with its two-column indent: the name
+    /// and the place come first, and a description that does not fit is
+    /// cut with `…`.
     pub fn status(&self) -> String {
         let l = self.current();
         let mut line = format!("layout: {} ({}/{})", l.name, self.index + 1, self.len());
-        if let Some(c) = l.backdrop {
-            match c {
-                Some(k) => line.push_str(&format!(", {}", k.name())),
-                None => line.push_str(", backdrop off"),
-            }
-        }
         if !l.description.is_empty() {
             line.push_str(" — ");
             line.push_str(&l.description);
@@ -362,38 +342,18 @@ pub fn shown(name: &str) -> String {
     cut(&name.escape_debug().to_string(), 40)
 }
 
-/// The usage text for `/arcade`, one line per verb.
-pub const USAGE: &str = "/arcade layout next|prev|<name>|list   switch the layout ({ } step)\n/arcade cloudfield on|off   the old name for /backdrop scene|off here";
-
-/// The view name the arcade's backdrop setting is kept under.
-const ARCADE: &str = "arcade";
+/// The usage text for `/arcade`.
+pub const USAGE: &str = "/arcade layout next|prev|<name>|list   switch the layout ({ } step)";
 
 /// The command bar's `/arcade` command. `layout next`, `layout prev`,
-/// `layout <name>` switch the layout and apply its backdrop; `layout list`
-/// (or `layout` alone) names them all. Anything else goes to
-/// `arcade_layout::command`, which handles `cloudfield` (the scene
-/// backdrop on or off) in `settings`.
-pub fn command(
-    arg: &str,
-    settings: &mut crate::animation::backdrop::BackdropSettings,
-    cycle: &mut LayoutCycle,
-) -> Reply {
-    use crate::animation::backdrop::BackdropKind;
+/// `layout <name>` switch the layout; `layout list` (or `layout` alone)
+/// names them all. Anything else goes to `arcade_layout::command`, where
+/// the old `cloudfield` verb only says the arcade carries no backdrop.
+pub fn command(arg: &str, cycle: &mut LayoutCycle) -> Reply {
     let mut words = arg.split_whitespace();
     if words.next() != Some("layout") {
-        let mut on = settings.choice(ARCADE) == Some(BackdropKind::Scene);
-        let (message, error) = arcade_layout::command(arg, &mut on);
-        // Only a good command changes the setting: a typo must not turn
-        // off a sky or clouds backdrop.
-        if !error {
-            let _ = settings.set(ARCADE, on.then_some(BackdropKind::Scene));
-        }
-        // A bad command shows the usage of both verbs.
-        let message = if error && message == arcade_layout::USAGE {
-            USAGE.to_string()
-        } else {
-            message
-        };
+        let (message, error) = arcade_layout::command(arg);
+        let message = if error { USAGE.to_string() } else { message };
         return Reply {
             message,
             error,
@@ -417,11 +377,10 @@ pub fn command(
             false,
             false,
         ),
-        (Some("next"), None) => reply(step_and_apply(cycle, Step::Next, settings), false, true),
-        (Some("prev"), None) => reply(step_and_apply(cycle, Step::Prev, settings), false, true),
+        (Some("next"), None) => reply(step_status(cycle, Step::Next), false, true),
+        (Some("prev"), None) => reply(step_status(cycle, Step::Prev), false, true),
         (Some(name), None) => {
             if cycle.select(name) {
-                apply_backdrop(cycle.current(), settings);
                 reply(cycle.status(), false, true)
             } else {
                 reply(
@@ -439,43 +398,11 @@ pub fn command(
     }
 }
 
-/// Apply `layout`'s own backdrop, if it has one, to the arcade's setting
-/// in `settings` (the TUI hands it to the arcade on the next update).
-/// Called when a layout is selected: at start-up, on `{` or `}`, and on
-/// `/arcade layout`.
-pub fn apply_backdrop(
-    layout: &NamedLayout,
-    settings: &mut crate::animation::backdrop::BackdropSettings,
-) {
-    if let Some(c) = layout.backdrop {
-        // The arcade refuses no kind, so this cannot fail.
-        let _ = settings.set(ARCADE, c);
-    }
-}
-
-/// Take `step` through `cycle`, apply the new layout's backdrop to
-/// `settings`, and return the status line. The `{` and `}` keys.
-pub fn step_and_apply(
-    cycle: &mut LayoutCycle,
-    step: Step,
-    settings: &mut crate::animation::backdrop::BackdropSettings,
-) -> String {
+/// Take `step` through `cycle` and return the status line. The `{` and
+/// `}` keys.
+pub fn step_status(cycle: &mut LayoutCycle, step: Step) -> String {
     cycle.step(step);
-    apply_backdrop(cycle.current(), settings);
     cycle.status()
-}
-
-/// The arcade backdrop after the `c` key: off when one is drawn, else the
-/// layout's own kind, else the scene (the old cloudfield).
-pub fn toggled_backdrop(
-    layout: &NamedLayout,
-    current: crate::animation::backdrop::Choice,
-) -> crate::animation::backdrop::Choice {
-    use crate::animation::backdrop::BackdropKind;
-    match current {
-        Some(_) => None,
-        None => Some(layout.backdrop.flatten().unwrap_or(BackdropKind::Scene)),
-    }
 }
 
 /// The key that steps to the next layout while the arcade is on screen.

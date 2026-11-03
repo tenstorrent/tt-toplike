@@ -1442,7 +1442,6 @@ fn classic_arcade(w: usize, h: usize) -> ArcadeVisualization {
         w,
         h,
         &ArcadeConfig {
-            cloudfield: false,
             rows: classic.rows.clone(),
         },
     )

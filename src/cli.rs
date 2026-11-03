@@ -246,11 +246,12 @@ pub struct Cli {
     /// Reads `~/.config/tt-toplike/config.toml`, the only config file. The
     /// `[arcade]` section sets the arcade's own layouts and the layout to start
     /// with (docs/arcade-layout.md); the report lists every arcade layout with
-    /// its panels. The `[backdrop]` section sets each view's backdrop: off,
-    /// scene, sky or clouds (docs/backdrop.md). In the TUI, `w` cycles the
-    /// backdrop of the view on screen and `/backdrop` shows or sets it; in the
-    /// arcade, `}` and `{` step through the layouts and `c` turns the
-    /// arcade's backdrop on or off. Does not enter the TUI and opens no device.
+    /// its panels. The `[backdrop]` section sets the backdrop of the Inference
+    /// view, the Training view and the Wafer Waffler: off, scene, sky or
+    /// clouds (docs/backdrop.md); other views carry none. In the TUI, `w`
+    /// cycles the backdrop of those views and `/backdrop` shows or sets it; in
+    /// the arcade, `}` and `{` step through the layouts. Does not enter the TUI
+    /// and opens no device.
     #[arg(long)]
     pub check_config: bool,
 
@@ -261,8 +262,7 @@ pub struct Cli {
     /// `[[arcade.row]]` tables, or the name of an `[[arcade.layouts]]`
     /// table). Wins over `[arcade] layout` in the config. An unknown name is
     /// reported on the status line and the arcade starts with the first
-    /// layout. A layout can set the arcade's backdrop when it is selected
-    /// (now-serving sets the clouds). In the arcade, `}` and `{` step to the next and previous
+    /// layout. In the arcade, `}` and `{` step to the next and previous
     /// layout, and `/arcade layout next|prev|<name>|list` does the same from
     /// the command bar. See docs/arcade-layout.md.
     #[arg(long, value_name = "NAME")]

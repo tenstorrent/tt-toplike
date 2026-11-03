@@ -6,10 +6,11 @@
 //! Each view's backdrop is a setting ([`BackdropSettings`]). Three views
 //! draw their default backdrop with their own painter, as before: the
 //! Inference view's snake its atmosphere (the scene), the Training view its
-//! sky, Die 3D its clouds. The arcade lays its backdrop itself, under the
-//! hero. For every other choice the TUI lays the backdrop into the drawn
-//! frame ([`SharedBackdrop::draw`]), in blank cells only, after the view and
-//! before the status bar, the command bar and the overlays.
+//! sky, Die 3D its clouds. When one of them is set to another kind, the TUI
+//! lays that kind into the drawn frame ([`SharedBackdrop::draw`]), in blank
+//! cells only, after the view and before the status bar, the command bar
+//! and the overlays. Every other view takes no backdrop
+//! (`backdrop::accepts`), so nothing is laid over it.
 //!
 //! The update runs at the view's data rate, in the update block, after the
 //! view's own update ([`SharedBackdrop::update`]). A view the last update
@@ -23,10 +24,11 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
 /// The kind the TUI lays over `view` itself: the view's setting, unless the
-/// view draws it with its own painter or is the arcade.
+/// view draws it with its own painter. A view that takes no backdrop has
+/// none (`BackdropSettings::choice`).
 pub(crate) fn layer_kind(settings: &BackdropSettings, view: &str) -> Choice {
     let c = settings.choice(view);
-    if view == "arcade" || c == builtin(view) {
+    if c == builtin(view) {
         None
     } else {
         c
@@ -152,8 +154,8 @@ mod tests {
         );
         s.set("training", CLOUDS).unwrap();
         s.set("die3d", SKY).unwrap();
-        s.set("castle", SCENE).unwrap();
-        s.set("arcade", CLOUDS).unwrap();
+        assert!(s.set("castle", SCENE).is_err());
+        assert!(s.set("arcade", CLOUDS).is_err());
         assert_eq!(layer_kind(&s, "training"), CLOUDS);
         assert!(
             !own_painter(&s, "training"),
@@ -161,8 +163,8 @@ mod tests {
         );
         assert_eq!(layer_kind(&s, "die3d"), SKY);
         assert!(!own_painter(&s, "die3d"));
-        assert_eq!(layer_kind(&s, "castle"), SCENE);
-        assert_eq!(layer_kind(&s, "arcade"), None, "the arcade lays its own");
+        assert_eq!(layer_kind(&s, "castle"), None, "the castle takes none");
+        assert_eq!(layer_kind(&s, "arcade"), None, "the arcade takes none");
         s.set("training", None).unwrap();
         assert_eq!(layer_kind(&s, "training"), None);
         assert!(!own_painter(&s, "training"), "off is off");
@@ -176,8 +178,8 @@ mod tests {
         use crate::animation::backdrop::ChipDraw;
         use crate::animation::die3d::clouds::Clouds;
         let mut s = BackdropSettings::new(BackdropConfig::default());
-        s.set("grid", CLOUDS).unwrap();
-        s.set("castle", CLOUDS).unwrap();
+        s.set("training", CLOUDS).unwrap();
+        s.set("inference", CLOUDS).unwrap();
         let mut b = SharedBackdrop::default();
         let idle = |t: f64| BackdropSignals {
             now_s: t,
@@ -190,12 +192,12 @@ mod tests {
             ..Default::default()
         };
         for i in 0..30 {
-            b.update(&s, "grid", false, |_| idle(i as f64));
+            b.update(&s, "training", false, |_| idle(i as f64));
         }
         assert_eq!(b.backdrop().cloud_intensity(), Clouds::intensity(0.0));
-        // The castle starts a fresh backdrop, and its first update already
-        // has the chip's idle.
-        b.update(&s, "castle", false, |_| idle(30.0));
+        // The Inference view starts a fresh backdrop, and its first update
+        // already has the chip's idle.
+        b.update(&s, "inference", false, |_| idle(30.0));
         assert_eq!(b.backdrop().cloud_intensity(), Clouds::intensity(0.0));
     }
 
@@ -204,10 +206,10 @@ mod tests {
     #[test]
     fn draw_lays_only_the_backdrop_of_the_view_it_was_fed() {
         let mut s = BackdropSettings::new(BackdropConfig::default());
-        s.set("castle", CLOUDS).unwrap();
+        s.set("training", CLOUDS).unwrap();
         let mut b = SharedBackdrop::default();
         for i in 0..20 {
-            b.update(&s, "castle", false, |_| BackdropSignals {
+            b.update(&s, "training", false, |_| BackdropSignals {
                 now_s: i as f64 / 4.0,
                 pcie_bps: Some(4e9),
                 load: Some(1.0),
@@ -215,9 +217,13 @@ mod tests {
             });
         }
         let area = Rect::new(0, 0, 60, 20);
-        let mut castle = Buffer::empty(area);
-        b.draw(&mut castle, area, "castle");
-        assert_ne!(castle, Buffer::empty(area), "the castle's own backdrop");
+        let mut training = Buffer::empty(area);
+        b.draw(&mut training, area, "training");
+        assert_ne!(
+            training,
+            Buffer::empty(area),
+            "the Training view's backdrop"
+        );
         let mut other = Buffer::empty(area);
         b.draw(&mut other, area, "inference");
         assert_eq!(other, Buffer::empty(area), "nothing for another view");
@@ -227,16 +233,22 @@ mod tests {
     fn a_view_with_no_backdrop_reads_no_signal_and_a_new_view_starts_fresh() {
         let mut s = BackdropSettings::new(BackdropConfig::default());
         let mut b = SharedBackdrop::default();
-        b.update(&s, "grid", false, |_| panic!("an off view reads nothing"));
+        b.update(&s, "grid", false, |_| {
+            panic!("a view with no backdrop reads nothing")
+        });
         assert!(!b.backdrop().active());
-        s.set("grid", CLOUDS).unwrap();
-        s.set("castle", CLOUDS).unwrap();
+        s.set("training", None).unwrap();
+        b.update(&s, "training", false, |_| {
+            panic!("an off view reads nothing")
+        });
+        s.set("training", CLOUDS).unwrap();
+        s.set("inference", CLOUDS).unwrap();
         let busy = |_: bool| BackdropSignals {
             pcie_bps: Some(1e10),
             ..Default::default()
         };
         for i in 0..200 {
-            b.update(&s, "grid", false, |n| BackdropSignals {
+            b.update(&s, "training", false, |n| BackdropSignals {
                 now_s: i as f64 / 10.0,
                 ..busy(n)
             });
@@ -244,7 +256,7 @@ mod tests {
         assert!(b.backdrop().active());
         let before = b.backdrop().canvas(60, 20);
         // Another view: a fresh backdrop, which has not drifted.
-        b.update(&s, "castle", false, |n| BackdropSignals {
+        b.update(&s, "inference", false, |n| BackdropSignals {
             now_s: 20.0,
             ..busy(n)
         });
@@ -258,13 +270,111 @@ mod tests {
             fresh.canvas(60, 20)
         });
         // The scene asks for the service rows; the others do not.
-        s.set("castle", SCENE).unwrap();
+        s.set("training", SCENE).unwrap();
         let mut asked = false;
-        b.update(&s, "castle", false, |rows| {
+        b.update(&s, "training", false, |rows| {
             asked = rows;
             BackdropSignals::default()
         });
         assert!(asked);
+    }
+
+    /// Busy signals: a serving model's rows, PCIe traffic and a loaded chip,
+    /// so every kind has something to draw.
+    fn busy_signals(t: f64) -> BackdropSignals {
+        BackdropSignals {
+            now_s: t,
+            services: crate::workload::inference_server::mock::mock_services(t as f32 + 100.0),
+            pcie_bps: Some(4e9),
+            load: Some(1.0),
+            ..Default::default()
+        }
+    }
+
+    /// A drawn view: text with blank cells between, as a view leaves them.
+    fn drawn(area: Rect) -> Buffer {
+        let mut buf = Buffer::empty(area);
+        for y in (0..area.height).step_by(3) {
+            buf.set_string(0, y, "view text  │  more", ratatui::style::Style::default());
+        }
+        buf
+    }
+
+    /// Every view that takes no backdrop draws the same frame with any
+    /// `[backdrop]` setting, after `w` and after `/backdrop`: nothing is laid
+    /// over it, its signals are not read, and its setting stays off.
+    #[test]
+    fn a_view_that_takes_no_backdrop_draws_the_same_frame_with_any_setting() {
+        use crate::animation::backdrop::{command, key_message, takes_backdrop, VIEWS};
+        let area = Rect::new(0, 0, 60, 20);
+        let refusing: Vec<&str> = VIEWS
+            .iter()
+            .copied()
+            .filter(|v| !takes_backdrop(v))
+            .collect();
+        assert_eq!(
+            refusing,
+            vec![
+                "insights",
+                "grid",
+                "starfield",
+                "castle",
+                "flow",
+                "arcade",
+                "defrag",
+                "hivemind"
+            ]
+        );
+        for v in refusing {
+            for c in [None, SCENE, SKY, CLOUDS] {
+                let config = BackdropConfig {
+                    default: Some(c),
+                    views: vec![(v, c)],
+                };
+                let mut s = BackdropSettings::new(config);
+                assert_eq!(s.choice(v), None, "{v} {c:?}");
+                assert_eq!(key_message(v, &mut s), "no backdrop on this view");
+                let arg = crate::animation::backdrop::choice_name(c);
+                assert_eq!(
+                    command(arg, v, &mut s),
+                    ("no backdrop on this view".into(), false)
+                );
+                assert_eq!(s.choice(v), None, "{v}: `w` and /backdrop change nothing");
+                assert!(!own_painter(&s, v), "{v}");
+                let mut b = SharedBackdrop::default();
+                for i in 0..40 {
+                    b.update(&s, v, true, |_| -> BackdropSignals {
+                        panic!("{v}: a view with no backdrop reads no signal at {i}")
+                    });
+                }
+                let mut buf = drawn(area);
+                b.draw(&mut buf, area, v);
+                assert_eq!(buf, drawn(area), "{v} {c:?}: byte-identical");
+            }
+        }
+    }
+
+    /// The three views that carry a background of their own still draw it
+    /// with their own painter by default, and a kind set for one of them is
+    /// laid over its frame.
+    #[test]
+    fn the_inference_training_and_waffler_views_still_draw_theirs() {
+        let area = Rect::new(0, 0, 60, 20);
+        for (v, other) in [("inference", SKY), ("training", CLOUDS), ("die3d", SCENE)] {
+            let mut s = BackdropSettings::new(BackdropConfig::default());
+            assert!(own_painter(&s, v), "{v}: its own painter");
+            assert_eq!(layer_kind(&s, v), None, "{v}");
+            s.set(v, other).unwrap();
+            assert!(!own_painter(&s, v));
+            assert_eq!(layer_kind(&s, v), other, "{v}");
+            let mut b = SharedBackdrop::default();
+            for i in 0..40 {
+                b.update(&s, v, false, |_| busy_signals(i as f64 / 4.0));
+            }
+            let mut buf = drawn(area);
+            b.draw(&mut buf, area, v);
+            assert_ne!(buf, drawn(area), "{v}: {other:?} is laid");
+        }
     }
 
     #[test]
@@ -273,9 +383,10 @@ mod tests {
         assert_eq!(area(Rect::new(0, 0, 80, 0), 1).height, 0);
     }
 
-    /// The legend ends with the view's backdrop line, and every choice, with
-    /// or without the estimate marker, fits the legend's 30 rows and 78
-    /// columns at 80 columns in every view.
+    /// In a view that takes a backdrop the legend ends with its backdrop
+    /// line, and every choice, with or without the estimate marker, fits the
+    /// legend's 30 rows and 78 columns at 80 columns. Every other view's
+    /// legend has no backdrop line.
     #[test]
     fn every_backdrop_line_fits_every_legend() {
         use super::super::{
@@ -301,6 +412,13 @@ mod tests {
         };
         for mode in modes {
             let default = overlay_lines(OverlayPanel::Legend, mode, cols);
+            if !crate::animation::backdrop::takes_backdrop(view_name(mode)) {
+                assert!(
+                    default.iter().all(|l| !text(l).contains("Backdrop:")),
+                    "{mode:?}"
+                );
+                continue;
+            }
             let want = crate::animation::backdrop::legend_line(
                 BackdropConfig::default().choice(view_name(mode)),
                 false,

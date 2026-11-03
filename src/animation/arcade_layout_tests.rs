@@ -291,21 +291,18 @@ fn view_names_parse_with_the_waffler_alias() {
     assert_eq!(View::from_key("castel"), None);
 }
 
+/// `/arcade cloudfield`, with any value, is still understood and only says
+/// the arcade carries no backdrop.
 #[test]
-fn the_arcade_command_sets_and_flips_the_cloudfield() {
-    let mut on = false;
-    assert_eq!(
-        command("cloudfield on", &mut on),
-        (cloudfield_message(true), false)
-    );
-    assert!(on);
-    assert!(!command("cloudfield off", &mut on).1);
-    assert!(!on);
-    command("cloudfield", &mut on);
-    assert!(on, "no value flips it");
-    let (msg, err) = command("cloudfield maybe", &mut on);
-    assert!(err && msg.contains("maybe"), "{msg}");
-    assert!(on, "a bad value changes nothing");
-    assert!(command("sparkle", &mut on).1);
-    assert!(command("", &mut on).1);
+fn the_old_cloudfield_command_says_the_arcade_carries_no_backdrop() {
+    for arg in [
+        "cloudfield on",
+        "cloudfield off",
+        "cloudfield",
+        "cloudfield maybe",
+    ] {
+        assert_eq!(command(arg), (NO_BACKDROP_NOTE.to_string(), false), "{arg}");
+    }
+    assert!(command("sparkle").1);
+    assert!(command("").1);
 }

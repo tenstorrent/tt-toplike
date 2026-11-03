@@ -49,61 +49,81 @@ fn the_defaults_are_the_looks_each_view_had() {
     }
 }
 
-#[test]
-fn a_view_entry_wins_over_the_views_own_backdrop_and_the_default_fills_the_rest() {
-    let cfg = BackdropConfig {
-        default: Some(CLOUDS),
-        views: vec![("castle", SKY), ("training", None), ("arcade", SCENE)],
-    };
-    assert_eq!(cfg.choice("castle"), SKY);
-    assert_eq!(cfg.choice("training"), None, "the sky turned off");
-    assert_eq!(cfg.choice("arcade"), SCENE);
-    // `default` is for views with no backdrop of their own.
-    assert_eq!(cfg.choice("grid"), CLOUDS);
-    assert_eq!(cfg.choice("inference"), SCENE);
-    assert_eq!(cfg.choice("die3d"), CLOUDS);
-    // `default = "off"` is the same as not setting it.
-    let off = BackdropConfig {
-        default: Some(None),
-        views: vec![],
-    };
-    assert_eq!(off.choice("inference"), SCENE);
-    assert_eq!(off.choice("grid"), None);
-}
+/// The views that take a backdrop, by `accepts`.
+const TAKERS: [&str; 3] = ["inference", "training", "die3d"];
 
 #[test]
-fn the_starfield_refuses_the_kinds_that_draw_stars() {
-    assert!(refusal("starfield", BackdropKind::Scene).is_some());
-    assert!(refusal("starfield", BackdropKind::Sky).is_some());
-    assert!(refusal("starfield", BackdropKind::Clouds).is_none());
-    for v in VIEWS.iter().filter(|v| **v != "starfield") {
+fn only_the_inference_training_and_waffler_views_take_a_backdrop() {
+    for v in VIEWS {
+        let want: &[BackdropKind] = if TAKERS.contains(&v) {
+            &BackdropKind::ALL
+        } else {
+            &[]
+        };
+        assert_eq!(accepts(v), want, "{v}");
+        assert_eq!(takes_backdrop(v), TAKERS.contains(&v), "{v}");
         for k in BackdropKind::ALL {
-            assert!(refusal(v, k).is_none(), "{v} {k:?}");
+            assert_eq!(refusal(v, k).is_some(), !TAKERS.contains(&v), "{v} {k:?}");
         }
     }
-    let mut s = BackdropSettings::new(BackdropConfig::default());
-    let err = s.set("starfield", SKY).unwrap_err();
-    assert!(err.contains("starfield refuses sky"), "{err}");
     assert_eq!(
-        s.choice("starfield"),
-        None,
-        "a refused setting changes nothing"
+        takers(),
+        "only inference, training and Wafer Waffler take a backdrop"
     );
-    s.set("starfield", CLOUDS).unwrap();
-    assert_eq!(s.choice("starfield"), CLOUDS);
 }
 
 #[test]
-fn the_key_cycles_off_scene_sky_clouds_and_skips_what_a_view_refuses() {
-    let mut c = None;
+fn a_view_entry_wins_for_a_view_that_takes_one_and_is_ignored_elsewhere() {
+    let cfg = BackdropConfig {
+        default: Some(CLOUDS),
+        views: vec![
+            ("castle", SKY),
+            ("training", None),
+            ("arcade", SCENE),
+            ("die3d", SKY),
+            ("starfield", CLOUDS),
+        ],
+    };
+    assert_eq!(cfg.choice("training"), None, "the sky turned off");
+    assert_eq!(cfg.choice("die3d"), SKY);
+    assert_eq!(cfg.choice("inference"), SCENE, "its own");
+    // A view that takes none: its entry and the default are ignored.
+    for v in ["castle", "arcade", "starfield", "grid"] {
+        assert_eq!(cfg.choice(v), None, "{v}");
+    }
+}
+
+#[test]
+fn a_view_that_takes_no_backdrop_refuses_every_setting() {
+    let mut s = BackdropSettings::new(BackdropConfig::default());
+    for v in VIEWS.iter().filter(|v| !TAKERS.contains(v)) {
+        for c in [None, SCENE, SKY, CLOUDS] {
+            assert_eq!(s.set(v, c), Err(NO_BACKDROP.to_string()), "{v} {c:?}");
+            assert_eq!(s.choice(v), None, "{v}: a refused setting changes nothing");
+        }
+    }
+    s.set("training", CLOUDS).unwrap();
+    assert_eq!(s.choice("training"), CLOUDS);
+}
+
+#[test]
+fn the_key_cycles_off_scene_sky_clouds_where_a_view_takes_one() {
+    let mut s = BackdropSettings::new(BackdropConfig::default());
     let mut seen = Vec::new();
     for _ in 0..4 {
-        c = next_choice("castle", c);
-        seen.push(c);
+        key_message("training", &mut s);
+        seen.push(s.choice("training"));
     }
-    assert_eq!(seen, vec![SCENE, SKY, CLOUDS, None]);
-    assert_eq!(next_choice("starfield", None), CLOUDS);
-    assert_eq!(next_choice("starfield", CLOUDS), None);
+    assert_eq!(seen, vec![CLOUDS, None, SCENE, SKY], "from its own sky");
+    assert_eq!(
+        key_message("die3d", &mut s),
+        "backdrop (Wafer Waffler): off"
+    );
+    // A view that takes none: the message, and nothing changes.
+    for v in VIEWS.iter().filter(|v| !TAKERS.contains(v)) {
+        assert_eq!(key_message(v, &mut s), NO_BACKDROP, "{v}");
+        assert_eq!(s.choice(v), None, "{v}");
+    }
 }
 
 #[test]
@@ -121,8 +141,15 @@ fn the_command_shows_sets_and_refuses() {
         err && msg.contains("expected off, scene, sky or clouds"),
         "{msg}"
     );
-    let (_, err) = command("scene", "starfield", &mut s);
-    assert!(err);
+    // A view that takes none says so for every form, and changes nothing.
+    for arg in ["", "scene", "off", "fog"] {
+        assert_eq!(
+            command(arg, "starfield", &mut s),
+            (NO_BACKDROP.to_string(), false),
+            "{arg:?}"
+        );
+    }
+    assert_eq!(s.choice("starfield"), None);
     // The views' other names.
     assert_eq!(canonical_view("waffler"), Some("die3d"));
     assert_eq!(canonical_view("~"), Some("hivemind"));

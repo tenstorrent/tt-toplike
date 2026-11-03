@@ -426,8 +426,7 @@ tt-toplike --devices 0,2
 | `v` | Cycle visualization mode: Insights → Flow → Starfield → Castle → Arcade → Defrag → Inference → Insights |
 | `a` | Jump directly to Arcade |
 | `{` `}` | In Arcade: the previous and next layout (eight built-in ones, plus any in the config). Also `/arcade layout next\|prev\|<name>\|list` and `--arcade-layout NAME`. See [docs/arcade-layout.md](docs/arcade-layout.md). |
-| `w` | Cycle the backdrop of the view on screen: off, scene, sky, clouds. Every backdrop fills only the cells the view leaves blank. Also `/backdrop off\|scene\|sky\|clouds`, and `/backdrop` alone shows the setting. See [docs/backdrop.md](docs/backdrop.md). |
-| `c` | In Arcade: the arcade's backdrop on or off. On is the layout's own kind (clouds in `now-serving`), else the scene. `w` picks another kind. Also `/arcade cloudfield on\|off`, the old name for the scene. |
+| `w` | In the Inference, Training and Wafer Waffler views: cycle the view's backdrop, off, scene, sky, clouds. A backdrop fills only the cells the view leaves blank. Also `/backdrop off\|scene\|sky\|clouds`, and `/backdrop` alone shows the setting. Other views carry no backdrop and say so. See [docs/backdrop.md](docs/backdrop.md). |
 | `d` | Jump directly to Defrag |
 | `g` | Jump directly to Grid (Insights table) |
 | `i` | Open the Inference Server Monitor from **any** view; `i` while in it jumps to Insights (a quick back-and-forth), `Esc` backs out to where you came from. Also sits at the tail of the `v` cycle. |
@@ -442,9 +441,9 @@ tt-toplike --devices 0,2
 
 Arcade's rows and panels (starfield, castle, flow, defrag, Wafer Waffler, training, inference, each double or triple wide if you like) are set in the `[arcade]` section of `~/.config/tt-toplike/config.toml`, the only config file tt-toplike reads. The arcade also has eight built-in layouts (`classic`, `now-serving`, `defrag-wide`, `waffler`, `workload`, `deck`, `skyline`, `memory-lane`); `}` and `{` step through them and your own `[[arcade.layouts]]`. See [docs/arcade-layout.md](docs/arcade-layout.md). `tt-toplike --check-config` lists every problem in that file with its line, and every layout.
 
-Each view can draw a backdrop behind what it shows: the Inference view's scene (forge, storm, aurora), the Training view's sky, or the Wafer Waffler's clouds, each following real signals. The defaults are the looks each view had. Set them in the `[backdrop]` section of the same file, or with `w` and `/backdrop` at run time. See [docs/backdrop.md](docs/backdrop.md).
+The Inference view, the Training view and the Wafer Waffler each carry a backdrop behind what they show: the scene (forge, storm, aurora), the sky, and the clouds, each following real signals. Each draws its own by default and can be switched to another of the three or off, in the `[backdrop]` section of the same file or with `w` and `/backdrop` at run time. Other views, the arcade among them, carry no backdrop. See [docs/backdrop.md](docs/backdrop.md).
 
-Command bar verbs (type `/` then the verb): `/fps <1–120>`, `/datafps <1–30>`, `/mode <insights\|grid\|starfield\|castle\|flow\|arcade\|defrag>`, `/theme <grayskull\|default>` (bare `/theme` toggles), `/legend` (`l`), `/explain`, `/throttle`, `/idle-on-blur`, `/backdrop [off\|scene\|sky\|clouds]` (`w`), `/arcade cloudfield on\|off` (the scene; `c` in Arcade turns the arcade's backdrop on or off), `/arcade layout next\|prev\|<name>\|list` (`{` `}` in Arcade), `/help` (`?`), `/quit` (`q`).
+Command bar verbs (type `/` then the verb): `/fps <1–120>`, `/datafps <1–30>`, `/mode <insights\|grid\|starfield\|castle\|flow\|arcade\|defrag>`, `/theme <grayskull\|default>` (bare `/theme` toggles), `/legend` (`l`), `/explain`, `/throttle`, `/idle-on-blur`, `/backdrop [off\|scene\|sky\|clouds]` (`w`, in the Inference, Training and Waffler views), `/arcade layout next\|prev\|<name>\|list` (`{` `}` in Arcade), `/help` (`?`), `/quit` (`q`).
 
 **Insights mode only:**
 

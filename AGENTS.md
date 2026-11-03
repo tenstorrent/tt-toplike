@@ -1485,6 +1485,30 @@ the point (and still fun!)", plus renaming Die 3D to a fun name the user liked, 
   speed and density drivers, docs/bus.md's "the other views read what they read before", README's
   "the arcade hero duel reads the local monitor".
 
+### The backdrop only where a view carries one (Nov 2 2026, branch `preview`)
+
+Prompt: "disable the cloud layer behind the arcade mode. only apply it to modules that already
+carry clouds."
+- The shared backdrop applies to the three views with a background of their own: the Inference
+  view (scene), the Training view (sky) and the Wafer Waffler (clouds). Each still takes every
+  kind. Every other view (Insights, Grid, Starfield, Castle, Flow, Arcade, Defrag, `~`) takes
+  none. `backdrop::accepts` is the single table for this; adding a view is one arm. `refusal`,
+  `BackdropConfig::choice`, `BackdropSettings::set`, `command` and `key_message` all read it.
+- The arcade has no backdrop: its `Backdrop`, signals and load scales are gone, and so are the
+  `c` key, `toggled_backdrop`, `apply_backdrop`, `NamedLayout::backdrop` and
+  `ArcadeConfig::cloudfield`. `now-serving` no longer sets clouds. The Die 3D panel in a layout
+  still draws its own clouds.
+- `[arcade] cloudfield` (any value), a layout's `backdrop` or `cloudfield`, `/arcade
+  cloudfield`, `[backdrop.views]` entries for a view that takes none and a `default` other than
+  off are read and ignored with a note, never a problem. `w` and `/backdrop` in a view that
+  takes none say "no backdrop on this view". The legend of such a view has no backdrop line.
+- The 12 `arcade ... cloudfield true` pins went with the arcade's backdrop; the 12 cloudfield-off
+  pins kept their values under new names, and the base grid and every other pin are unchanged.
+  The arcade-only cost measurements (`backdrop_cost`, `backdrop_layer_cost`) went too.
+- Tests: each refusing view draws a byte-identical frame with any setting, after `w` and
+  `/backdrop`, and reads no signal; the three views still draw theirs. Letting the arcade
+  accept in the table turns six tests red.
+
 ### Version history: 0.15.4 (Nov 2 2026)
 
 0.15.4 adds the shared backdrop (`src/animation/backdrop.rs`, `docs/backdrop.md`) and the arcade layout
