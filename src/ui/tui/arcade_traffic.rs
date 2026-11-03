@@ -98,7 +98,6 @@ fn measure(w: u16, h: u16) -> (f64, BTreeMap<String, f64>, f64, f64) {
         w as usize,
         h as usize,
         &crate::animation::arcade_layout::ArcadeConfig {
-            cloudfield: false,
             rows: default_rows(),
         },
     );
