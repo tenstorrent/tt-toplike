@@ -8,7 +8,7 @@
 use super::*;
 use crate::animation::die3d::layout::{DieLayout, TileKind};
 use crate::animation::die3d::test_backend::{chip_key, BusFixture, SEC_NS};
-use tt_toplike_bus::{HeaderKind, Reading};
+use tt_toplike_bus::{HeaderKind, Reading, Value};
 
 /// Two drawn chips, device indices 0 and 1.
 fn two_chips() -> Vec<(usize, EntityKey)> {
@@ -504,7 +504,7 @@ fn coming_back_after_ten_seconds_away_replays_nothing() {
             .all(|c| c.pulses.is_empty() && c.sparks.is_empty()),
         "{o:?}"
     );
-    assert_eq!(st.seen_seq, Some(f.world.seq()));
+    assert_eq!(st.intake.seen_seq(), Some(f.world.seq()));
     // One new event, one frame later: it pulses.
     f.event(Event::RequestsCompleted {
         model: EntityKey::model("m"),
@@ -547,7 +547,7 @@ fn a_world_that_went_back_is_a_first_sight() {
     let mut f = BusFixture::new();
     f.ready("m", "M", &[0], 1.0);
     let mut st = OverlayState::default();
-    st.seen_seq = Some(10_000);
+    st.intake.set_seen_seq(Some(10_000));
     f.event(Event::RequestsCompleted {
         model: EntityKey::model("m"),
         n: 3,
@@ -555,7 +555,7 @@ fn a_world_that_went_back_is_a_first_sight() {
     let now = 5 * SEC_NS;
     let o = Overlay::from_world(&f.view(now), &two_chips(), now, &mut st);
     assert!(o.chips[0].pulses.is_empty());
-    assert_eq!(st.seen_seq, Some(f.world.seq()));
+    assert_eq!(st.intake.seen_seq(), Some(f.world.seq()));
 }
 
 #[test]

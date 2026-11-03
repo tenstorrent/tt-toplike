@@ -72,7 +72,7 @@
 //! last one, and more than four times the usual gap between updates, records
 //! the newest event and draws nothing for it. The rule, the phase memo and
 //! the tokens-per-second smoothing are the shared ones in `bus_intake`
-//! ([`EventIntake`], [`PhaseBook`], [`fresh_tps`], [`smooth_tps`]).
+//! (`EventIntake`, `PhaseBook`, `fresh_tps`, `smooth_tps`).
 //!
 //! # Provenance
 //!

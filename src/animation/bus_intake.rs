@@ -6,10 +6,10 @@
 //! up, and the smoothing of tokens per second.
 //!
 //! This is the one copy of these rules. The arcade (`arcade_bus`, which
-//! Memory Castle and Defrag also read through), the Starfield and MemoryFlow
-//! call [`EventIntake::take`] and [`PhaseBook`]. Die 3D (`die3d::overlay`)
-//! still has its own copy. The tests in `bus_intake_tests.rs` feed one
-//! sequence of worlds to the arcade and to these pieces and assert the same
+//! Memory Castle and Defrag also read through), Die 3D (`die3d::overlay`),
+//! the Starfield and MemoryFlow call [`EventIntake::take`] and
+//! [`PhaseBook`]. The tests in `bus_intake_tests.rs` feed one sequence of
+//! worlds to the arcade, to Die 3D and to these pieces and assert the same
 //! decisions. The rules:
 //!
 //! * The first world, a world whose head went backwards, and an update after
@@ -116,6 +116,31 @@ pub(crate) struct EventIntake {
 }
 
 impl EventIntake {
+    /// A fresh intake whose updates treat an ECC rise under `ecc`. The
+    /// default is [`EccPolicy::SuppressAfterAway`]; Die 3D starts its intake
+    /// with [`EccPolicy::FlashAnyRise`].
+    pub(crate) fn with_ecc(ecc: EccPolicy) -> EventIntake {
+        EventIntake {
+            ecc,
+            ..EventIntake::default()
+        }
+    }
+
+    /// The highest event sequence number handled, `None` before the first
+    /// world.
+    #[cfg(test)]
+    pub(crate) fn seen_seq(&self) -> Option<u64> {
+        self.seen_seq
+    }
+
+    /// Set the highest event sequence number handled, as if a world with
+    /// that head had been read. A test uses it to put the head ahead of the
+    /// next world's.
+    #[cfg(test)]
+    pub(crate) fn set_seen_seq(&mut self, seq: Option<u64>) {
+        self.seen_seq = seq;
+    }
+
     /// The events of `world` this update at bus time `now` may draw.
     pub(crate) fn take(&mut self, world: &dyn WorldRead, now: u64) -> Intake {
         let head = world.seq();

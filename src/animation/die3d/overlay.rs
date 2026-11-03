@@ -38,9 +38,13 @@
 //!   reads it are history and make no pulse. So are events that arrived
 //!   while the view was away: an update more than a pulse lifetime after the
 //!   last one, and more than four times the usual gap between updates,
-//!   records the newest event and draws no pulse or spark for it.
+//!   records the newest event and draws no pulse or spark for it. This rule
+//!   and the phase memo are the shared ones in `bus_intake` (`EventIntake`,
+//!   `PhaseBook`).
 //! * **GDDR rows** read the `dram:<chip>/<n>` entities. An ECC counter that
-//!   rose since the last update, or an `EccTick` event, flashes its row.
+//!   rose since the last update, or an `EccTick` event, flashes its row. A
+//!   rise first seen after being away flashes too: the intake runs under
+//!   `EccPolicy::FlashAnyRise`, where every other bus view suppresses it.
 //! * **Sparks** come from `Spark` events naming a drawn chip and from
 //!   `KernelCompiled` events (purple).
 //!
@@ -53,9 +57,11 @@
 //! says the model is busy and does not say how far). Pulses and sparks mark
 //! events; their shape and decay are decoration.
 
+use crate::animation::arcade_bus::PhaseMemo;
+use crate::animation::bus_intake::{ecc_total, number, EccPolicy, EventIntake, Intake, PhaseBook};
 use crate::bus::signals as sig;
 use std::collections::HashMap;
-use tt_toplike_bus::{EntityKey, Event, ModelPhase, ModelView, Provenance, Value, WorldRead};
+use tt_toplike_bus::{EntityKey, Event, ModelPhase, ModelView, Provenance, WorldRead};
 
 /// The workload colours, one definition shared with `activity_lanes`: load
 /// purple, serve teal, train amber, and the error red stalled work uses
@@ -239,30 +245,16 @@ pub struct Overlay {
     pub chips: Vec<ChipOverlay>,
 }
 
-/// The phase this view last saw a model in, and when it changed to it
-/// (`None` for the phase the model had when first seen).
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct PhaseMemo {
-    phase: ModelPhase,
-    since_ns: Option<u64>,
-}
-
 /// What a view remembers between two [`Overlay::from_world`] calls. Start
 /// with `OverlayState::default()`; drop it (set a new default) when the view
 /// stops reading a world, so the next world is a first sight.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct OverlayState {
-    /// The highest event sequence number handled. `None` before the first
-    /// world.
-    seen_seq: Option<u64>,
-    /// Bus time of the last update. See `Overlay::from_world` for when a
-    /// gap after it makes the next update a first sight.
-    last_now: Option<u64>,
-    /// The time between the last two updates: the usual spacing (the data
-    /// tick, 100 ms by default).
-    last_gap: Option<u64>,
-    /// By model key.
-    phases: HashMap<EntityKey, PhaseMemo>,
+    /// Which events are new, and whether this update is live (the shared
+    /// rule), under Die 3D's ECC policy.
+    intake: EventIntake,
+    /// The phase each model was last seen in.
+    phases: PhaseBook,
     /// By chip key.
     pulses: HashMap<EntityKey, Vec<Pulse>>,
     /// By chip key.
@@ -273,13 +265,18 @@ pub struct OverlayState {
     flashes: HashMap<EntityKey, u64>,
 }
 
-/// A reading's value as a number (`Text` is not one).
-fn number(v: &Value) -> Option<f64> {
-    match v {
-        Value::F64(x) => Some(*x).filter(|x| x.is_finite()),
-        Value::U64(x) => Some(*x as f64),
-        Value::I64(x) => Some(*x as f64),
-        Value::Text(_) => None,
+impl Default for OverlayState {
+    /// A first sight, with the intake under [`EccPolicy::FlashAnyRise`]:
+    /// Die 3D flashes an ECC rise even on the first read after being away.
+    fn default() -> Self {
+        OverlayState {
+            intake: EventIntake::with_ecc(EccPolicy::FlashAnyRise),
+            phases: PhaseBook::default(),
+            pulses: HashMap::new(),
+            sparks: HashMap::new(),
+            ecc: HashMap::new(),
+            flashes: HashMap::new(),
+        }
     }
 }
 
@@ -333,76 +330,48 @@ impl Overlay {
         let drawn = |c: &EntityKey| chips.iter().any(|(_, k)| k == c);
         let models = world.models();
 
-        // Events since the last update. The first world, a world whose head
-        // went backwards (a restarted host), and an update after the view
-        // was away (off screen, or another view shown) are a first sight:
-        // their events are history, and a pulse or spark for them would
-        // show something that is over. "Away" is a gap since the last
-        // update longer than the pulse lifetime and longer than four times
-        // the gap before it, so a slow data tick (`--interval 2000`) still
-        // pulses on every update.
-        let head = world.seq();
-        let gap = prev.last_now.map(|t| now.saturating_sub(t));
-        let away = gap.is_some_and(|g| {
-            g > PULSE_NS
-                && prev
-                    .last_gap
-                    .is_none_or(|usual| g > usual.saturating_mul(4))
-        });
-        prev.last_now = Some(now);
-        if gap.is_some() {
-            prev.last_gap = gap;
-        }
-        let since = prev.seen_seq.filter(|s| *s <= head && !away);
-        let mut seen = head;
-        if let Some(s) = since {
-            for (q, e) in world.events_since(s) {
-                seen = seen.max(q);
-                match e {
-                    Event::RequestsCompleted { model, n } => {
-                        let Some(m) = models.iter().find(|m| m.key == model) else {
-                            continue;
-                        };
-                        for c in m.chips.iter().filter(|c| drawn(c)) {
-                            add_pulse(prev.pulses.entry(c.clone()).or_default(), now, n);
-                        }
+        // Events since the last update, by the shared rule. The first world,
+        // a world whose head went backwards (a restarted host), and an
+        // update after the view was away (off screen, or another view shown)
+        // are a first sight: their events are history, and a pulse or spark
+        // for them would show something that is over. "Away" is a gap since
+        // the last update longer than the pulse lifetime and longer than
+        // four times the gap before it, so a slow data tick
+        // (`--interval 2000`) still pulses on every update.
+        let mut intake = prev.intake.take(world, now);
+        // The events are handed over; the intake keeps its other fields
+        // for the ECC decisions below.
+        for (q, e) in std::mem::take(&mut intake.events) {
+            match e {
+                Event::RequestsCompleted { model, n } => {
+                    let Some(m) = models.iter().find(|m| m.key == model) else {
+                        continue;
+                    };
+                    for c in m.chips.iter().filter(|c| drawn(c)) {
+                        add_pulse(prev.pulses.entry(c.clone()).or_default(), now, n);
                     }
-                    Event::Spark {
-                        chip: Some(c),
-                        kind,
-                    } if drawn(&c) => {
-                        add_spark(prev, c, now, q, spark_rgb(&kind));
-                    }
-                    Event::KernelCompiled { chip: Some(c), .. } if drawn(&c) => {
-                        add_spark(prev, c, now, q, LOAD_PURPLE);
-                    }
-                    Event::EccTick { chip, channel } if drawn(&chip) => {
-                        prev.flashes
-                            .insert(EntityKey::dram_channel(&chip, channel), now);
-                    }
-                    // `ModelLoading` and `ModelReady` are announcements; the
-                    // phase they set is read from the model below.
-                    _ => {}
                 }
+                Event::Spark {
+                    chip: Some(c),
+                    kind,
+                } if drawn(&c) => {
+                    add_spark(prev, c, now, q, spark_rgb(&kind));
+                }
+                Event::KernelCompiled { chip: Some(c), .. } if drawn(&c) => {
+                    add_spark(prev, c, now, q, LOAD_PURPLE);
+                }
+                Event::EccTick { chip, channel } if drawn(&chip) => {
+                    prev.flashes
+                        .insert(EntityKey::dram_channel(&chip, channel), now);
+                }
+                // `ModelLoading` and `ModelReady` are announcements; the
+                // phase they set is read from the model below.
+                _ => {}
             }
         }
-        prev.seen_seq = Some(seen);
 
         // Phases: a change against the last phase seen is timed from now.
-        prev.phases
-            .retain(|k, _| models.iter().any(|m| m.key == *k));
-        for m in &models {
-            let memo = prev.phases.entry(m.key.clone()).or_insert(PhaseMemo {
-                phase: m.phase,
-                since_ns: None,
-            });
-            if memo.phase != m.phase {
-                *memo = PhaseMemo {
-                    phase: m.phase,
-                    since_ns: Some(now),
-                };
-            }
-        }
+        prev.phases.update(&models, now);
 
         let mut out = Overlay::default();
         for (index, key) in chips {
@@ -422,7 +391,7 @@ impl Overlay {
                 s.retain(|s| now.saturating_sub(s.start_ns) < SPARK_NS);
                 co.sparks = s.clone();
             }
-            co.gddr = gddr_of(world, key, now, prev);
+            co.gddr = gddr_of(world, key, now, &intake, prev);
             if !co.is_empty() {
                 out.chips.push(co);
             }
@@ -542,11 +511,13 @@ fn fill_of(m: &ModelView, memo: Option<&PhaseMemo>, now: u64) -> Option<Fill> {
     }
 }
 
-/// The GDDR rows of `chip` that have a per-channel reading or a flash.
+/// The GDDR rows of `chip` that have a per-channel reading or a flash. An
+/// ECC rise flashes its row as `intake`'s policy decides.
 fn gddr_of(
     world: &dyn WorldRead,
     chip: &EntityKey,
     now: u64,
+    intake: &Intake,
     prev: &mut OverlayState,
 ) -> Vec<GddrRow> {
     let mut rows = Vec::new();
@@ -559,23 +530,11 @@ fn gddr_of(
             .fold(None, |m: Option<f64>, t| Some(m.map_or(t, |m| m.max(t))));
         let harvested = num(sig::DRAM_HARVESTED);
         let enabled = num(sig::DRAM_ENABLED);
-        let ecc: Option<u64> = [
-            sig::DRAM_ECC_CORR_RD,
-            sig::DRAM_ECC_CORR_WR,
-            sig::DRAM_ECC_UNCORR_RD,
-            sig::DRAM_ECC_UNCORR_WR,
-        ]
-        .iter()
-        .filter_map(|s| num(s))
-        .fold(None, |sum: Option<u64>, v| {
-            Some(sum.unwrap_or(0).saturating_add(v as u64))
-        });
-        if let Some(total) = ecc {
-            if let Some(old) = prev.ecc.insert(dk.clone(), total) {
-                if total > old {
-                    prev.flashes.insert(dk.clone(), now);
-                }
-            }
+        // The sum of the four ECC counters; a rise since the last read
+        // flashes the row (the first sight of a channel never does).
+        let ecc = ecc_total(world, &dk);
+        if intake.ecc_flashes(world, &dk, &mut prev.ecc) {
+            prev.flashes.insert(dk.clone(), now);
         }
         let flash_ns = prev
             .flashes
