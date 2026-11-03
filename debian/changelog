@@ -9,9 +9,16 @@ tt-toplike (0.16.0) noble; urgency=medium
     shows each line's cause. See docs/saga.md.
   * The same recorded log always tells the same saga. --bus-inspect DIR
     --saga-digest prints its digest, so a recording and a replay of it can
-    be compared.
+    be compared. A live run, a replay of its recording in another TUI and
+    the digest agree: view changes and replay gaps do not count, and the
+    log header records the season length (saga.season_ticks).
+  * Each run starts with its own world: the seed takes every bit of the
+    last 64 readings.
+  * The saga's clock is a chip; if it stops sweeping for three updates,
+    the next chip takes over. A reused --bus-dir starts the saga at this
+    session's first record.
   * [saga] in config.toml: enabled, names ("real" or "generated") and
-    season_minutes.
+    season_minutes. An unknown names value hides names.
   * Monsters, treasure, fights and the saga.* bus events come in phase 2.
     Saga has not been run on real hardware by a person yet.
 

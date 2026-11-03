@@ -85,9 +85,12 @@ ordered stream of records gives the same saga.**
 * **Time is counted in sweeps.** The backend sweeps every chip once per update. The first chip
   whose sweep the saga sees is its clock, and each sweep of that chip is one tick. A season is a
   number of ticks. Only a chip can be the clock: a process scan also sends sweeps, but only every
-  2 seconds. If the clock's chip misses three updates in a row (it went away, or `b` switched the
-  backend and every chip key changed), the next chip to sweep becomes the clock, so there is still
-  one tick per update. The timeout counts updates, never time.
+  2 seconds. If the clock's chip stops sweeping (it went away, or `b` switched the backend and
+  every chip key changed), the saga notices a missed update each time another chip sweeps a second
+  time since the clock last did. After three missed updates the chip that noticed the third becomes
+  the clock, so there is still one tick per update. After a backend switch this takes one update
+  more, because the first update of new keys repeats no chip. The timeout counts updates, never
+  time.
 * **Records about the TUI itself play no part.** A TUI that hosts its bus publishes a `ViewChanged`
   when its first frame is drawn and on every view key, and a replay host publishes a gap at each
   hole it finds in the log. Their positions depend on key presses and timing, so the saga skips
@@ -173,6 +176,10 @@ saga's settings and every problem in the section.
 
 ## Limits
 
+* Any local process can write to the bus. A writer that sends samples for chip keys that sort
+  before the real ones (`chip:0` sorts before `chip:0000:01:00.0`) fills the floors before the
+  real chips: the saga keeps the first 64 chips it sees and a world's first 32 in key order. The
+  cost is bounded, and the dungeon then shows made-up chips.
 * No person has run Saga on real Tenstorrent hardware yet. It has run on the mock backend and on
   recorded fixtures.
 * Generated-name aliasing was checked on the busy fixture only.

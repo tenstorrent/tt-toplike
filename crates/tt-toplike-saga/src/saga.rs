@@ -158,6 +158,14 @@
 //! The scratch buffers (`obs`, `enc`, `world_events`) keep the capacity of
 //! the largest record or event seen so far.
 //!
+//! **Made-up chips.** The caps keep the first chips seen and, in a world,
+//! the first in key order, whatever their source. A local writer that sends
+//! samples for keys that sort before the real chips (`chip:0` sorts before
+//! `chip:0000:01:00.0`) fills the floors before them, and the dungeon then
+//! shows chips that do not exist. Memory and cost stay bounded; keeping the
+//! backend's chips first is left for a later phase (final review finding
+//! M4).
+//!
 //! The entities the saga holds at once are at most 64 kept chips, 64 ready
 //! models and 32 world chips that need not be kept chips: 160, under the
 //! spec's 500 (spec 9).

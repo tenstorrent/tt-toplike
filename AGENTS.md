@@ -2045,7 +2045,8 @@ destroyed and created again. mazes always coming out new. monsters. NPCs. treasu
 storytelling! but all kind of derived from tt-toplike's signal set." Spec:
 `docs/superpowers/specs/2026-11-02-saga-design.md`. Plan: `docs/superpowers/plans/2026-11-02-saga.md`.
 User documentation: `docs/saga.md`. Built subagent-driven, one review per task, with a ledger of
-rulings (R1 to R25) that amended the plan.
+rulings (R1 to R28) that amended the plan, then a final whole-branch review and one fix wave
+(`.superpowers/sdd/2026-11-02-saga/final-review.md` and `final-fix-report.md`).
 
 ### What exists (phase 1)
 
@@ -2063,7 +2064,18 @@ rulings (R1 to R25) that amended the plan.
 
 * The same ordered stream of record contents gives the same saga. Only a record's source and
   payload are read. Sequence numbers and timestamps never reach the core.
-* Time is counted in sweeps (pacemaker ticks). A season is a number of sweeps.
+* Records about the host process take no ordinal and give no observation: records from source
+  `saga`, `ViewChanged` events (a TUI publishes them on its first frame and on view keys) and gaps
+  (a replay host adds one at each hole; a bus adds one for a disk outage). Final review C1.
+* Time is counted in pacemaker ticks. Only a chip sweep can be the pacemaker. After three backend
+  updates without it (counted in sweeps of other chips, never in time) the next chip takes over.
+  A season is a number of ticks. Final review I2.
+* The season in ticks is in the bus header tag `saga.season_ticks`, written by the host that opens
+  the bus and copied by a replay host; the local driver, an attached driver (snapshot `tags`) and
+  `--saga-digest` read it. A log without it uses 12,000. Final review I4.
+* The seed ring holds the whole `to_bits` of the last 64 sample values. Final review I1 (it
+  replaced ruling R26).
+* A local driver starts at `Bus::first_seq`, this bus instance's first record. Final review I3.
 * `crates/tt-toplike-saga/clippy.toml` bans `Instant::now`, `SystemTime::now`, `env::var`,
   `HashMap` and `HashSet` in the library; `tests/fences.rs` checks the fences and the dependency
   list. Use `BTreeMap`/`BTreeSet`, integer arithmetic, and the crate's `Pcg32`.
@@ -2093,6 +2105,9 @@ rulings (R1 to R25) that amended the plan.
 * R23: Grid, Training and the hivemind still keep their own copy of the away rule.
 * R24: the driver starts at TUI start-up unless `[saga] enabled = false`.
 * R25: the driver publishes `stopped`, runs at lowered priority, and the batch-cost doc states the measurement.
+* R26: the seed pool's low byte is always zero for widened `f32` readings (replaced by I1's full-word ring).
+* R27: `--saga-digest` uses the Replay label, so a live mock saga's own digest differs on the same records.
+* R28: one fix wave takes C1, I1 to I4 and the cheap minors; every golden re-pin is deliberate and listed below.
 
 ### Re-pinning the digest goldens
 
@@ -2104,6 +2119,18 @@ values the failure prints, and name the rule that changed in the commit message.
 change means the same log now tells another story, which breaks replay. The view's golden frames
 in `src/ui/tui/saga_view_tests.rs` hash the drawing and follow the same rule. After changing
 `tests/support/busy.rs`, regenerate the fixture with the ignored test `write_busy_fixture`.
+
+Re-pins so far (the final fix wave, Nov 2 2026). Each was made in the commit of the change that
+moved it, and each diff is explained by that change:
+
+| Commit | Change | Moved |
+|---|---|---|
+| `fix(saga): ViewChanged events and gaps take no ordinal` | C1 | `busy.jsonl` (both modes): it holds one `ViewChanged`, at record 1,506. All 8 view frames: both cut points come after it. `quiet` and `bringup` hold none. |
+| `fix(saga): the seed ring keeps each value's whole 64-bit pattern` | I1 | `quiet.jsonl` and `busy.jsonl` (both modes) and all 8 view frames: every world seed changed. `bringup.jsonl` births no world and did not move. |
+| the I2, I3 and I4 commits | pacemaker, first record, season tag | nothing: the fixtures sweep only chips and never lose the pacemaker, the core tests feed records directly, and the fixtures carry no season tag. |
+
+Pinned now: `quiet.jsonl` 0x42ae3da4810092ce (both modes), `bringup.jsonl` 0xffa0c7d46fb3aae2 (both),
+`busy.jsonl` 0xc704fe05f6f97267 (real) and 0xc49371dd78c6084b (generated).
 
 ### Checking the contract with the binary
 

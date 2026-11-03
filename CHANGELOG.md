@@ -24,8 +24,20 @@ list is a summary and is not kept for every release.
   training run or a quiet season ends a world, and the next one has a new maze. The chronicle tells what
   happens, and `y` shows each line's cause. See `docs/saga.md`.
 - The same recorded log always tells the same saga. `--bus-inspect DIR --saga-digest` prints its digest,
-  so a recording and a replay of it can be compared.
-- `[saga]` in `config.toml`: `enabled`, `names = "real" | "generated"` and `season_minutes`.
+  so a recording and a replay of it can be compared. A live run, a replay of its recording in another TUI
+  (whatever keys that TUI's user presses) and the digest agree: the saga skips the `ViewChanged` records a
+  TUI publishes about itself and the gaps a replay host adds, and the season length is recorded in the
+  log header (`saga.season_ticks`) so every reader uses the recording host's season.
+- Each run starts with its own world: the seed takes every bit of the last 64 readings.
+- The saga's clock is a chip. If that chip stops sweeping for three backend updates (it went away, or `b`
+  switched the backend), the next chip to sweep takes over.
+- A TUI that reuses a `--bus-dir` or `--record` directory starts its saga at its own first record; the
+  earlier sessions in the directory are not replayed into the story.
+- `[saga]` in `config.toml`: `enabled`, `names = "real" | "generated"` and `season_minutes`. An unknown
+  `names` value is reported and hides names.
+- The bus snapshot reply carries every header tag in a new `tags` object (`docs/bus.md`).
+- The three saga digest goldens and the saga view's golden frames were re-pinned in the final fix wave:
+  `busy.jsonl` holds a `ViewChanged`, and every world seed changed with the new seed rule (`AGENTS.md`).
 - Monsters, treasure, fights and the `saga.*` bus events come in phase 2. Saga has not been run on real
   hardware by a person yet.
 
