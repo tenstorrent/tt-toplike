@@ -1,0 +1,17 @@
+# Fences for the saga core (see src/lib.rs). The core must give the same saga
+# for the same ordered stream of record contents, so anything that reads the
+# clock, the environment, or hash order is banned here. clippy reads this file
+# when run with `-p tt-toplike-saga` because it sits in the crate directory.
+# Tests may use these (tests/fences.rs uses std::fs); the lints apply to
+# `cargo clippy` on the library target, as CI runs it.
+
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "wall clocks break determinism; the core's clock is the pacemaker count" },
+    { path = "std::time::SystemTime::now", reason = "wall clocks break determinism; the core's clock is the pacemaker count" },
+    { path = "std::env::var", reason = "the environment must not influence a saga" },
+]
+
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order varies between runs; use BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order varies between runs; use BTreeSet" },
+]

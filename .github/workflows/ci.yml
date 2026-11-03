@@ -42,6 +42,12 @@ jobs:
       - name: Test signal bus crate
         run: cargo test --locked -p tt-toplike-bus
 
+      - name: Clippy (saga crate, zero warnings)
+        run: cargo clippy --locked -p tt-toplike-saga -- -D warnings
+
+      - name: Test saga crate
+        run: cargo test --locked -p tt-toplike-saga
+
       - name: Build TUI binary (zero warnings)
         run: cargo build --locked --bin tt-toplike-tui --features tui
         env:
@@ -76,6 +82,10 @@ jobs:
       # explicit check names the crate if it breaks.
       - name: Check signal bus crate
         run: cargo check --locked -p tt-toplike-bus
+
+      # The saga core is pure Rust with no platform code; it must build here too.
+      - name: Check saga crate
+        run: cargo check --locked -p tt-toplike-saga
 
       - name: Build TUI binary (zero warnings)
         run: cargo build --locked --bin tt-toplike-tui --no-default-features --features tui,json-backend

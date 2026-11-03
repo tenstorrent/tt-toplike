@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/tt-toplike-bus"]
+members = ["crates/tt-toplike-bus", "crates/tt-toplike-saga"]
 
 [package]
 name = "tt-toplike"
