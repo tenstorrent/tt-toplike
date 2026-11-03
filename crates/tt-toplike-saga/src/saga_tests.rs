@@ -555,3 +555,168 @@ fn a_model_that_goes_away_takes_its_sage_hook_with_it() {
         .any(|e| matches!(e, SagaEvent::QuestDone { .. })));
     assert!(saga.hooks.iter().all(|h| h.target.as_ref() != Some(&sage)));
 }
+
+/// One event of each variant. The match in
+/// `every_event_variant_has_its_own_tag` has no wildcard, so a new variant
+/// does not compile until it is listed there and given a tag.
+fn one_of_each() -> Vec<SagaEvent> {
+    let cause = Cause {
+        entity: chip_a(),
+        signal: "s".to_string(),
+        ordinal: 1,
+    };
+    vec![
+        SagaEvent::WorldBorn {
+            world: 1,
+            biome: Biome::Dungeon,
+        },
+        SagaEvent::WorldEnded {
+            world: 1,
+            why: EndWhy::Season,
+        },
+        SagaEvent::HeroBorn {
+            world: 1,
+            name: "n".to_string(),
+            floor: 0,
+        },
+        SagaEvent::QuestStarted {
+            world: 1,
+            verb: Verb::Rest,
+            target: None,
+            reason: cause.clone(),
+        },
+        SagaEvent::QuestDone {
+            world: 1,
+            verb: Verb::Rest,
+        },
+        SagaEvent::Beat {
+            world: 1,
+            tone: Tone::Calm,
+            text: "t".to_string(),
+            cause,
+        },
+    ]
+}
+
+#[test]
+fn every_event_variant_has_its_own_tag() {
+    let mut seen = Vec::new();
+    for ev in one_of_each() {
+        // The module comment's table, written out again.
+        let table = match &ev {
+            SagaEvent::WorldBorn { .. } => 0x01,
+            SagaEvent::WorldEnded { .. } => 0x02,
+            SagaEvent::HeroBorn { .. } => 0x03,
+            SagaEvent::QuestStarted { .. } => 0x04,
+            SagaEvent::QuestDone { .. } => 0x05,
+            SagaEvent::Beat { .. } => 0x06,
+        };
+        assert_eq!(event_tag(&ev), table, "{ev:?}");
+        seen.push(table);
+    }
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), seen.len(), "two variants share a tag");
+    for other in [TAG_SEED, TAG_LINE, TAG_END] {
+        assert!(!seen.contains(&other), "an event tag equals a stream tag");
+    }
+}
+
+#[test]
+fn the_digest_encoding_matches_a_hand_written_byte_string() {
+    // Ruling R19: the digest hashes an explicit byte encoding. The bytes
+    // below are written out by hand from the module comment's table; the
+    // expected digest is FNV-1a 64 of them, from the helper that
+    // `fnv1a_matches_the_published_vectors` checks.
+    let events = [
+        (
+            5u64,
+            SagaEvent::WorldBorn {
+                world: 1,
+                biome: Biome::Forge,
+            },
+        ),
+        (
+            6,
+            SagaEvent::QuestStarted {
+                world: 1,
+                verb: Verb::VisitSage,
+                target: Some(EntityKey::model("ab")),
+                reason: Cause {
+                    entity: EntityKey::model("ab"),
+                    signal: "ModelReady".to_string(),
+                    ordinal: 3,
+                },
+            },
+        ),
+        (
+            7,
+            SagaEvent::QuestDone {
+                world: 1,
+                verb: Verb::Rest,
+            },
+        ),
+        (
+            300,
+            SagaEvent::Beat {
+                world: 1,
+                tone: Tone::Tense,
+                text: "hi".to_string(),
+                cause: Cause {
+                    entity: EntityKey::chip("x"),
+                    signal: "t".to_string(),
+                    ordinal: 258,
+                },
+            },
+        ),
+    ];
+    let mut hand: Vec<u8> = Vec::new();
+    // WorldBorn: tag, tick 5, world 1, Forge.
+    hand.extend_from_slice(&[0x01, 5, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1]);
+    // QuestStarted: tag, tick 6, world 1, VisitSage, target present
+    // "model:ab", reason "model:ab" / "ModelReady" / ordinal 3.
+    hand.extend_from_slice(&[0x04, 6, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 2, 1]);
+    hand.extend_from_slice(&[8, 0, 0, 0]);
+    hand.extend_from_slice(b"model:ab");
+    hand.extend_from_slice(&[8, 0, 0, 0]);
+    hand.extend_from_slice(b"model:ab");
+    hand.extend_from_slice(&[10, 0, 0, 0]);
+    hand.extend_from_slice(b"ModelReady");
+    hand.extend_from_slice(&[3, 0, 0, 0, 0, 0, 0, 0]);
+    // QuestDone: tag, tick 7, world 1, Rest.
+    hand.extend_from_slice(&[0x05, 7, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1]);
+    // Beat: tag, tick 300 (0x012c), world 1, Tense, "hi", cause "chip:x" /
+    // "t" / ordinal 258 (0x0102).
+    hand.extend_from_slice(&[
+        0x06, 0x2c, 0x01, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1,
+    ]);
+    hand.extend_from_slice(&[2, 0, 0, 0]);
+    hand.extend_from_slice(b"hi");
+    hand.extend_from_slice(&[6, 0, 0, 0]);
+    hand.extend_from_slice(b"chip:x");
+    hand.extend_from_slice(&[1, 0, 0, 0]);
+    hand.extend_from_slice(b"t");
+    hand.extend_from_slice(&[0x02, 0x01, 0, 0, 0, 0, 0, 0]);
+
+    // The encoder writes exactly these bytes.
+    let mut encoded = Vec::new();
+    for (tick, ev) in &events {
+        encode_event(&mut encoded, *tick, ev);
+    }
+    assert_eq!(encoded, hand);
+
+    // Through the saga: emit the events at their ticks, with nothing else
+    // in the stream. The digest then ends with the end item: tag 0x30, the
+    // placeholder world's seed 0, and the hero's floor and cell.
+    let mut saga = Saga::new(config(NameMode::Real, Label::Live));
+    for (tick, ev) in events {
+        saga.state.tick = tick;
+        saga.emit(ev);
+    }
+    let (x, y) = saga.state.hero.pos;
+    hand.push(0x30);
+    hand.extend_from_slice(&[0; 8]);
+    hand.extend_from_slice(&[saga.state.hero.floor, x, y]);
+    assert_eq!(saga.digest(), crate::seed::fnv1a64(&hand));
+}

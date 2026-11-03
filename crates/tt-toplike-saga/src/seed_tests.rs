@@ -103,3 +103,10 @@ fn pushed_counts_only_samples() {
     // The count keeps going past the ring's length.
     assert_eq!(p.pushed(), 70);
 }
+
+#[test]
+fn extending_a_hash_equals_hashing_the_joined_bytes() {
+    use crate::seed::fnv1a64_extend;
+    assert_eq!(fnv1a64_extend(fnv1a64(b"foo"), b"bar"), fnv1a64(b"foobar"));
+    assert_eq!(fnv1a64_extend(fnv1a64(b""), b"a"), 0xaf63_dc4c_8601_ec8c);
+}

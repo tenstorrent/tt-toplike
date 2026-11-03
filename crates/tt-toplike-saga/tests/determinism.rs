@@ -114,9 +114,9 @@ fn renumbered_and_retimed_records_give_the_same_digest() {
 #[test]
 fn a_snapshot_of_the_digests_matches() {
     let golden: [(&str, u64, u64); 3] = [
-        ("quiet.jsonl", 0xf8b2d7d6ff73eaa8, 0xf8b2d7d6ff73eaa8),
-        ("bringup.jsonl", 0xe06ca19a1295002d, 0xe06ca19a1295002d),
-        ("busy.jsonl", 0x58fd37ddc51342e9, 0x4cade946337512e2),
+        ("quiet.jsonl", 0x6c67306276c306f4, 0x6c67306276c306f4),
+        ("bringup.jsonl", 0xffa0c7d46fb3aae2, 0xffa0c7d46fb3aae2),
+        ("busy.jsonl", 0xdadaf6bc34cc12cc, 0xc6b86da5892118a4),
     ];
     let mut actual = Vec::new();
     for (name, _, _) in golden {

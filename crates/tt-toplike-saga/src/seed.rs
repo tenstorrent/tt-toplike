@@ -29,7 +29,15 @@ const FNV_PRIME: u64 = 1_099_511_628_211;
 /// against the published test vectors. The world lifecycle also uses it to
 /// hash a chip key into that chip's floor seed.
 pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = FNV_OFFSET;
+    fnv1a64_extend(FNV_OFFSET, bytes)
+}
+
+/// Continues an FNV-1a 64 hash: `hash` is the value after some bytes, and
+/// the result is the hash of those bytes followed by `bytes`. So
+/// `fnv1a64_extend(fnv1a64(a), b) == fnv1a64(a ++ b)`. The saga's digest
+/// uses it to hash a stream without keeping the stream.
+pub(crate) fn fnv1a64_extend(hash: u64, bytes: &[u8]) -> u64 {
+    let mut hash = hash;
     for &b in bytes {
         hash ^= u64::from(b);
         hash = hash.wrapping_mul(FNV_PRIME);

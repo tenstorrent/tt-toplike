@@ -118,13 +118,43 @@
 //!
 //! # The digest
 //!
-//! [`Saga::digest`] is FNV-1a 64 chained over every world seed and every
-//! event the saga has raised, each with the tick at which it was raised (the
-//! tick in decimal, a space, then the `Debug` form of the [`SagaEvent`]),
-//! then over the text of every line still in the chronicle, the current
-//! world's seed and the hero's cell. The tick is included because the events
+//! [`Saga::digest`] is FNV-1a 64 over one byte stream, written by hand so
+//! that it is the same on every platform and compiler (ledger ruling R19).
+//! No `Debug` output is hashed. The stream is a sequence of items, each
+//! starting with a one-byte tag:
+//!
+//! | Tag | Item | Fields after the tag, in order |
+//! |---|---|---|
+//! | `0x01` | `WorldBorn` event | tick, world, biome |
+//! | `0x02` | `WorldEnded` event | tick, world, why |
+//! | `0x03` | `HeroBorn` event | tick, world, name, floor |
+//! | `0x04` | `QuestStarted` event | tick, world, verb, target, reason |
+//! | `0x05` | `QuestDone` event | tick, world, verb |
+//! | `0x06` | `Beat` event | tick, world, tone, text, cause |
+//! | `0x10` | a world's seed, at its birth (before its `WorldBorn`) | seed |
+//! | `0x20` | one chronicle line, oldest first (only in [`Saga::digest`]) | text |
+//! | `0x30` | the end (only in [`Saga::digest`]) | current world seed, hero floor, hero x, hero y |
+//!
+//! Field encodings:
+//!
+//! * `tick`, `world`, `seed` and ordinals: `u64`, 8 bytes little-endian.
+//! * `floor`, hero x and y: one byte.
+//! * strings and entity keys: the UTF-8 length as a `u32`, 4 bytes
+//!   little-endian, then the UTF-8 bytes.
+//! * an `Option`: one presence byte (0 absent, 1 present), then the value
+//!   when present.
+//! * a cause: entity key, signal string, ordinal.
+//! * an `f32` (none yet; phase 2 intensities): `to_bits()`, 4 bytes
+//!   little-endian.
+//! * enums, one byte: biome Dungeon 0, Forge 1, Dream 2; why ModelDown 0,
+//!   Reset 1, Season 2, HeroDied 3, Superseded 4, RunEnded 5; verb Explore 0,
+//!   Rest 1, VisitSage 2, Slay 3, Escort 4, Cleanse 5, Rebuild 6; tone Calm 0,
+//!   Tense 1, Triumphant 2.
+//!
+//! The tags and codes are part of the golden digests: change one only on
+//! purpose, and re-pin. The tick is in every event because the events
 //! themselves carry none: without it, a hero that walked one tick slower
-//! would give the same digest. Draining events does not change it.
+//! would give the same digest. Draining events does not change the digest.
 
 use std::collections::BTreeMap;
 
@@ -143,7 +173,7 @@ use crate::observe::{Feed, Observation};
 use crate::pack::Pack;
 use crate::quest::{plan, Hook, Quest, Verb, REST_BELOW};
 use crate::rng::Pcg32;
-use crate::seed::{fnv1a64, SeedPool};
+use crate::seed::{fnv1a64, fnv1a64_extend, SeedPool};
 use crate::stats::TrailBook;
 use crate::topology::{Arch, FloorSpec};
 use crate::world::{Lifecycle, World, NO_CHIP};
@@ -258,8 +288,11 @@ pub struct Saga {
     wrote_first: bool,
     /// Events raised and not yet drained.
     events: Vec<SagaEvent>,
-    /// The running digest of world seeds and events.
+    /// The FNV-1a 64 state after the digest stream so far: world seeds and
+    /// events (see "The digest" in the module comment).
     trace: u64,
+    /// Scratch buffer for the digest's encoding.
+    enc: Vec<u8>,
     /// Scratch buffers, kept to avoid an allocation per record.
     obs: Vec<Observation>,
     world_events: Vec<SagaEvent>,
@@ -307,6 +340,7 @@ impl Saga {
             wrote_first: false,
             events: Vec::new(),
             trace: fnv1a64(&[]),
+            enc: Vec::new(),
             obs: Vec::new(),
             world_events: Vec::new(),
             state: SagaState {
@@ -359,12 +393,19 @@ impl Saga {
     /// comment.
     pub fn digest(&self) -> u64 {
         let mut h = self.trace;
+        let mut buf = Vec::new();
         for beat in self.state.chronicle.lines(CAPACITY) {
-            h = chain(h, beat.text.as_bytes());
+            buf.clear();
+            buf.push(TAG_LINE);
+            put_str(&mut buf, &beat.text);
+            h = fnv1a64_extend(h, &buf);
         }
-        h = chain(h, &self.state.world.seed.to_le_bytes());
+        buf.clear();
+        buf.push(TAG_END);
+        put_u64(&mut buf, self.state.world.seed);
         let (x, y) = self.state.hero.pos;
-        chain(h, &[self.state.hero.floor, x, y])
+        buf.extend_from_slice(&[self.state.hero.floor, x, y]);
+        fnv1a64_extend(h, &buf)
     }
 
     /// One observation, in the order the module comment gives.
@@ -597,7 +638,12 @@ impl Saga {
         let Some(world) = self.life.world().cloned() else {
             return;
         };
-        self.trace = chain(self.trace, &world.seed.to_le_bytes());
+        let mut buf = std::mem::take(&mut self.enc);
+        buf.clear();
+        buf.push(TAG_SEED);
+        put_u64(&mut buf, world.seed);
+        self.trace = fnv1a64_extend(self.trace, &buf);
+        self.enc = buf;
         self.plan_rng = Pcg32::new(world.seed, PLAN_STREAM);
         self.story_rng = Pcg32::new(world.seed, CHRONICLE_STREAM);
         self.dwell_until = None;
@@ -824,19 +870,151 @@ impl Saga {
 
     /// Raises an event and folds it into the digest.
     fn emit(&mut self, ev: SagaEvent) {
-        let line = format!("{} {ev:?}", self.state.tick);
-        self.trace = chain(self.trace, line.as_bytes());
+        let mut buf = std::mem::take(&mut self.enc);
+        buf.clear();
+        encode_event(&mut buf, self.state.tick, &ev);
+        self.trace = fnv1a64_extend(self.trace, &buf);
+        self.enc = buf;
         self.events.push(ev);
     }
 }
 
-/// The digest's chaining step: FNV-1a 64 over the previous hash's bytes
-/// followed by `bytes`.
-fn chain(h: u64, bytes: &[u8]) -> u64 {
-    let mut buf = Vec::with_capacity(8 + bytes.len());
-    buf.extend_from_slice(&h.to_le_bytes());
-    buf.extend_from_slice(bytes);
-    fnv1a64(&buf)
+// ---------------------------------------------------------------------------
+// The digest's byte encoding. See "The digest" in the module comment for the
+// table; every match below lists every variant, so a new variant does not
+// compile until it has a code.
+// ---------------------------------------------------------------------------
+
+/// Stream tag of a world seed.
+const TAG_SEED: u8 = 0x10;
+/// Stream tag of a chronicle line.
+const TAG_LINE: u8 = 0x20;
+/// Stream tag of the digest's last item.
+const TAG_END: u8 = 0x30;
+
+/// The one-byte tag of an event.
+fn event_tag(ev: &SagaEvent) -> u8 {
+    match ev {
+        SagaEvent::WorldBorn { .. } => 0x01,
+        SagaEvent::WorldEnded { .. } => 0x02,
+        SagaEvent::HeroBorn { .. } => 0x03,
+        SagaEvent::QuestStarted { .. } => 0x04,
+        SagaEvent::QuestDone { .. } => 0x05,
+        SagaEvent::Beat { .. } => 0x06,
+    }
+}
+
+/// Appends one event item: its tag, the tick, then its fields in the
+/// table's order.
+fn encode_event(out: &mut Vec<u8>, tick: u64, ev: &SagaEvent) {
+    out.push(event_tag(ev));
+    put_u64(out, tick);
+    match ev {
+        SagaEvent::WorldBorn { world, biome } => {
+            put_u64(out, *world);
+            out.push(biome_code(*biome));
+        }
+        SagaEvent::WorldEnded { world, why } => {
+            put_u64(out, *world);
+            out.push(why_code(*why));
+        }
+        SagaEvent::HeroBorn { world, name, floor } => {
+            put_u64(out, *world);
+            put_str(out, name);
+            out.push(*floor);
+        }
+        SagaEvent::QuestStarted {
+            world,
+            verb,
+            target,
+            reason,
+        } => {
+            put_u64(out, *world);
+            out.push(verb_code(*verb));
+            match target {
+                Some(key) => {
+                    out.push(1);
+                    put_str(out, key.as_str());
+                }
+                None => out.push(0),
+            }
+            put_cause(out, reason);
+        }
+        SagaEvent::QuestDone { world, verb } => {
+            put_u64(out, *world);
+            out.push(verb_code(*verb));
+        }
+        SagaEvent::Beat {
+            world,
+            tone,
+            text,
+            cause,
+        } => {
+            put_u64(out, *world);
+            out.push(tone_code(*tone));
+            put_str(out, text);
+            put_cause(out, cause);
+        }
+    }
+}
+
+/// 8 bytes, little-endian.
+fn put_u64(out: &mut Vec<u8>, v: u64) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+/// A `u32` little-endian byte length, then the UTF-8 bytes. Saga text is
+/// far shorter than 4 GB; a longer string would record `u32::MAX`.
+fn put_str(out: &mut Vec<u8>, s: &str) {
+    let len = u32::try_from(s.len()).unwrap_or(u32::MAX);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(s.as_bytes());
+}
+
+/// Entity key, signal, ordinal.
+fn put_cause(out: &mut Vec<u8>, c: &Cause) {
+    put_str(out, c.entity.as_str());
+    put_str(out, &c.signal);
+    put_u64(out, c.ordinal);
+}
+
+fn biome_code(b: Biome) -> u8 {
+    match b {
+        Biome::Dungeon => 0,
+        Biome::Forge => 1,
+        Biome::Dream => 2,
+    }
+}
+
+fn why_code(w: EndWhy) -> u8 {
+    match w {
+        EndWhy::ModelDown => 0,
+        EndWhy::Reset => 1,
+        EndWhy::Season => 2,
+        EndWhy::HeroDied => 3,
+        EndWhy::Superseded => 4,
+        EndWhy::RunEnded => 5,
+    }
+}
+
+fn verb_code(v: Verb) -> u8 {
+    match v {
+        Verb::Explore => 0,
+        Verb::Rest => 1,
+        Verb::VisitSage => 2,
+        Verb::Slay => 3,
+        Verb::Escort => 4,
+        Verb::Cleanse => 5,
+        Verb::Rebuild => 6,
+    }
+}
+
+fn tone_code(t: Tone) -> u8 {
+    match t {
+        Tone::Calm => 0,
+        Tone::Tense => 1,
+        Tone::Triumphant => 2,
+    }
 }
 
 /// A model key's id as a [`RealName`]: `model:demo-sage` gives `demo-sage`.
