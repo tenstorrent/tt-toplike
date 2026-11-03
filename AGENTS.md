@@ -2136,6 +2136,10 @@ Pinned now: `quiet.jsonl` 0x42ae3da4810092ce (both modes), `bringup.jsonl` 0xffa
 
 Record a `--headless --mock` run (without `--mock-workloads`), print `--bus-inspect DIR
 --saga-digest`, replay the recording into a second directory with `--replay`, and print the
-digest of that one. The two digests must match. For 0.16.0, a 12-second mock recording (6,813
-records, 360 sweeps) printed `saga digest: 0x1ec90317adb4fa0a` (1 world, 6 beats) twice, and its
-replay at `--speed 50` into a second directory, with new times, printed the same line.
+digest of that one. The two digests must match. Then record a second session the same way: its
+digest must differ, or the seed is not taking the readings. After the final fix wave, a 12-second
+mock recording (6,813 records, 360 sweeps, header `saga.season_ticks` 12000) printed
+`saga digest: 0x0b5598cead3a912f` (1 world, 7 beats) twice; its replay at `--speed 50` into a second
+directory (span 0.235 s against 11.928 s) printed the same line; a second 12-second recording printed
+`0xd08fc863b012c28e`. Before the fix wave two separate recordings both printed
+`0x1ec90317adb4fa0a` (ruling R26).

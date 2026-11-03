@@ -105,15 +105,16 @@ and prints its digest, a hash of every world seed, every event and the chronicle
 
 ```
 $ tt-toplike-tui --bus-inspect /var/tmp/run1 --saga-digest
-saga digest: 0x1ec90317adb4fa0a
-worlds born: 1, beats written: 6, records: 6813 (skipped 0 bad lines), holes: 0
+saga digest: 0x0b5598cead3a912f
+worlds born: 1, beats written: 7, records: 6813 (skipped 0 bad lines), holes: 0
 ```
 
 That output is from a 12-second `--headless --mock` recording. The digest uses the replay label,
 real names and the season the log's header records (see "Config"), so the reader's own config does
 not change it.
 Record a run, replay it into a second recording with `--replay`, and the two recordings print the
-same digest. A live saga labels its first line "(mock)" or not at all, and the digest's saga
+same digest. A second recording of the same length printed `0xd08fc863b012c28e`: each run starts
+with its own world. A live saga labels its first line "(mock)" or not at all, and the digest's saga
 labels it "(replay)", so a live saga's own digest differs from this one on the same records. Exit
 status: 0 when the digest was printed (or the output was a closed pipe), 1 when the log cannot be
 read or the output fails.
