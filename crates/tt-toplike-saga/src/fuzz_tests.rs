@@ -331,6 +331,17 @@ fn a_step_stays_under_a_million_work_units() {
 /// change and the quiet stretch.
 const PARTY_TICKS: u64 = 1300;
 
+/// The most work units one record of the 32-chip party log may cost when it
+/// is not a birth. Measured in Task A.5: 10,854 at worst (one tick in which
+/// members replan together). The bound is about 3x that, rounded up.
+const PARTY_STEADY_RECORD: u64 = 33_000;
+
+/// The most work units a tick of the 32-chip party log may cost on average,
+/// the records of one tick added up, births included. Measured in Task A.5:
+/// 390.7. The bound is about 3x that, rounded up. A party that replans every
+/// member on every tick costs thousands of units per tick, far above it.
+const PARTY_TICK_MEAN: f64 = 1_200.0;
+
 /// Every record of the 32-chip party log costs under a million work units,
 /// birth included (the party addendum, section 3.7). A party of 32 steps
 /// every member on every tick, so this is the budget at the largest party
@@ -339,6 +350,22 @@ const PARTY_TICKS: u64 = 1300;
 /// A member's step along its path is not a work unit: it moves one cell and
 /// costs the same at any floor size. What a party adds per tick shows up as
 /// A* expansions (each member replans when its quest ends) and events.
+///
+/// The million-unit budget is far above what this log costs, so the test
+/// also holds the log to its measured shape, with about 3x headroom: the
+/// worst record that is not a birth stays under [`PARTY_STEADY_RECORD`] and
+/// the mean per tick under [`PARTY_TICK_MEAN`]. These catch a regression in
+/// replanning or in per-member work long before the budget would. Each
+/// birth's maze cells equal the sum of its floors' areas, so a floor
+/// generated twice is an exact mismatch.
+///
+/// The log's floors are the generic and Blackhole sizes, about 2,000 cells
+/// each, so its 32-floor birth costs about 64,500 units, 6.5% of the
+/// budget. A birth of 32 floors at the grid limit (120 x 60) would cost
+/// about 230,000 cells. No record of the generator can ask for floors that
+/// large (floor sizes come from the chip's architecture), so that case is
+/// covered by the structural bound in
+/// `a_step_stays_under_a_million_work_units`.
 ///
 /// The test prints the worst birth record, the worst record that is not a
 /// birth, the mean of the records that are not births, and the worst and
@@ -365,6 +392,19 @@ fn a_record_costs_under_a_million_units_with_32_chips() {
         }
         if u.cells > 0 {
             births += 1;
+            // One maze per floor of the world just born, each generated once.
+            let areas: u64 = saga
+                .state
+                .world
+                .floors
+                .iter()
+                .map(|f| u64::from(f.w) * u64::from(f.h))
+                .sum();
+            assert_eq!(
+                u.cells, areas,
+                "record {i}: the birth generated {} cells for floors of {areas} cells",
+                u.cells
+            );
         } else {
             steady_total += u.total();
             steady_records += 1;
@@ -379,6 +419,7 @@ fn a_record_costs_under_a_million_units_with_32_chips() {
         .max_by_key(|(_, u)| **u)
         .map_or((0, 0), |(t, u)| (*t, *u));
     let tick_total: u64 = per_tick.values().sum();
+    let tick_mean = tick_total as f64 / per_tick.len().max(1) as f64;
     eprintln!(
         "32 chips, {} records, {births} births: worst record {at}: {units:?} = {} units; \
          worst record that is not a birth {}: {:?} = {} units; mean of the others {:.1} \
@@ -389,12 +430,23 @@ fn a_record_costs_under_a_million_units_with_32_chips() {
         worst_steady.0,
         worst_steady.0.total(),
         steady_total as f64 / steady_records.max(1) as f64,
-        tick_total as f64 / per_tick.len().max(1) as f64,
+        tick_mean,
     );
     assert!(
         units.total() < BUDGET,
         "record {at} of the 32-chip log cost {units:?} = {} units",
         units.total()
+    );
+    assert!(
+        worst_steady.0.total() < PARTY_STEADY_RECORD,
+        "record {} of the 32-chip log is not a birth and cost {:?} = {} units",
+        worst_steady.1,
+        worst_steady.0,
+        worst_steady.0.total()
+    );
+    assert!(
+        tick_mean < PARTY_TICK_MEAN,
+        "the 32-chip log cost {tick_mean:.1} units per tick on average"
     );
     // The log reached the party this test is about: the worst record is a
     // birth of 32 floors, and the saga ends with 32 members.

@@ -272,11 +272,16 @@
 //! lazy. A step along a path moves one cell, so it is not counted as a work
 //! unit; a member that ends a quest replans with one A* search, which is.
 //! On the 32-chip party log (1,300 ticks, about 50,000 records), the worst
-//! record is a 32-floor birth at 64,520 units. The worst record that is not
-//! a birth is about 10,900 units (members replanning at once), and the mean
-//! of those records is about 6 units, or about 400 units per tick. The test
+//! record is a 32-floor birth at 64,520 units, 6.5% of the budget. That log
+//! has the generic and Blackhole floor sizes, about 2,000 cells each. A
+//! birth of 32 floors at the grid limit (120 x 60) would cost about 230,000
+//! cells, still under the budget. The worst record that is not a birth is
+//! about 10,900 units (members replanning at once), and the mean of those
+//! records is about 6 units, or about 400 units per tick. The test
 //! `a_record_costs_under_a_million_units_with_32_chips` in
-//! `src/fuzz_tests.rs` measures these numbers and checks the budget.
+//! `src/fuzz_tests.rs` measures these numbers. It checks the budget, and it
+//! also holds the log to about 3x its measured steady cost, so a regression
+//! in replanning fails it long before the budget would.
 //!
 //! **Cost of a snapshot.** A world's floors never change during its life,
 //! so [`World::floors`] is an `Arc<[Floor]>`. Cloning the state, which the
