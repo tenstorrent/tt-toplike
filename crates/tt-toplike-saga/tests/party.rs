@@ -886,9 +886,17 @@ fn the_states_portals_mirror_the_link_table() {
     let records = support::read_fixture("cross4.jsonl");
     let mut s = saga(NameMode::Real);
     let (mut closed_seen, mut open_seen) = (false, false);
+    // Worlds that ended while some portal was bound: the next world's list
+    // must be its own floors' portals, checked below like every other.
+    let (mut world, mut ended_bound) = (0, 0);
+    let mut bound_before = false;
     for r in &records {
         s.feed(r);
         let state = s.state();
+        if state.world.id != world {
+            world = state.world.id;
+            ended_bound += usize::from(bound_before);
+        }
         let world = &state.world;
         let mut want = Vec::new();
         if state.has_world() {
@@ -910,11 +918,26 @@ fn the_states_portals_mirror_the_link_table() {
         assert!(state.portals.len() <= 32 * 16);
         closed_seen |= state.portals.iter().any(|p| p.far.is_some() && !p.open);
         open_seen |= state.portals.iter().any(|p| p.open);
+        bound_before = state.portals.iter().any(|p| p.far.is_some());
     }
     assert!(
         open_seen && closed_seen,
         "the log shows open and closed portals"
     );
+    assert!(
+        ended_bound >= 2,
+        "{ended_bound} worlds ended with bound portals"
+    );
+    // The log's last world is born after chip 0's mask lost ports 0 and 1:
+    // its floor 1 lists ports 4 and 5, and they lead nowhere.
+    let state = s.state();
+    let floor0: Vec<(u8, Option<(u8, u8)>)> = state
+        .portals
+        .iter()
+        .filter(|p| p.floor == 0)
+        .map(|p| (p.port, p.far))
+        .collect();
+    assert_eq!(floor0, [(4, None), (5, None)]);
     // The party logs have no peers: every portal is listed, none is bound.
     let records = support::read_fixture("party4.jsonl");
     let mut s = saga(NameMode::Real);

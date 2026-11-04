@@ -2211,7 +2211,10 @@ What to know before changing it:
   -- --mock 32 --mode saga`: a 140 x 40 pty, `TERM=xterm-256color COLORTERM=truecolor`, the bytes
   the TUI writes from 20 s to 40 s of a 40 s run, runs one after another. Set `XDG_CONFIG_HOME` to
   an empty directory. The final 0.17.0 binary: `--mock 32` 19.6, 19.1 and 17.4 KB/s (mean 18.7),
-  inside the 20 KB/s budget; `--mock 1` 16.0, 16.8 and 13.8 (mean 15.6). The A.8 binary, by the
+  inside the 20 KB/s budget; `--mock 1` 16.0, 16.8 and 13.8 (mean 15.6). With crossings (B.3 to
+  B.5) single `--mock 32` runs reached 22.3 KB/s (B.4: 19.0, 20.9, 19.5; B.5: 16.8, 21.3, 20.5 and
+  19.1, 18.4, 19.3; B.5 with an empty floor keeping its window: 18.6, 17.7, 22.3, 17.5). Task
+  B.5's fix round set `CALM_EVERY` to 5: 17.5, 18.1, 18.7, 17.7 and 19.6 (mean 18.3). The A.8 binary, by the
   same tool on the same box: `--mock 32` 193.2, 192.0 and 168.5 (mean 184.6); `--mock 1` 13.8,
   19.0 and 16.6 (mean 16.4). One chip's view did not change (its frames are pinned).
 * Where the bytes went, by `print_party_traffic` (an ignored lib test that renders consecutive
@@ -2225,17 +2228,19 @@ What to know before changing it:
   tile's window moves only when the hero leaves a dead zone (`follow`, `ANCHOR_ZONE_X` (9, 9),
   `ANCHOR_ZONE_Y` (3, 2), the anchor kept in `SagaMemory`); unfocused tiles are drawn
   `Motion::Calm` (one colour and one light level, blanks in that colour so a row is one run, no
-  glow, still goal and portals, one-colour half trail) from a picture held for `CALM_EVERY` (3)
-  ticks, staggered by floor; the focused tile is `Motion::Banded` (three shades of light and
+  glow, still goal and portals, one-colour half trail) from a picture held for `CALM_EVERY` (3,
+  then 5 from Task B.5's fix round) ticks, staggered by floor; the focused tile is `Motion::Banded` (three shades of light and
   trail); the chronicle shows beats up to the last multiple of `CHRONICLE_EVERY` (20) ticks. Now
-  1,654 bytes a frame on the 32-chip log; `the_party_view_stays_inside_its_traffic_budget`
-  bounds it at 1,800 (2,000 a frame at ten frames a second, less the app's status bar and the
+  1,469 bytes a frame on the 32-chip log (1,603 with `CALM_EVERY` 3), and 1,242 on the same
+  log with a ring of links and a model on every chip (`records_with_ring_model`, from Task
+  B.5's fix round); `the_party_view_stays_inside_its_traffic_budget` bounds both at 1,800 (2,000 a frame at ten frames a second, less the app's status bar and the
   heat, about 2 KB/s on a real run). Seen red with re-centring restored (4,338), every tile
   animated (4,278) and no held picture (2,071).
 * What remains: the windows' steps (a tile's map is 6 rows at 140 x 40 with 32 chips, so a hero
   walking up or down moves the window every 5 rows), the focused tile, the chronicle's batches and
-  the heroes' hops, in that order. The margin is about 2 KB/s; a story with more walking could
-  pass 20 KB/s. If it must shrink further: a longer `CALM_EVERY`, a longer `CHRONICLE_EVERY`, or
+  the heroes' hops, in that order. The margin is about 1 to 2 KB/s; a story with more walking
+  could pass 20 KB/s. If it must shrink further: a longer `CALM_EVERY` (now 5), a longer
+  `CHRONICLE_EVERY`, or
   unfocused tiles drawn as a whole-floor minimap that never scrolls.
 * Known look: tiles 26 to 29 columns wide show first names only, so two tiles can share a name.
   Tiles are one blank column apart, so neighbouring maps can look joined. A hero can stand on its
@@ -2329,6 +2334,7 @@ moved it, and each diff is explained by that change:
 | `fix(saga): registers reach the floor and the link table with every bit` (party Task B.3, fix round 1) | a sample's `U64` register (live mask, Tensix columns, harvesting) is read from its exact bits; before, it went through an f64 | `quiet.jsonl` (both modes) only: its mock chips' mask 0xAAAA_AAAA_AAAA_AAAA lost its low bits as an f64 (one portal, port 11); exact, each floor has six portals (ports 1 to 11, odd). The other fixtures' registers are below 2^53. No view frame, story print or panel frame moved. |
 | `feat(saga): heroes cross Ethernet portals into the linked chip's floor` (party Task B.4, Nov 4 2026) | the crossing quest: `Verb::Cross` (code 7), `HeroCrossed` (tag 0x07) and `CrossingFailed` (tag 0x08), four crossing beat kinds, and the transit bit 0x80 on a member's floor byte in the end item | nothing moved: the five fixtures hold no `LinkPeer`, so no portal is bound, no hero crosses, and every member's transit bit is 0. New: `cross4.jsonl` 0x2a88827bd487ef7a (real) and 0x34a41fcbacbba99c (generated). No view frame, story print or panel frame moved. |
 | `feat(saga): portals, crossings and travellers drawn on every tile` (party Task B.5, Nov 4 2026) | the view draws crossings: portals in the far floor's hue (open) or dimmed (closed), a glow on both portals in transit, `crossing F2 → F5` HUDs, empty and crowded tiles, the roster's transit glyph; the core lists every portal in `SagaState::portals` (not hashed) | nothing moved: no digest row (the portal list is not in the digest), and no solo, busy, party4 or panel frame (those logs have no peers, and an unbound portal is drawn as before). New: `CROSS_GOLDEN`, ten frames of `cross4.jsonl` at 80x23 and 140x39 (link 1 down at tick 410, a hero in transit, a crossing thrown back and a dark portal, both injected into the log in the test, and the end of the last full world). |
+| `fix(saga): calmer party tiles and steady windows for crossings, inside the traffic budget` (party Task B.5, fix round 1) | an empty floor keeps its tile's window (`anchor` kept); an unfocused tile's held picture every 5 ticks (`CALM_EVERY`, was 3) | view frames only, no digest row: `PARTY_GOLDEN` all 8 and the busy `GOLDEN` frames at half the log (4 of 8) by `CALM_EVERY`; `CROSS_GOLDEN` all 10 (tick 410 and the end by the kept window, transit, thrown back, dark and the end by `CALM_EVERY`). Solo and panel frames did not move: one floor and the panel draw with `Motion::Full`. |
 
 Pinned now (digest version 3, with the party, its merged chronicle, bound portals and crossings):
 `quiet.jsonl` 0xd6e0200609dcd3eb (both modes), `bringup.jsonl` 0xc9142f2256b8175a (both),

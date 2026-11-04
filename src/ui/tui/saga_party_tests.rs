@@ -74,6 +74,14 @@ fn log32() -> &'static [Record] {
     R.get_or_init(|| party_gen::records(32, LOG32_TICKS))
 }
 
+/// The 32-chip log with a ring of links and a model ready on every chip
+/// (the generator's `records_with_ring_model`): every floor offers
+/// crossings.
+fn log32_ring() -> &'static [Record] {
+    static R: OnceLock<Vec<Record>> = OnceLock::new();
+    R.get_or_init(|| party_gen::records_with_ring_model(32, LOG32_TICKS))
+}
+
 /// Forty chips: the 32-chip script and eight chips that only sweep. The
 /// world keeps 32 floors.
 fn log40() -> &'static [Record] {
@@ -871,15 +879,22 @@ fn party_frames() -> Vec<u64> {
 /// its floor's anchor (the dead zone). The chronicle: the party view shows
 /// the beats up to the last multiple of 20 ticks. With the batching undone
 /// the frames still differ from the old pins, so both changes move them.
+///
+/// Re-pinned in fix round 1 of Task B.5: an unfocused tile's held picture
+/// is taken every 5 ticks (`CALM_EVERY`, was 3), because single `--mock 32`
+/// runs with heroes crossing sent up to 22 KB/s against the 20 KB/s budget.
+/// Every frame has unfocused tiles whose held hero now stands elsewhere, so
+/// all eight moved. These logs have no peers, so the other change of that
+/// round (an empty floor keeps its window) moves none of them.
 const PARTY_GOLDEN: [u64; 8] = [
-    16670488567720751540,
-    2450246809838595014,
-    3666371945581462181,
-    9177448197944020538,
-    5733235657069913877,
-    12252783220974592157,
-    8766439743158584739,
-    11791397437683790272,
+    3934237442390221048,
+    8885479378402613832,
+    17416489920458339929,
+    8826553909904938266,
+    1075205828068214293,
+    756655480256273938,
+    16015793166138571427,
+    15330896973939589821,
 ];
 
 /// Prints the hashes for [`PARTY_GOLDEN`]. Run with
@@ -1275,15 +1290,54 @@ const PARTY_BYTES_PER_FRAME: usize = 1_800;
 /// with every tile animated as the focused one (`Motion::Banded` for all),
 /// 4,278; with the unfocused tiles drawn from the live state at every tick
 /// (no held picture), 2,071. The code before Task A.9 sent 14,110.
+///
+/// The second case (Task B.5's fix round) is the same 32 chips in a ring of
+/// links with a model ready on every chip (`records_with_ring_model`), so
+/// every floor offers crossings: 10 to 24 crossings per 100 ticks, with
+/// tiles emptying and filling. With `CALM_EVERY` 5 the two cases send
+/// 1,469 and 1,242 bytes a frame (1,603 and 1,364 with 3). This case does
+/// not go red when an empty floor's window re-centres again (1,260): in
+/// this model the window moves of a crossing cost little (18 bytes a
+/// frame), and the bound is the budget's. It guards that crossings at 32
+/// chips keep the view near the quiet log's traffic.
 #[test]
 fn the_party_view_stays_inside_its_traffic_budget() {
-    let per_frame = party_bytes_per_frame(log32(), 150, 250, 140, 39);
-    assert!(
-        per_frame <= PARTY_BYTES_PER_FRAME,
-        "{per_frame} bytes a frame, over {PARTY_BYTES_PER_FRAME}"
-    );
-    // The bound is not met by an empty screen: the frames do change.
-    assert!(per_frame > 500, "{per_frame} bytes a frame");
+    for (what, log) in [("no links", log32()), ("ring", log32_ring())] {
+        let per_frame = party_bytes_per_frame(log, 150, 250, 140, 39);
+        assert!(
+            per_frame <= PARTY_BYTES_PER_FRAME,
+            "{what}: {per_frame} bytes a frame, over {PARTY_BYTES_PER_FRAME}"
+        );
+        // The bound is not met by an empty screen: the frames do change.
+        assert!(per_frame > 500, "{what}: {per_frame} bytes a frame");
+    }
+}
+
+/// Prints the bytes a frame of the traffic guard's two logs, and the ring
+/// log's crossings per 100 ticks. Run with
+/// `cargo test --locked --lib --features tui print_traffic_guard -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints the guard's numbers"]
+fn print_traffic_guard() {
+    for (what, log) in [("no links", log32()), ("ring", log32_ring())] {
+        for (from, to) in [(150, 250), (250, 350), (350, 450)] {
+            println!(
+                "{what} {from}..{to}: {} bytes a frame",
+                party_bytes_per_frame(log, from, to, 140, 39)
+            );
+        }
+    }
+    let mut saga = Saga::new(config(NameMode::Real));
+    let mut per_window = std::collections::BTreeMap::new();
+    for r in log32_ring() {
+        saga.feed(r);
+        for e in saga.drain_events() {
+            if matches!(e, tt_toplike_saga::SagaEvent::HeroCrossed { .. }) {
+                *per_window.entry(saga.state().tick / 100).or_insert(0) += 1;
+            }
+        }
+    }
+    println!("crossings per 100 ticks: {per_window:?}");
 }
 
 /// Every tile on the page shows its hero, though a tile's window moves only
@@ -1849,8 +1903,9 @@ fn a_hero_in_transit_glows_on_both_portals() {
 }
 
 /// A floor whose only hero has crossed away has a tile with no hero: its
-/// HUD says `no hero here`, its window centres on the floor's gate, and
-/// nothing on it is drawn as a hero.
+/// HUD says `no hero here`, nothing on it is drawn as a hero in any
+/// motion, and its window stays where its hero left it. The floor's seat,
+/// which the zoomed view draws from, centres on the gate.
 #[test]
 fn an_empty_floor_tile_says_so() {
     let (s, c) = arrival_scene();
@@ -1876,8 +1931,18 @@ fn an_empty_floor_tile_says_so() {
                 "{huds:?}"
             );
         }
-        let rows = floor_cells(state, &s.party, c.from, Motion::Calm);
-        assert!(rows.iter().flatten().all(|&(ch, _)| ch != hero));
+        for motion in [Motion::Full, Motion::Banded, Motion::Calm] {
+            let rows = floor_cells(state, &s.party, c.from, motion);
+            assert!(
+                rows.iter().flatten().all(|&(ch, _)| ch != hero),
+                "{motion:?}"
+            );
+        }
+        // The tile keeps the window its hero left it with.
+        let memory = s.party.floor(c.from).unwrap();
+        let anchor = memory.anchor.expect("the window stays put");
+        let (_, tile) = tile_view(state, memory, c.from, true);
+        assert_eq!(tile.centre, (anchor.0 as usize, anchor.1 as usize));
     });
 }
 
@@ -2163,17 +2228,30 @@ fn cross_frames() -> Vec<u64> {
 /// change to the portals' colours, the crossing HUDs, the empty and crowded
 /// tiles or anything else the party view draws moves them; re-pin on
 /// purpose with `print_cross_frames` and say why in the commit.
+///
+/// Re-pinned in fix round 1 of Task B.5, for two changes, all ten frames:
+/// * An empty floor keeps the window its hero left it with (it re-centred
+///   on the portal and then the gate), and a hero arriving there moves
+///   that window by the dead-zone rule (it started a new one on the
+///   arrival cell). Alone, this moved the tick-410 frames (floor 1 is
+///   empty: its hero crossed at tick 404) and the end frames (floors that
+///   emptied and filled again after the crossings at 514, 515 and 585); the
+///   transit, thrown-back and dark frames kept their hashes.
+/// * The held picture of an unfocused tile is taken every 5 ticks
+///   (`CALM_EVERY`, was 3). This moved the transit, thrown-back, dark and
+///   end frames; the tick-410 frames fall where both periods hold the same
+///   picture.
 const CROSS_GOLDEN: [u64; 10] = [
-    11722815006697725173,
-    13870344704332187710,
-    984997619531047103,
-    5625932373186045120,
-    3079193025079201650,
-    2057903539046483634,
-    11931093669237426526,
-    3379984889357984948,
-    1918058013855084556,
-    16184640831157277284,
+    16621094620833925702,
+    12081447335216494757,
+    9352530000089581407,
+    12858411009499260224,
+    17231023619959074393,
+    954191240695233659,
+    13504525090761453278,
+    3007435991782443636,
+    951394070982446229,
+    18228818691771887738,
 ];
 
 /// Prints the hashes for [`CROSS_GOLDEN`]. Run with

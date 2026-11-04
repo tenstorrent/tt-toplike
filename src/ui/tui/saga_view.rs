@@ -263,8 +263,11 @@ pub const TRAIL_LEN: usize = 12;
 const CHRONICLE_EVERY: u64 = 20;
 /// Ticks between two pictures of an unfocused party tile ([`Held`]). The
 /// TUI advances the story about one tick per update (ten a second by
-/// default), so such a tile changes about five times a second.
-const CALM_EVERY: u64 = 3;
+/// default), so such a tile changes about twice a second. It was 3 until
+/// Task B.5's fix round: with heroes crossing on `--mock 32`, single runs
+/// of the binary sent up to 22 KB/s against the 20 KB/s budget, and 5
+/// sends fewer, larger changes.
+const CALM_EVERY: u64 = 5;
 /// How far, in °C, a chip's temperature moves before its party tile's heat
 /// tint follows it (see `tile_heat` in [`SagaMemory`]). The tint moves 1.75
 /// percent of the way towards its warm hue per °C, so a 3 °C step is a small
@@ -455,9 +458,11 @@ pub struct SagaMemory {
     tile_heat: Option<f32>,
     /// Where a party tile's window centres on this floor: a cell that
     /// follows the floor's hero ([`floor_seat`]) only when the hero walks
-    /// out of a dead zone around it (see [`follow`]). `None` when no hero
-    /// stands on the floor. The single-floor view and the arcade panel
-    /// centre on the hero and never read it.
+    /// out of a dead zone around it (see [`follow`]). It stays put while no
+    /// hero stands on the floor, and is `None` only on a floor that has had
+    /// no hero yet in this world (the window then centres as
+    /// [`floor_seat`] says, on the gate). The single-floor view and the
+    /// arcade panel centre on the hero and never read it.
     anchor: Option<(u8, u8)>,
     /// The picture an unfocused party tile draws: this memory and the
     /// floor's hero as they were at the start of the floor's current period
@@ -608,9 +613,15 @@ impl SagaMemory {
             trail.steps.truncate(TRAIL_LEN + 1);
         }
         // The tile's window follows the floor's seat hero, the first member
-        // standing on the floor, as `floor_seat` picks it.
+        // standing on the floor, as `floor_seat` picks it. While the floor
+        // has no hero (its hero crossed away) the window stays where it
+        // was: a crossing then moves a tile's window at most once, when a
+        // hero arrives outside the dead zone, so crossings add little
+        // terminal traffic.
         let seat = (0..state.party.len()).find(|&m| member_floor(state, m) == Some(floor));
-        self.anchor = seat.map(|m| follow(self.anchor, state.party[m].hero.pos, (map.w, map.h)));
+        self.anchor = seat
+            .map(|m| follow(self.anchor, state.party[m].hero.pos, (map.w, map.h)))
+            .or(self.anchor);
         // A new picture for an unfocused tile at the start of each period.
         let period = (state.tick + floor as u64) / CALM_EVERY;
         let old = self.held.take();

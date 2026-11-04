@@ -122,7 +122,9 @@ view's budget (20 KB/s at 140 x 40):
 * **The other tiles are calm.** Everything they have seen is drawn in one colour (the floor's,
   with its heat) at one light level, with no glow; the goal, the sage and the portals hold still;
   and only the newer half of the trail shows, in one colour. Each draws a picture of its floor
-  taken every three ticks, so its hero hops up to three cells at a time.
+  taken every five ticks, so its hero hops up to five cells at a time. A hero that has crossed
+  away can still show on such a tile for up to five ticks, under a HUD that already says `no hero
+  here`.
 * **The heat tint** of a tile changes when its chip's temperature has moved 3 °C.
 * **The chronicle** shows the lines up to the last multiple of 20 ticks, so new lines arrive in a
   batch about every two seconds. A stopped story shows every line.
@@ -382,12 +384,14 @@ saga's settings and every problem in the section.
   say "Lark"; the floor tags tell them apart. Tiles are separated by one blank column, so the maps
   of neighbouring tiles can look joined.
 * Terminal traffic, measured with `python3 tools/party_traffic.py <binary> --runs 3 -- --mock N
-  --mode saga` (a 140 x 40 pty, bytes written from 20 s to 40 s of a 40 s run): `--mock 32` sends
-  about 19 KB/s (19.6, 19.1 and 17.4 KB/s in three runs), inside the 20 KB/s budget for a quiet
-  world; before the calmer tiles it sent about 185 KB/s. One chip sends about 16 KB/s (16.0, 16.8
-  and 13.8), as before. The margin is small: a busier story with more walking can pass 20 KB/s.
-  The test `the_party_view_stays_inside_its_traffic_budget` bounds the bytes a frame on the 32-chip
-  test log.
+  --mode saga` (a 140 x 40 pty, bytes written from 20 s to 40 s of a 40 s run): `--mock 32`, whose
+  heroes cross the mock's ring of links, sends about 18 KB/s (17.5, 18.1, 18.7, 17.7 and 19.6 KB/s
+  in five runs), inside the 20 KB/s budget; before the calmer tiles it sent about 185 KB/s. With
+  crossings and a held picture every three ticks single runs reached 22 KB/s, so an unfocused tile
+  now holds its picture for five ticks. One chip sends about 16 KB/s (16.0, 16.8 and 13.8), as
+  before. The margin is small: a busier story with more walking can pass 20 KB/s. The test
+  `the_party_view_stays_inside_its_traffic_budget` bounds the bytes a frame on two 32-chip test
+  logs, one with no links and one in which every link of a ring offers crossings.
 * The calm tiles show no light around their heroes, so a hero on an unfocused tile is easiest to
   find by its `@` and its trail.
 * Generated-name aliasing was checked on the busy fixture only.

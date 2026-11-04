@@ -170,7 +170,7 @@ fn temperature(tick: u64, offset: f64) -> f64 {
 
 /// Every record of a party of `chips` chips over `ticks` ticks, in order.
 pub fn records(chips: u8, ticks: u64) -> Vec<Record> {
-    script(chips, chips, ticks, false)
+    script(chips, chips, ticks, false, false)
 }
 
 /// The party log of [`records`] plus a ring of `LinkPeer` events at tick 1,
@@ -180,7 +180,18 @@ pub fn records(chips: u8, ticks: u64) -> Vec<Record> {
 pub fn records_with_links(chips: u8, ticks: u64) -> Vec<Record> {
     assert!(chips >= 2, "a ring has at least two chips");
     assert!(ticks >= 430, "the link comes back up at tick 430");
-    script(chips, chips, ticks, true)
+    script(chips, chips, ticks, true, false)
+}
+
+/// The log of [`records_with_links`] plus a model, `demo-ring`, ready on
+/// every chip at tick 80, so every link of the ring offers a crossing on
+/// both of its floors: the busiest crossing traffic the script can make.
+/// The party view's traffic guard reads it with 32 chips; it is only ever
+/// built in memory, and no committed fixture comes from it.
+pub fn records_with_ring_model(chips: u8, ticks: u64) -> Vec<Record> {
+    assert!(chips >= 2, "a ring has at least two chips");
+    assert!(ticks >= 430, "the link comes back up at tick 430");
+    script(chips, chips, ticks, true, true)
 }
 
 /// The Ethernet live mask the script gives chip `i` at tick 1: the low
@@ -208,17 +219,18 @@ fn top_port(mask: u64) -> u8 {
 /// every tick and the others follow in order.
 pub fn records_with_extra_chips(chips: u8, ticks: u64) -> Vec<Record> {
     assert!(chips >= 32, "the extra chips come after the first 32");
-    script(chips, 32, ticks, false)
+    script(chips, 32, ticks, false, false)
 }
 
 /// The script behind [`records`] and [`records_with_extra_chips`]: `chips`
 /// chips sweep, of which the first `story` play the models, the stall, the
 /// throttle and the link change. `story` is at most `chips`. With `links`
 /// the script adds the ring, the pair's model and the link down and up that
-/// [`records_with_links`] describes; without it the output is exactly what
+/// [`records_with_links`] describes, and with `ring_model` also the model
+/// of [`records_with_ring_model`]; without them the output is exactly what
 /// it was before the links existed, so `solo.jsonl` and `party4.jsonl` stay
 /// as they are.
-fn script(chips: u8, story: u8, ticks: u64, links: bool) -> Vec<Record> {
+fn script(chips: u8, story: u8, ticks: u64, links: bool, ring_model: bool) -> Vec<Record> {
     assert!(story >= 1, "a party has at least one chip");
     assert!(story <= chips, "the story's chips are among the chips");
     let n = story as u64;
@@ -307,6 +319,16 @@ fn script(chips: u8, story: u8, ticks: u64, links: bool) -> Vec<Record> {
                         chips: vec![keys[0].clone(), keys[1].clone()],
                     },
                 );
+                // With `ring_model`, a model on every chip of the ring.
+                if ring_model {
+                    w.event(
+                        "monitor",
+                        Event::ModelReady {
+                            model: EntityKey::model("demo-ring"),
+                            chips: keys.clone(),
+                        },
+                    );
+                }
             }
             if tick == 400 || tick == 430 {
                 let full = eth_mask(1);

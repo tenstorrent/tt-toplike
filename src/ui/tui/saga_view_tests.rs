@@ -1553,11 +1553,19 @@ fn golden_frames() -> Vec<u64> {
 /// undone the eight hashes are the same, because the cut points fall where
 /// no beat waits for its batch. The solo frames and the panel frames did
 /// not move: one floor and the arcade panel draw with `Motion::Full`.
+///
+/// Re-pinned in fix round 1 of Task B.5: an unfocused tile's held picture
+/// is now taken every 5 ticks (`CALM_EVERY`, was 3), to bring `--mock 32`
+/// back inside its traffic budget with heroes crossing. The busy log's
+/// second tile is unfocused, so the four frames at half the log moved
+/// (its held hero is from another tick). The four at the end did not: at
+/// that tick the held picture is the same under both periods. The solo and
+/// panel frames did not move.
 const GOLDEN: [u64; 8] = [
-    3674594377808877050,
-    12971899383197475698,
-    15086896828299096079,
-    3437629226145115506,
+    3656148981728448358,
+    8933950529830582176,
+    4681188387760006299,
+    5380557000018209984,
     13759421490679217398,
     5443883914392978094,
     9332047876186902558,

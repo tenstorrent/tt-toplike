@@ -29,8 +29,8 @@
 //!   shades each.
 //! * **The other tiles are calm** (`Motion::Calm`): one colour and one light
 //!   level for all they have seen, no glow ring, a still goal and still
-//!   portals, and the floor's held picture (`Held`), taken every three
-//!   ticks, so a hero hops a few cells at a time.
+//!   portals, and the floor's held picture (`Held`), taken every five
+//!   ticks (`CALM_EVERY`), so a hero hops a few cells at a time.
 //! * **The heat tint holds** until the chip's reading moves 3 °C.
 //! * **The chronicle comes in batches** of 20 ticks (`chronicle_until`).
 //!
@@ -60,6 +60,11 @@
 //!   "Terminal traffic"). Each band is tinted with its
 //!   floor's hue; the focused tile's band is brighter and its tag is drawn
 //!   reversed.
+//! * **Chronicle:** the merged chronicle, each member's line tagged with its
+//!   floor (`t42 · F3 Wren sets out`) in the floor's hue.
+//! * **Status row:** the focused hero's name, vitality and quest, then
+//!   `[ ] focus  z zoom` (or `[ ] z` when the row is short), the tick and
+//!   the mapped share, each dropped whole when it does not fit.
 //!
 //! # Crossings
 //!
@@ -73,8 +78,11 @@
 //! * **In transit** (three ticks) the hero is on no map. The portal it
 //!   stepped into and the portal it will step out of glow in the hero's
 //!   yellow, and both tiles' HUDs say `crossing F2 → F5`.
-//! * **A floor with no hero** centres its window on its gate (on the portal
-//!   while a hero is leaving through it), and its HUD says `no hero here`.
+//! * **A floor with no hero** keeps its window where it was when its last
+//!   hero left (a floor that has had no hero in this world centres on its
+//!   gate), and its HUD says `no hero here`. An unfocused tile draws its
+//!   held picture, so it can still show a hero that left up to
+//!   `CALM_EVERY` ticks ago under a HUD that already says `no hero here`.
 //! * **Several heroes on one floor** are all drawn; the tile's window and
 //!   HUD follow the first of them in index order.
 //! * **A crossing quest's words** follow the crossing: `cross to F2`,
@@ -82,13 +90,10 @@
 //!   follows (`cross_stage` in the parent module).
 //!
 //! Each of these changes a tile only when a crossing starts or ends, so an
-//! unfocused tile stays calm. `crossings_stay_inside_the_traffic_budget`
-//! measures the cross log.
-//! * **Chronicle:** the merged chronicle, each member's line tagged with its
-//!   floor (`t42 · F3 Wren sets out`) in the floor's hue.
-//! * **Status row:** the focused hero's name, vitality and quest, then
-//!   `[ ] focus  z zoom` (or `[ ] z` when the row is short), the tick and
-//!   the mapped share, each dropped whole when it does not fit.
+//! unfocused tile stays calm, and a crossing moves a tile's window at most
+//! once (an arrival outside the dead zone). The traffic guard
+//! (`the_party_view_stays_inside_its_traffic_budget`) also runs a 32-chip
+//! log in which every link of a ring offers crossings.
 //!
 //! # Borders
 //!
@@ -426,8 +431,10 @@ fn tile_view<'a>(
 /// window centred on the floor's anchor ([`SagaMemory`]'s `anchor`), which
 /// moves only when the hero walks out of a dead zone around it (`follow` in
 /// the parent module). So a tile's window moves now and then in a large
-/// step, and the tile is redrawn whole only then. With no anchor (no hero,
-/// or a memory of another floor) the window centres as [`floor_seat`] says.
+/// step, and the tile is redrawn whole only then. A floor whose hero has
+/// left keeps its anchor. With no anchor (a floor that has had no hero in
+/// this world, or a memory of another floor) the window centres as
+/// [`floor_seat`] says.
 fn tile_seat(state: &SagaState, memory: &SagaMemory, floor: usize) -> Seat {
     let seat = floor_seat(state, floor);
     let anchor = memory
