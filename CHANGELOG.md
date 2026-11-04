@@ -17,6 +17,14 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.16.7
+- Fixes the wrong background colours in macOS Terminal.app over SSH (a Wafer Waffler of a different
+  colour from the rest of the screen, and other views). 0.16.2 let `COLORTERM=truecolor` turn on 24-bit
+  colour inside tmux. A tmux server keeps the `COLORTERM` of the session that first started it, so a
+  pane could claim truecolor in a terminal that cannot draw it. tmux is back to 256 colours, as before
+  0.16.2. New: `TT_TOPLIKE_COLOR=truecolor` or `256` settles it by hand and beats every guess, tmux
+  included.
+
 ### 0.16.6
 - The status bar flags a stalled ARC. A chip whose firmware heartbeat reads 0 shows a red `ARC!` after
   its readings (`BH0  66°  990M  80W ARC!`). With more than four chips the averaged column ends with

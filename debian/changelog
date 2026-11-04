@@ -1,3 +1,14 @@
+tt-toplike (0.16.7) noble; urgency=medium
+
+  * Fixes wrong background colours in macOS Terminal.app over SSH. 0.16.2
+    let COLORTERM=truecolor turn on 24-bit colour inside tmux, but a tmux
+    server keeps the COLORTERM of the session that started it, so a pane
+    could claim truecolor in a terminal that cannot draw it. tmux is back to
+    256 colours. New: TT_TOPLIKE_COLOR=truecolor or 256 settles the colour
+    depth by hand and beats every guess, tmux included.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 20:00:00 -0800
+
 tt-toplike (0.16.6) noble; urgency=medium
 
   * The status bar flags a stalled ARC: a chip whose firmware heartbeat

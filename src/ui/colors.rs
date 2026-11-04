@@ -28,14 +28,24 @@
 
 use ratatui::style::Color;
 
+/// The environment variable that settles the colour depth by hand:
+/// `truecolor` (or `24bit`) forces RGB, `256` forces the 256-colour palette.
+/// It beats every guess below, tmux included.
+pub const COLOR_ENV: &str = "TT_TOPLIKE_COLOR";
+
 /// Check if terminal supports true color (RGB)
 ///
-/// `COLORTERM=truecolor` (or `24bit`) is the opt-in, and it applies inside
-/// tmux too: tmux passes the variable through from the outer terminal, and
-/// `set -as terminal-features ',*:RGB'` in `tmux.conf` lets it pass the
-/// colours. Without the opt-in, every terminal gets 256 colours, tmux
-/// included: macOS Terminal.app over SSH draws truecolor through tmux with
-/// artifacts, and it does not set `COLORTERM`.
+/// The rule, in order:
+/// 1. `TT_TOPLIKE_COLOR` (`truecolor` or `256`) decides, if it is set.
+/// 2. Inside tmux (`$TMUX`, or a `screen*` `$TERM`) the answer is 256 colours.
+///    `COLORTERM` is not believed there: a tmux server keeps the `COLORTERM`
+///    of whatever session first started it, so a pane in macOS Terminal.app
+///    over SSH can inherit `COLORTERM=truecolor` from somewhere else. That
+///    terminal draws truecolor fills as a different background colour.
+/// 3. Otherwise `COLORTERM=truecolor` (or `24bit`) means RGB.
+///
+/// To get full colour in tmux, set `TT_TOPLIKE_COLOR=truecolor` (and let tmux
+/// pass it: `set -as terminal-features ',*:RGB'` in `tmux.conf`).
 pub fn supports_true_color() -> bool {
     // A test can pin the answer for its own thread (`with_truecolor`), so a test
     // that pins output does not depend on the COLORTERM of the machine.
@@ -43,14 +53,30 @@ pub fn supports_true_color() -> bool {
     if let Some(forced) = FORCED_TRUECOLOR.with(std::cell::Cell::get) {
         return forced;
     }
-    truecolor_from(std::env::var("COLORTERM").ok().as_deref())
+    let in_tmux = std::env::var("TMUX").is_ok()
+        || std::env::var("TERM").unwrap_or_default().contains("screen");
+    truecolor_from(
+        std::env::var(COLOR_ENV).ok().as_deref(),
+        std::env::var("COLORTERM").ok().as_deref(),
+        in_tmux,
+    )
 }
 
-/// The truecolor rule, given `COLORTERM`. Tmux needs no case of its own: the
-/// variable is the opt-in, so a tmux without it gets 256 colours by the same
-/// test as any other terminal that does not claim truecolor.
-fn truecolor_from(colorterm: Option<&str>) -> bool {
-    matches!(colorterm, Some("truecolor" | "24bit"))
+/// The truecolor rule, given [`COLOR_ENV`], `COLORTERM` and whether this is
+/// tmux. Letter case in the variables is ignored.
+fn truecolor_from(forced: Option<&str>, colorterm: Option<&str>, in_tmux: bool) -> bool {
+    let is_rgb = |v: &str| {
+        matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "truecolor" | "24bit"
+        )
+    };
+    match forced.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+        Some("truecolor" | "24bit") => return true,
+        Some("256") => return false,
+        _ => {}
+    }
+    !in_tmux && colorterm.is_some_and(is_rgb)
 }
 
 #[cfg(test)]
@@ -494,46 +520,72 @@ pub fn temp_to_hue(temp_c: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// The rule is `COLORTERM` alone: tmux is not a case of its own, so a
-    /// tmux with the opt-in gets RGB and a tmux without it gets 256 colours.
+    /// The rule: `TT_TOPLIKE_COLOR` first, then tmux means 256 colours, then
+    /// `COLORTERM`.
     #[test]
-    fn truecolor_follows_colorterm_alone() {
-        assert!(truecolor_from(Some("truecolor")));
-        assert!(truecolor_from(Some("24bit")));
-        assert!(!truecolor_from(None));
-        assert!(!truecolor_from(Some("")));
-        assert!(!truecolor_from(Some("256color")));
-        assert!(!truecolor_from(Some("TRUECOLOR")));
+    fn truecolor_rule_is_override_then_tmux_then_colorterm() {
+        // No override: COLORTERM decides outside tmux.
+        assert!(truecolor_from(None, Some("truecolor"), false));
+        assert!(truecolor_from(None, Some("24bit"), false));
+        assert!(!truecolor_from(None, None, false));
+        assert!(!truecolor_from(None, Some("256color"), false));
+        // Tmux does not believe COLORTERM.
+        assert!(!truecolor_from(None, Some("truecolor"), true));
+        // The override beats both.
+        assert!(truecolor_from(Some("truecolor"), None, true));
+        assert!(truecolor_from(Some("24bit"), Some("256color"), true));
+        assert!(!truecolor_from(Some("256"), Some("truecolor"), false));
+        // An override that means nothing is ignored.
+        assert!(!truecolor_from(Some("banana"), Some("truecolor"), true));
+        assert!(truecolor_from(Some("banana"), Some("truecolor"), false));
+        assert!(truecolor_from(Some("TrueColor"), None, true));
     }
 
-    /// The wiring, not only the rule: with `$TMUX` set and `COLORTERM` as the
-    /// opt-in, the public function answers yes. Run in a child so the
-    /// environment change cannot reach other tests.
+    /// The wiring, not only the rule: the public function reads `$TMUX`,
+    /// `COLORTERM` and `TT_TOPLIKE_COLOR` as the rule says. Run in a child so
+    /// the environment cannot reach other tests.
     #[test]
-    fn supports_true_color_reads_colorterm_inside_tmux() {
+    fn supports_true_color_reads_the_environment() {
         if std::env::var_os("TT_TOPLIKE_COLORS_CHILD").is_some() {
-            assert!(supports_true_color(), "tmux + COLORTERM=truecolor");
+            let want = std::env::var("TT_TOPLIKE_COLORS_WANT").unwrap() == "1";
+            assert_eq!(supports_true_color(), want);
             return;
         }
         let exe = std::env::current_exe().unwrap();
-        let run = |colorterm: Option<&str>| {
+        let run = |tmux: bool, colorterm: Option<&str>, forced: Option<&str>, want: bool| {
             let mut c = std::process::Command::new(&exe);
             c.args([
                 "--exact",
-                "ui::colors::tests::supports_true_color_reads_colorterm_inside_tmux",
+                "ui::colors::tests::supports_true_color_reads_the_environment",
                 "--nocapture",
             ])
             .env("TT_TOPLIKE_COLORS_CHILD", "1")
-            .env("TMUX", "/tmp/tmux-1000/default,1,0")
-            .env("TERM", "screen-256color")
-            .env_remove("COLORTERM");
+            .env("TT_TOPLIKE_COLORS_WANT", if want { "1" } else { "0" })
+            .env("TERM", "xterm-256color")
+            .env_remove("TMUX")
+            .env_remove("COLORTERM")
+            .env_remove(COLOR_ENV);
+            if tmux {
+                c.env("TMUX", "/tmp/tmux-1000/default,1,0");
+            }
             if let Some(v) = colorterm {
                 c.env("COLORTERM", v);
             }
+            if let Some(v) = forced {
+                c.env(COLOR_ENV, v);
+            }
             c.output().unwrap().status.success()
         };
-        assert!(run(Some("truecolor")), "opt-in applies inside tmux");
-        assert!(!run(None), "no opt-in: tmux stays at 256 colours");
+        assert!(run(false, Some("truecolor"), None, true), "plain terminal");
+        assert!(
+            run(true, Some("truecolor"), None, false),
+            "tmux ignores COLORTERM"
+        );
+        assert!(run(true, None, Some("truecolor"), true), "override in tmux");
+        assert!(
+            run(false, Some("truecolor"), Some("256"), false),
+            "256 override"
+        );
     }
 
     #[test]
