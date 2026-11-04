@@ -13,7 +13,7 @@
 
 mod support;
 
-use support::party::{self, PARTY4_TICKS, SOLO_TICKS};
+use support::party::{self, CROSS4_TICKS, PARTY4_TICKS, SOLO_TICKS};
 use tt_toplike_bus::{Payload, Record};
 use tt_toplike_saga::chronicle::NameMode;
 use tt_toplike_saga::pack::Pack;
@@ -22,7 +22,7 @@ use tt_toplike_saga::saga::plan_stream;
 use tt_toplike_saga::{Label, Saga, SagaConfig, SagaEvent};
 
 /// The note every fixture failure carries: how to write the files again.
-const WRITERS: &str = "regenerate them with `cargo test -p tt-toplike-saga --test party -- --ignored write_solo_fixture write_party4_fixture`";
+const WRITERS: &str = "regenerate them with `cargo test -p tt-toplike-saga --test party -- --ignored write_solo_fixture write_party4_fixture write_cross4_fixture`";
 
 /// A saga as the determinism tests build it: a 200-tick season.
 fn saga(names: NameMode) -> Saga {
@@ -57,6 +57,57 @@ fn the_committed_party_fixtures_match_the_generator() {
             "{name} differs from tests/support/party.rs; {WRITERS}"
         );
     }
+}
+
+/// The crossing log is committed too: `cross4.jsonl` is the output of
+/// `records_with_links(4, CROSS4_TICKS)`, byte for byte.
+#[test]
+fn the_committed_cross_fixture_matches_the_generator() {
+    let on_disk = std::fs::read_to_string(support::fixture_path("cross4.jsonl"))
+        .unwrap_or_else(|e| panic!("cross4.jsonl is committed ({e}); {WRITERS}"));
+    assert!(
+        on_disk == party::file_text_with_links(4, CROSS4_TICKS),
+        "cross4.jsonl differs from tests/support/party.rs; {WRITERS}"
+    );
+}
+
+/// The crossing log keeps ledger ruling R6: every model is a `demo-*` name,
+/// and every chip, including the chip inside an `eth:<chip>/<port>` key, is
+/// a made-up PCI address. The test also checks that the log does carry
+/// `LinkPeer` events, so the loop below has something to look at.
+#[test]
+fn the_cross_fixture_carries_no_real_names() {
+    let mut peers = 0;
+    for r in support::read_fixture("cross4.jsonl") {
+        assert!(
+            !matches!(&r.payload, Payload::Raw(_)),
+            "cross4.jsonl: a raw frame at seq {}",
+            r.seq
+        );
+        if matches!(
+            &r.payload,
+            Payload::Event(tt_toplike_bus::Event::LinkPeer { .. })
+        ) {
+            peers += 1;
+        }
+        let line = r.to_line();
+        assert!(!line.contains("process:"), "a process key: {line}");
+        for part in line.split('"') {
+            if let Some(model) = part.strip_prefix("model:") {
+                assert!(model.starts_with("demo-"), "model {part}");
+            }
+            if part.starts_with("chip:") {
+                assert!(is_made_up_chip(part), "chip {part}");
+            }
+            if let Some(port) = part.strip_prefix("eth:") {
+                let (chip, number) = port.split_once('/').expect("an eth key has a port");
+                assert!(is_made_up_chip(chip), "eth key {part}");
+                assert!(number.parse::<u8>().is_ok(), "eth key {part}");
+            }
+        }
+    }
+    // A ring of four chips has four links.
+    assert_eq!(peers, 4, "cross4.jsonl holds one LinkPeer per ring link");
 }
 
 /// True when `key` is `chip:0000:XX:00.0` with XX two lowercase hex digits.
@@ -136,6 +187,17 @@ fn write_party4_fixture() {
         party::file_text(4, PARTY4_TICKS),
     )
     .expect("write party4.jsonl");
+}
+
+/// Writes `tests/fixtures/cross4.jsonl`. See [`write_solo_fixture`].
+#[test]
+#[ignore = "writes the cross4 fixture; run by hand after changing tests/support/party.rs"]
+fn write_cross4_fixture() {
+    std::fs::write(
+        support::fixture_path("cross4.jsonl"),
+        party::file_text_with_links(4, CROSS4_TICKS),
+    )
+    .expect("write cross4.jsonl");
 }
 
 // ---- Pins taken on the single-chip code ---------------------------------------

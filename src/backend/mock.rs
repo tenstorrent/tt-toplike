@@ -20,7 +20,7 @@
 
 use crate::backend::{BackendConfig, TelemetryBackend};
 use crate::error::{BackendError, BackendResult};
-use crate::models::telemetry::{DeviceLimits, FirmwaresInfo, GddrTempPair};
+use crate::models::telemetry::{DeviceLimits, EthPeer, FirmwaresInfo, GddrTempPair};
 use crate::models::{Architecture, Device, SmbusTelemetry, Telemetry};
 use chrono::Utc;
 use std::collections::HashMap;
@@ -335,6 +335,24 @@ impl MockBackend {
         // ETH live status: ~75% ports live (alternating bit pattern)
         let eth_live = 0xAAAAAAAAAAAAAAAA_u64;
 
+        // Ethernet peers: a ring. This chip's highest live port is wired to
+        // the next chip's lowest live port, and the last chip closes the
+        // ring on chip 0. Every mock chip has the same live mask, so the
+        // answer does not change from one update to the next. One chip has
+        // no neighbour, so it reports none. (An event carries no
+        // provenance; the source that turns this into `LinkPeer` events is
+        // the mock's `Estimated` one, so a log marks them as made up.)
+        let eth_peers = if self.device_count > 1 && eth_live != 0 {
+            let next = &self.devices[(device_idx + 1) % self.device_count];
+            Some(vec![EthPeer {
+                port: (63 - eth_live.leading_zeros()) as u8,
+                peer_bus_id: next.bus_id.clone(),
+                peer_port: eth_live.trailing_zeros() as u8,
+            }])
+        } else {
+            None
+        };
+
         let harvesting_state = if is_harvested {
             Some(1_u32)
         } else {
@@ -470,6 +488,7 @@ impl MockBackend {
             gddr_uncorr_errs: None,
             harvesting_state,
             eth_live_status: Some(eth_live),
+            eth_peers,
             enabled_eth: None,
             enabled_gddr: None,
             enabled_l2cpu: None,
@@ -613,6 +632,40 @@ mod tests {
         // Power should vary between updates
         assert!(power1 != power2 || power2 != power3);
         assert!(power1 > 0.0 && power1 < 200.0);
+    }
+
+    #[test]
+    fn the_mock_reports_a_ring_of_peers() {
+        let n = 4;
+        let mut backend = MockBackend::new(n);
+        backend.init().unwrap();
+        for i in 0..n {
+            let s = backend.smbus_telemetry(i).unwrap();
+            let mask = s.eth_live_status.unwrap();
+            let peers = s.eth_peers.as_ref().expect("the mock reports peers");
+            assert_eq!(peers.len(), 1, "one ring link leaves each chip");
+            let p = &peers[0];
+            let next = &backend.devices()[(i + 1) % n];
+            let live = |port: u8| (mask >> port) & 1 == 1;
+            // Highest live port here to the next chip's lowest live port.
+            assert_eq!(p.port as u32, 63 - mask.leading_zeros());
+            assert!(live(p.port));
+            let next_mask = backend
+                .smbus_telemetry(next.index)
+                .unwrap()
+                .eth_live_status
+                .unwrap();
+            assert_eq!(p.peer_port as u32, next_mask.trailing_zeros());
+            assert_eq!(p.peer_bus_id, next.bus_id, "the ring closes on chip 0");
+        }
+        // One chip has nobody to link to.
+        let mut one = MockBackend::new(1);
+        one.init().unwrap();
+        assert!(one.smbus_telemetry(0).unwrap().eth_peers.is_none());
+        // Updating does not change the answer.
+        let before = backend.smbus_telemetry(2).unwrap().eth_peers.clone();
+        backend.update().unwrap();
+        assert_eq!(backend.smbus_telemetry(2).unwrap().eth_peers, before);
     }
 
     #[test]

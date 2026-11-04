@@ -18,7 +18,7 @@
 
 use crate::backend::TelemetryBackend;
 use crate::bus::signals as sig;
-use crate::models::telemetry::{real_fan_rpm, REGISTER_NO_READING};
+use crate::models::telemetry::{real_fan_rpm, EthPeer, REGISTER_NO_READING};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 use tt_toplike_bus::{EntityKey, Event, Payload, Provenance, RawFrame, Sample, Sweep, Value};
@@ -54,6 +54,10 @@ pub struct BackendSource {
     last: HashMap<(EntityKey, &'static str), Value>,
     /// Last `snapshot_json()` text emitted.
     last_raw: Option<String>,
+    /// The last peer list sent per chip. A list that differs from it (or
+    /// one with no entry yet) goes out as one `LinkPeer` per pair; the same
+    /// list on a later poll says nothing.
+    last_peers: HashMap<EntityKey, Vec<EthPeer>>,
     /// Devices skipped for having an empty `bus_id`, summed over all polls.
     /// (The identity map only counts these in `refresh`; this source does not
     /// use the map, so it keeps its own count.)
@@ -78,6 +82,7 @@ impl BackendSource {
         Self {
             last: HashMap::new(),
             last_raw: None,
+            last_peers: HashMap::new(),
             unkeyed: 0,
             prov,
         }
@@ -244,6 +249,22 @@ impl BackendSource {
                 }));
             }
         }
+        // Link peers: sent once when first reported and again only when the
+        // list changes, never every tick. A backend that does not know its
+        // peers (every real one) leaves `eth_peers` as `None` and sends
+        // nothing.
+        if let Some(peers) = &s.eth_peers {
+            if self.last_peers.get(key) != Some(peers) {
+                for p in peers {
+                    let peer_chip = EntityKey::chip(&p.peer_bus_id);
+                    out(Payload::Event(Event::LinkPeer {
+                        port: EntityKey::eth_port(key, p.port),
+                        peer: EntityKey::eth_port(&peer_chip, p.peer_port),
+                    }));
+                }
+                self.last_peers.insert(key.clone(), peers.clone());
+            }
+        }
         if let Some(g) = &s.gddr_telemetry {
             for c in &g.channels {
                 let Ok(ch) = u8::try_from(c.channel) else {
@@ -291,12 +312,13 @@ impl Source for BackendSource {
     fn poll(&mut self, ctx: &PollCtx<'_>, _now: Instant, out: &mut dyn FnMut(Payload)) {
         self.poll_backend(ctx.backend, out);
     }
-    /// The next poll sends every slow-lane value and the raw frame again.
-    /// The Ethernet mask is then a first sight, so it gives no
-    /// `LinkChanged`.
+    /// The next poll sends every slow-lane value and the raw frame again,
+    /// and every chip's peer list as `LinkPeer` events. The Ethernet mask
+    /// is then a first sight, so it gives no `LinkChanged`.
     fn resend_all(&mut self) {
         self.last.clear();
         self.last_raw = None;
+        self.last_peers.clear();
     }
 }
 
@@ -306,7 +328,9 @@ mod tests {
     use crate::backend::pcie_counters::PcieBandwidth;
     use crate::error::BackendResult;
     use crate::models::device::Device;
-    use crate::models::telemetry::{GddrChannel, GddrTelemetry, SmbusTelemetry, Telemetry};
+    use crate::models::telemetry::{
+        EthPeer, GddrChannel, GddrTelemetry, SmbusTelemetry, Telemetry,
+    };
 
     const A: &str = "0000:01:00.0";
     const B: &str = "0000:02:00.0";
@@ -602,6 +626,87 @@ mod tests {
         let out = poll(&mut s, &f);
         assert_eq!(links(&out), vec![(EntityKey::chip(A), 0x0F)]);
         assert!(links(&poll(&mut s, &f)).is_empty());
+    }
+
+    /// The `LinkPeer` events in a poll, as (port, peer) pairs.
+    fn peers_of(o: &[Payload]) -> Vec<(EntityKey, EntityKey)> {
+        o.iter()
+            .filter_map(|p| match p {
+                Payload::Event(Event::LinkPeer { port, peer }) => {
+                    Some((port.clone(), peer.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn peer(port: u8, bus: &str, peer_port: u8) -> EthPeer {
+        EthPeer {
+            port,
+            peer_bus_id: bus.into(),
+            peer_port,
+        }
+    }
+
+    #[test]
+    fn a_peer_list_emits_one_link_peer_per_pair_and_none_when_unchanged() {
+        let (mut f, mut s) = setup(vec![dev(0, A)]);
+        f.smbus.insert(
+            0,
+            smbus_with(|m| {
+                m.eth_peers = Some(vec![peer(13, B, 0), peer(12, B, 1)]);
+            }),
+        );
+        let a = EntityKey::chip(A);
+        let b = EntityKey::chip(B);
+        let first = peers_of(&poll(&mut s, &f));
+        assert_eq!(
+            first,
+            vec![
+                (EntityKey::eth_port(&a, 13), EntityKey::eth_port(&b, 0)),
+                (EntityKey::eth_port(&a, 12), EntityKey::eth_port(&b, 1)),
+            ],
+            "one event per pair, in list order"
+        );
+        // The same list on later polls says nothing.
+        for _ in 0..3 {
+            assert!(
+                peers_of(&poll(&mut s, &f)).is_empty(),
+                "no change, no event"
+            );
+        }
+        // A changed list is sent again, in full.
+        f.smbus.insert(
+            0,
+            smbus_with(|m| {
+                m.eth_peers = Some(vec![peer(13, B, 2), peer(12, B, 1)]);
+            }),
+        );
+        let again = peers_of(&poll(&mut s, &f));
+        assert_eq!(again.len(), 2);
+        assert_eq!(again[0].1, EntityKey::eth_port(&b, 2));
+        assert!(peers_of(&poll(&mut s, &f)).is_empty());
+        // After `resend_all` the current list goes out once more.
+        s.resend_all();
+        assert_eq!(peers_of(&poll(&mut s, &f)).len(), 2);
+    }
+
+    #[test]
+    fn a_real_backend_emits_no_link_peer() {
+        // A real backend reports a live mask and no peers (`None`).
+        let (mut f, mut s) = setup(vec![dev(0, A), dev(1, B)]);
+        for i in 0..2 {
+            f.smbus.insert(
+                i,
+                smbus_with(|m| {
+                    m.eth_live_status = Some(0x0FFF);
+                    assert!(m.eth_peers.is_none(), "peers default to None");
+                }),
+            );
+        }
+        for _ in 0..3 {
+            assert!(peers_of(&poll(&mut s, &f)).is_empty());
+        }
     }
 
     #[test]

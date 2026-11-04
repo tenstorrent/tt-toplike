@@ -1,5 +1,5 @@
-//! The generator behind `tests/fixtures/solo.jsonl` and
-//! `tests/fixtures/party4.jsonl`, and the source of every larger party the
+//! The generator behind `tests/fixtures/solo.jsonl`,
+//! `tests/fixtures/party4.jsonl` and `tests/fixtures/cross4.jsonl`, and the source of every larger party the
 //! party tests need (2, 4 and 32 chips, in memory only).
 //!
 //! Ledger ruling R6 says a committed fixture must not carry this machine's
@@ -31,8 +31,25 @@
 //! The wobble comes from a small linear congruential generator written out
 //! here, so the fixtures do not depend on the crate's own generator.
 //!
-//! The committed files are [`SOLO_TICKS`] ticks of one chip and
-//! [`PARTY4_TICKS`] ticks of four. `n` chips cost about `n * ticks` sweeps,
+//! # The links variant ([`records_with_links`])
+//!
+//! The same script plus four extra things, for a ring of `n` chips (at
+//! least 2). These are what `cross4.jsonl` adds:
+//!
+//! | Tick | What happens |
+//! |---|---|
+//! | 1 | one `LinkPeer` per chip: chip `i`'s highest live port (the top bit of the chip's Ethernet mask) to chip `(i + 1) mod n`'s lowest live port (always port 0, because every mask starts at bit 0). The mock backend reports the same shape |
+//! | 80 | `demo-pair` is ready on chips 0 and 1, so the pair's two floors can send a hero across the link between them |
+//! | 400 | chip 1's ring port (its highest live port) goes down: its mask loses that bit, and a `LinkChanged` follows |
+//! | 430 | the same port comes up again: the mask is back, and a `LinkChanged` follows |
+//!
+//! Chip 0's own mask change at `ticks - 200` (see the first table) still
+//! happens, and it takes chip 0's ring port down for good. With
+//! [`CROSS4_TICKS`] that is tick 600, after the crossing scenes.
+//!
+//! The committed files are [`SOLO_TICKS`] ticks of one chip,
+//! [`PARTY4_TICKS`] ticks of four and [`CROSS4_TICKS`] ticks of four with
+//! links. `n` chips cost about `n * ticks` sweeps,
 //! so the 32-chip party is only ever built in memory.
 
 use tt_toplike_bus::{EntityKey, Event, Payload, Provenance, Record, Sample, Sweep, Value};
@@ -42,6 +59,10 @@ pub const SOLO_TICKS: u64 = 1200;
 
 /// Ticks in `party4.jsonl`.
 pub const PARTY4_TICKS: u64 = 600;
+
+/// Ticks in `cross4.jsonl`. The party's own link change falls at tick 600,
+/// after the scripted link down (400) and up (430).
+pub const CROSS4_TICKS: u64 = 800;
 
 /// The header line, the same as the busy log's.
 pub const HEADER: &str = r#"{"schema":1,"kind":"Live","tool_versions":{"backend":"generator","mode":"mock","tt-toplike-bus":"0.1.0"}}"#;
@@ -146,7 +167,28 @@ fn temperature(tick: u64, offset: f64) -> f64 {
 
 /// Every record of a party of `chips` chips over `ticks` ticks, in order.
 pub fn records(chips: u8, ticks: u64) -> Vec<Record> {
-    script(chips, chips, ticks)
+    script(chips, chips, ticks, false)
+}
+
+/// The party log of [`records`] plus a ring of `LinkPeer` events at tick 1,
+/// a model on chips 0 and 1 at tick 80, and a link down on chip 1's ring
+/// port at tick 400 and up again at 430. See the module comment. Needs at
+/// least 2 chips and at least 430 ticks.
+pub fn records_with_links(chips: u8, ticks: u64) -> Vec<Record> {
+    assert!(chips >= 2, "a ring has at least two chips");
+    assert!(ticks >= 430, "the link comes back up at tick 430");
+    script(chips, chips, ticks, true)
+}
+
+/// The Ethernet live mask the script gives chip `i` at tick 1: the low
+/// `2 + i % 12` bits.
+fn eth_mask(i: usize) -> u64 {
+    (1u64 << (2 + i % 12)) - 1
+}
+
+/// The highest live port of a mask: the port a ring link leaves from.
+fn top_port(mask: u64) -> u8 {
+    (63 - mask.leading_zeros()) as u8
 }
 
 /// The script of [`records`] for 32 chips, played on `chips` chips (at
@@ -163,13 +205,17 @@ pub fn records(chips: u8, ticks: u64) -> Vec<Record> {
 /// every tick and the others follow in order.
 pub fn records_with_extra_chips(chips: u8, ticks: u64) -> Vec<Record> {
     assert!(chips >= 32, "the extra chips come after the first 32");
-    script(chips, 32, ticks)
+    script(chips, 32, ticks, false)
 }
 
 /// The script behind [`records`] and [`records_with_extra_chips`]: `chips`
 /// chips sweep, of which the first `story` play the models, the stall, the
-/// throttle and the link change. `story` is at most `chips`.
-fn script(chips: u8, story: u8, ticks: u64) -> Vec<Record> {
+/// throttle and the link change. `story` is at most `chips`. With `links`
+/// the script adds the ring, the pair's model and the link down and up that
+/// [`records_with_links`] describes; without it the output is exactly what
+/// it was before the links existed, so `solo.jsonl` and `party4.jsonl` stay
+/// as they are.
+fn script(chips: u8, story: u8, ticks: u64, links: bool) -> Vec<Record> {
     assert!(story >= 1, "a party has at least one chip");
     assert!(story <= chips, "the story's chips are among the chips");
     let n = story as u64;
@@ -213,7 +259,7 @@ fn script(chips: u8, story: u8, ticks: u64) -> Vec<Record> {
             for (i, key) in keys.iter().enumerate() {
                 let tensix = if i % 2 == 0 { 0x3edf_u64 } else { 0x3fff };
                 // A mask of `2 + i % 12` low bits: neighbours differ.
-                let eth = (1u64 << (2 + i % 12)) - 1;
+                let eth = eth_mask(i);
                 w.sample(key.clone(), "toplike.harvesting_state", Value::U64(0));
                 w.sample(
                     key.clone(),
@@ -231,6 +277,49 @@ fn script(chips: u8, story: u8, ticks: u64) -> Vec<Record> {
                 }
                 heartbeats[i] += 1;
                 w.sample(key.clone(), "toplike.heartbeat", Value::U64(heartbeats[i]));
+            }
+        }
+
+        // The links variant: the ring, the pair's model, one port down and up.
+        if links {
+            if tick == 1 {
+                for i in 0..chips as usize {
+                    let next = (i + 1) % chips as usize;
+                    w.event(
+                        "backend",
+                        Event::LinkPeer {
+                            port: EntityKey::eth_port(&keys[i], top_port(eth_mask(i))),
+                            // Every mask starts at bit 0, so port 0 is the
+                            // next chip's lowest live port.
+                            peer: EntityKey::eth_port(&keys[next], 0),
+                        },
+                    );
+                }
+            }
+            if tick == 80 {
+                w.event(
+                    "monitor",
+                    Event::ModelReady {
+                        model: EntityKey::model("demo-pair"),
+                        chips: vec![keys[0].clone(), keys[1].clone()],
+                    },
+                );
+            }
+            if tick == 400 || tick == 430 {
+                let full = eth_mask(1);
+                let mask = if tick == 400 {
+                    full & !(1u64 << top_port(full))
+                } else {
+                    full
+                };
+                w.sample(keys[1].clone(), "toplike.eth.live_mask", Value::U64(mask));
+                w.event(
+                    "backend",
+                    Event::LinkChanged {
+                        chip: keys[1].clone(),
+                        mask: mask as u16,
+                    },
+                );
             }
         }
 
@@ -290,9 +379,19 @@ fn script(chips: u8, story: u8, ticks: u64) -> Vec<Record> {
 /// The whole fixture file for `chips` chips and `ticks` ticks: the header
 /// line, then one line per record, each ending in a newline.
 pub fn file_text(chips: u8, ticks: u64) -> String {
+    text_of(&records(chips, ticks))
+}
+
+/// The whole fixture file for [`records_with_links`].
+pub fn file_text_with_links(chips: u8, ticks: u64) -> String {
+    text_of(&records_with_links(chips, ticks))
+}
+
+/// The header line, then one line per record.
+fn text_of(records: &[Record]) -> String {
     let mut text = String::from(HEADER);
     text.push('\n');
-    for r in records(chips, ticks) {
+    for r in records {
         text.push_str(&r.to_line());
         text.push('\n');
     }
