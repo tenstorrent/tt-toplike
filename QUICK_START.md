@@ -252,15 +252,16 @@ tt-toplike --mock --mock-devices 2   # or fully simulated, to verify the binary 
 
 ### tmux / SSH terminal colors
 tt-toplike uses `Color::Reset` backgrounds throughout — no grey boxes.
-It draws in 24-bit color when `COLORTERM` is `truecolor` or `24bit`, inside tmux too, and in 256
-colors otherwise. For full color in tmux, use a terminal that supports it and add this to
-`~/.tmux.conf`:
+It draws in 24-bit color when `COLORTERM` is `truecolor` or `24bit`, except inside tmux, where it
+uses 256 colors: a tmux server keeps the `COLORTERM` of the session that started it, which can be
+wrong for the terminal you are in now, and macOS Terminal.app over SSH shows 24-bit fills as the wrong
+background. To settle it by hand, set `TT_TOPLIKE_COLOR=truecolor` or `TT_TOPLIKE_COLOR=256`; it beats
+every guess. For full color in tmux, use a terminal that supports it, set `TT_TOPLIKE_COLOR=truecolor`
+and add this to `~/.tmux.conf`:
 
 ```
 set -as terminal-features ',*:RGB'
 ```
-
-macOS Terminal.app does not set `COLORTERM`, so it stays on 256 colors.
 
 ### Board labels look wrong
 If you have independent PCIe cards (p150a, n150) and see "Board 0 → [Dev0, Dev1]"

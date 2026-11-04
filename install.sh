@@ -1,5 +1,5 @@
 #!/bin/bash
-# Install script for tt-toplike with multi-chip support and 256-color fallback (tmux honours COLORTERM)
+# Install script for tt-toplike with multi-chip support and 256-color tmux compatibility (TT_TOPLIKE_COLOR overrides)
 
 set -e
 

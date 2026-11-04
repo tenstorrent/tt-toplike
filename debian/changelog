@@ -22,7 +22,18 @@ tt-toplike (0.17.0) noble; urgency=medium
     different number than 0.16 did for the same log. The saga crate is
     0.2.0.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 18:05:00 -0800
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 20:30:00 -0800
+
+tt-toplike (0.16.7) noble; urgency=medium
+
+  * Fixes wrong background colours in macOS Terminal.app over SSH. 0.16.2
+    let COLORTERM=truecolor turn on 24-bit colour inside tmux, but a tmux
+    server keeps the COLORTERM of the session that started it, so a pane
+    could claim truecolor in a terminal that cannot draw it. tmux is back to
+    256 colours. New: TT_TOPLIKE_COLOR=truecolor or 256 settles the colour
+    depth by hand and beats every guess, tmux included.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 20:00:00 -0800
 
 tt-toplike (0.16.6) noble; urgency=medium
 
