@@ -16,7 +16,7 @@ Today a new view costs about 29 match-arm edits in `src/ui/tui/mod.rs` (14,773 l
 4. Each viz supplies its own legend, explain and help fragments. This delivers the "modular per-arcade `l` legend / `e` explain" item from the backlog.
 5. One working example of each tier ships with the platform. Each is also the template the scaffold command copies.
 6. `tt-toplike viz new <name>` (and `--yaml`) scaffolds a viz. A golden-frame test helper checks a render. A recipe in `AGENTS.md` tells an agent where to go and what to run.
-7. At least one existing small view moves onto the registry to prove the pattern holds for real code.
+7. ~~At least one existing small view moves onto the registry.~~ Dropped on 2026-11-04: the user decided not to disrupt existing views (see Decisions). The two examples prove the pattern. The example Rust plugin may use only the public `Viz` trait and context, never anything private to `mod.rs`.
 
 ## Non-goals
 
@@ -90,7 +90,7 @@ Both are marked as examples and are disabled by default. They are enabled by the
 
 ### Migration proof
 
-One small existing view moves onto the registry. *My call:* pick the smallest self-contained view when planning (the builder chooses). The migration must leave its output unchanged, which the golden-frame helper confirms.
+Dropped. No existing view moves. The Rust example uses only the public trait, which is the proof that a plugin needs nothing private.
 
 ## Constraints
 
@@ -108,13 +108,11 @@ One small existing view moves onto the registry. *My call:* pick the smallest se
 - The `viz` module is gated on the `tui` feature. It need not compile without it.
 - `build.rs` scanning is the first choice. The builder runs `cargo package` first. If scanning breaks packaging, use `inventory`.
 - The `ctx` data comes from whatever the bus signal store already holds. If a viz needs more history than the store keeps, the builder adds a small capped history in the viz host, and does not change the bus. Tier 2 signal patterns follow the bus's existing entity naming (`chip:<bus_id>`, `tile:...`). The builder finds the metric names in the bus crate.
-- The migrated proof view can be any small view. The builder captures its golden frame before changing it. If the smallest view is too entangled with `App`, pick another.
 
 ## Left to the builder
 
 - Exact trait signatures and the `ctx` type.
 - `build.rs` scanning versus `inventory` (with the fallback above).
-- Which small view to migrate.
 - The YAML parser choice within the constraint above.
 - How hot reload watches files (polling or a file-watcher crate).
 - The exact widget field names in the schema, as long as one JSON Schema covers them.
