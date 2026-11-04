@@ -25,6 +25,12 @@ use crate::models::{Architecture, Device, SmbusTelemetry, Telemetry};
 use chrono::Utc;
 use std::collections::HashMap;
 
+/// The Ethernet ports the mock's peer ring may use: the low 12, the ports a
+/// Blackhole chip has and the ports Saga binds to Blackhole portals. A ring
+/// port outside these could never be a portal, so a `--mock` run would show
+/// no crossing.
+const LOW_PORTS: u64 = 0xFFF;
+
 /// Pre-defined mock hardware scenarios for testing at various scales.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MockScenario {
@@ -335,19 +341,24 @@ impl MockBackend {
         // ETH live status: ~75% ports live (alternating bit pattern)
         let eth_live = 0xAAAAAAAAAAAAAAAA_u64;
 
-        // Ethernet peers: a ring. This chip's highest live port is wired to
-        // the next chip's lowest live port, and the last chip closes the
-        // ring on chip 0. Every mock chip has the same live mask, so the
-        // answer does not change from one update to the next. One chip has
-        // no neighbour, so it reports none. (An event carries no
+        // Ethernet peers: a ring. This chip's highest live port among the
+        // low 12 (`LOW_PORTS`) is wired to the next chip's lowest live port
+        // among the low 12, and the last chip closes the ring on chip 0.
+        // With the mask above that is port 11 to port 1. Both ends stay in
+        // the low 12 so that Saga can bind them to Blackhole portals and a
+        // `--mock` run can show a crossing. Every mock chip has the same
+        // live mask, so the answer does not change from one update to the
+        // next. One chip has no neighbour, so it reports none, and a chip
+        // with no live low port reports none either. (An event carries no
         // provenance; the source that turns this into `LinkPeer` events is
         // the mock's `Estimated` one, so a log marks them as made up.)
-        let eth_peers = if self.device_count > 1 && eth_live != 0 {
+        let low_live = eth_live & LOW_PORTS;
+        let eth_peers = if self.device_count > 1 && low_live != 0 {
             let next = &self.devices[(device_idx + 1) % self.device_count];
             Some(vec![EthPeer {
-                port: (63 - eth_live.leading_zeros()) as u8,
+                port: (63 - low_live.leading_zeros()) as u8,
                 peer_bus_id: next.bus_id.clone(),
-                peer_port: eth_live.trailing_zeros() as u8,
+                peer_port: low_live.trailing_zeros() as u8,
             }])
         } else {
             None
@@ -647,15 +658,21 @@ mod tests {
             let p = &peers[0];
             let next = &backend.devices()[(i + 1) % n];
             let live = |port: u8| (mask >> port) & 1 == 1;
-            // Highest live port here to the next chip's lowest live port.
-            assert_eq!(p.port as u32, 63 - mask.leading_zeros());
+            // Highest live port among the low 12 here, to the next chip's
+            // lowest live port among the low 12. Saga binds Blackhole
+            // portals only to ports 0 to 11, so a ring port outside them
+            // could never be crossed in a `--mock` run.
+            let low = mask & LOW_PORTS;
+            assert_eq!(p.port as u32, 63 - low.leading_zeros());
             assert!(live(p.port));
+            assert!(p.port < 12, "the near end is a Blackhole portal port");
             let next_mask = backend
                 .smbus_telemetry(next.index)
                 .unwrap()
                 .eth_live_status
                 .unwrap();
-            assert_eq!(p.peer_port as u32, next_mask.trailing_zeros());
+            assert_eq!(p.peer_port as u32, (next_mask & LOW_PORTS).trailing_zeros());
+            assert!(p.peer_port < 12, "the far end is a Blackhole portal port");
             assert_eq!(p.peer_bus_id, next.bus_id, "the ring closes on chip 0");
         }
         // One chip has nobody to link to.

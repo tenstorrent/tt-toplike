@@ -56,7 +56,8 @@ pub struct BackendSource {
     last_raw: Option<String>,
     /// The last peer list sent per chip. A list that differs from it (or
     /// one with no entry yet) goes out as one `LinkPeer` per pair; the same
-    /// list on a later poll says nothing.
+    /// list on a later poll says nothing. A chip whose list goes to `None`
+    /// loses its entry.
     last_peers: HashMap<EntityKey, Vec<EthPeer>>,
     /// Devices skipped for having an empty `bus_id`, summed over all polls.
     /// (The identity map only counts these in `refresh`; this source does not
@@ -252,9 +253,14 @@ impl BackendSource {
         // Link peers: sent once when first reported and again only when the
         // list changes, never every tick. A backend that does not know its
         // peers (every real one) leaves `eth_peers` as `None` and sends
-        // nothing.
-        if let Some(peers) = &s.eth_peers {
-            if self.last_peers.get(key) != Some(peers) {
+        // nothing. A list that goes away is forgotten, so if it comes back
+        // (the same or not) it is sent again: the chip may have been
+        // recabled while it reported nothing.
+        match &s.eth_peers {
+            None => {
+                self.last_peers.remove(key);
+            }
+            Some(peers) if self.last_peers.get(key) != Some(peers) => {
                 for p in peers {
                     let peer_chip = EntityKey::chip(&p.peer_bus_id);
                     out(Payload::Event(Event::LinkPeer {
@@ -264,6 +270,7 @@ impl BackendSource {
                 }
                 self.last_peers.insert(key.clone(), peers.clone());
             }
+            Some(_) => {}
         }
         if let Some(g) = &s.gddr_telemetry {
             for c in &g.channels {
@@ -692,17 +699,37 @@ mod tests {
     }
 
     #[test]
+    fn a_peer_list_that_goes_away_is_forgotten() {
+        // Some(list) -> None -> Some(same list): the list is sent again when
+        // it comes back. A chip that stopped reporting peers may have been
+        // recabled in between, so the source forgets what it last sent
+        // when the list goes away.
+        let (mut f, mut s) = setup(vec![dev(0, A)]);
+        let with = smbus_with(|m| m.eth_peers = Some(vec![peer(11, B, 1)]));
+        f.smbus.insert(0, with.clone());
+        assert_eq!(peers_of(&poll(&mut s, &f)).len(), 1);
+        f.smbus.insert(0, smbus_with(|m| m.eth_peers = None));
+        assert!(peers_of(&poll(&mut s, &f)).is_empty(), "None sends nothing");
+        f.smbus.insert(0, with);
+        assert_eq!(
+            peers_of(&poll(&mut s, &f)).len(),
+            1,
+            "the list is sent again after it went away"
+        );
+    }
+
+    #[test]
     fn a_real_backend_emits_no_link_peer() {
-        // A real backend reports a live mask and no peers (`None`).
+        // A real backend reports a live mask and no peers (`None`). This
+        // test guards the source: it must not invent peers from the live
+        // mask. The test over a real backend's own parsing is
+        // `a_tt_smi_snapshot_with_a_live_mask_sends_no_link_peer` in
+        // `backend/json.rs`.
         let (mut f, mut s) = setup(vec![dev(0, A), dev(1, B)]);
         for i in 0..2 {
-            f.smbus.insert(
-                i,
-                smbus_with(|m| {
-                    m.eth_live_status = Some(0x0FFF);
-                    assert!(m.eth_peers.is_none(), "peers default to None");
-                }),
-            );
+            let m = smbus_with(|m| m.eth_live_status = Some(0x0FFF));
+            assert!(m.eth_peers.is_none(), "peers default to None");
+            f.smbus.insert(i, m);
         }
         for _ in 0..3 {
             assert!(peers_of(&poll(&mut s, &f)).is_empty());

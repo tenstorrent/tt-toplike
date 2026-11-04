@@ -38,7 +38,7 @@
 //!
 //! | Tick | What happens |
 //! |---|---|
-//! | 1 | one `LinkPeer` per chip: chip `i`'s highest live port (the top bit of the chip's Ethernet mask) to chip `(i + 1) mod n`'s lowest live port (always port 0, because every mask starts at bit 0). The mock backend reports the same shape |
+//! | 1 | one `LinkPeer` per chip: chip `i`'s highest live port (the top bit of the chip's Ethernet mask) to chip `(i + 1) mod n`'s lowest live port (always port 0, because every mask starts at bit 0). The mock backend reports the same shape, with both ends among the low 12 ports |
 //! | 80 | `demo-pair` is ready on chips 0 and 1, so the pair's two floors can send a hero across the link between them |
 //! | 400 | chip 1's ring port (its highest live port) goes down: its mask loses that bit, and a `LinkChanged` follows |
 //! | 430 | the same port comes up again: the mask is back, and a `LinkChanged` follows |
@@ -64,8 +64,11 @@ pub const PARTY4_TICKS: u64 = 600;
 /// after the scripted link down (400) and up (430).
 pub const CROSS4_TICKS: u64 = 800;
 
-/// The header line, the same as the busy log's.
-pub const HEADER: &str = r#"{"schema":1,"kind":"Live","tool_versions":{"backend":"generator","mode":"mock","tt-toplike-bus":"0.1.0"}}"#;
+/// The header line of all three party logs. It names bus 0.2.0, the
+/// version that added `LinkPeer`, because `cross4.jsonl` holds that event.
+/// (The busy log's header still names 0.1.0: it holds no 0.2.0 event.)
+/// Readers ignore the header, so it moves no digest.
+pub const HEADER: &str = r#"{"schema":1,"kind":"Live","tool_versions":{"backend":"generator","mode":"mock","tt-toplike-bus":"0.2.0"}}"#;
 
 /// Nanoseconds of record time per tick (10 Hz).
 const TICK_NS: u64 = 100_000_000;
