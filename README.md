@@ -274,8 +274,11 @@ a dungeon built from this box's own signals: each chip is a floor with its own h
 floor follows the chip's tile grid, and the seed comes from the readings themselves. With more
 than one chip, the view shows every floor at once as a grid of tiles, each following its hero;
 `[` and `]` move the focus from floor to floor, and `z` shows the focused floor alone. Boxes with
-more than 32 chips get floors for the first 32. A hero never leaves its floor yet; crossing
-between linked chips comes next. A model becoming ready, a reset, a model going away, a training
+more than 32 chips get floors for the first 32. A hero can step through an Ethernet portal
+into the floor of the chip at the other end of the link: the portal takes the far floor's colour,
+both tiles show the crossing, and the chronicle tells it. The far end of a link comes from the
+bus event `LinkPeer`, which only `--mock` and recorded logs carry today, so on real hardware the
+portals stay scenery until a real source exists. A model becoming ready, a reset, a model going away, a training
 run or a quiet season ends a world, and the next one has a new maze. One chronicle tells what
 happens on every floor, each line tagged with its floor, and `y` says in a sentence what set each
 line off. One chip looks as it did before the party.

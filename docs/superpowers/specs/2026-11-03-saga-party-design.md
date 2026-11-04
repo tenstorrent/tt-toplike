@@ -1,9 +1,9 @@
 # Saga party and portal crossing: an addendum to the Saga design
 
-Date: 2026-11-03. Status: phase A (the party) built in 0.17.0, on branch `saga-party`; phase B
-(crossing, section 8) not built. Author: Claude, with Taylor Singletary. Numbers that moved while
+Date: 2026-11-03. Status: phase A (the party) built in 0.17.0 and phase B (crossing,
+section 8) built in 0.18.0, on branch `saga-party`. Author: Claude, with Taylor Singletary. Numbers that moved while
 building are corrected in place and marked "(as built)": the grid table in 5.2, the roster rule in
-5.4 and the entity count in 3.7. The ledger is `.superpowers/sdd/2026-11-03-saga-party/progress.md`.
+5.4, the entity count in 3.7 and the end item and mock ring in 8.6. The ledger is `.superpowers/sdd/2026-11-03-saga-party/progress.md`.
 Base: `docs/superpowers/specs/2026-11-02-saga-design.md` (called "the spec" below) and the phase 1
 code on `what-if` at 0.16.2 (HEAD 6932937d). Section numbers such as "spec 3.5" point into the spec.
 
@@ -460,8 +460,9 @@ down because a reset ended the world needs no rule: the world ends, and the part
 - **Determinism.** Link state comes only from records, in stream order. Transit is counted in
   ticks. Hooks are read in a fixed order. The digest's version becomes 3. It adds the tags `0x07`
   `HeroCrossed` (tick, world, member, from floor, from port, to floor, to port, cause) and `0x08`
-  `CrossingFailed` (tick, world, member, floor, port, cause), and verb code 7. The end item adds
-  one byte per member: 0 on a floor, 1 in transit.
+  `CrossingFailed` (tick, world, member, floor, port, cause), and verb code 7. (As built: the end
+  item adds no byte. A member in transit sets bit `0x80` of its floor byte, which is free because a
+  floor index is below 32, so a saga with no crossing writes the same end item as before.)
 - **Floors can empty and crowd.** A hero who crosses leaves its home floor. A floor can have no
   hero, and another can have several. The party still has the same members, at most 32. Section
   9, question 3, asks the user whether that is wanted.
@@ -470,7 +471,8 @@ down because a reset ended the world needs no rule: the world ends, and the part
   so they skip the routine budget. Each crossing is a quest followed by a 30-tick dwell, so the
   party writes at most about one crossing line per tick even if every hook fires.
 - **Mock and replay.** The mock backend writes `LinkPeer` events for its own chips (a ring: chip
-  `i`'s highest live port to chip `i + 1`'s lowest), marked `Estimated` like every mock reading.
+  `i`'s highest live port among the low 12 to chip `i + 1`'s lowest live port among the low 12,
+  as built, so that the ports fall on Blackhole portals), marked `Estimated` like every mock reading.
   So `--mock` and CI see crossings, and every mock crossing carries the `~` mark (spec 3.9). On
   real hardware, crossings happen only once a real source writes `LinkPeer`. Until then the
   portals stay scenery, and the legend says the far side is unknown.

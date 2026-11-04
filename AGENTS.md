@@ -2143,7 +2143,7 @@ rulings (R1 to R28) that amended the plan, then a final whole-branch review and 
 * 0.16.4: Saga is also an arcade panel (`view = "saga"`; `now-serving` shows it). See "Saga as an
   arcade panel" in the version history above and `docs/saga.md`, "The arcade panel".
 
-* `crates/tt-toplike-saga/` (library, 0.2.0 since the party; 0.1.0 in phase 1): the pure core. `Saga::feed(&Record)` in order,
+* `crates/tt-toplike-saga/` (library, 0.3.0 since crossing, 0.2.0 with the party, 0.1.0 in phase 1): the pure core. `Saga::feed(&Record)` in order,
   `Saga::state()`, `Saga::drain_events()`, `Saga::digest()`. Modules: `observe` (records to
   observations, the pacemaker tick), `seed`, `stats`, `topology`, `maze`, `world` (lifecycle),
   `hero`, `quest`, `chronicle`, `pack` (lexicon, glyphs, palette), `event`, `saga` (front door).
@@ -2153,16 +2153,16 @@ rulings (R1 to R28) that amended the plan, then a final whole-branch review and 
   core), phase 3 (steering, rotation stop, arcade panel) and phase 4 (packs, narrator) are not
   built.
 
-### The party (Nov 3 2026, branch `saga-party`, 0.17.0)
+### The party and crossing (Nov 3 and 4 2026, branch `saga-party`, 0.17.0 and 0.18.0)
 
 Prompt (Taylor), asked how the hero travels between floors: "i'd prefer a view that mixed the chips
 together for saga. or showed you the sagas happening on each chip at the same time". Offered the
 choice, Taylor picked "both: party plus portal crossing", in two stages (ruling R29). Phase A, the
-party, is 0.17.0. Phase B, crossing through Ethernet portals, is not built: a hero never leaves its
-floor yet; crossing between linked chips comes next. Addendum:
+party, is 0.17.0. Phase B, crossing through Ethernet portals, is 0.18.0 (saga crate 0.3.0, bus
+crate 0.2.0). Addendum:
 `docs/superpowers/specs/2026-11-03-saga-party-design.md`. Plan:
 `docs/superpowers/plans/2026-11-03-saga-party.md`. Ledger:
-`.superpowers/sdd/2026-11-03-saga-party/progress.md` (rulings R29 to R35, a task report and a
+`.superpowers/sdd/2026-11-03-saga-party/progress.md` (rulings R29 to R44, a task report and a
 review per task).
 
 What it does:
@@ -2183,8 +2183,11 @@ What it does:
   a minute (worst silence 533 ticks, measured again in Task A.8) and the longest stretch with no line is 26 ticks
   (`the_chronicle_is_never_silent_for_long_with_32_chips`, bound 32). `Quest::target_label` is the
   name the beat writes, aliased in generated mode; a real name over 32 characters is cut to 32.
-* **Digest version 2.** A version item first, a floor on quest events, beats and lines, and one
-  (floor, x, y) per member in the end item. `SagaState::chips_seen` (the roster's count) is not in
+* **Digest version 2 (0.17.0), version 3 (0.18.0).** A version item first, a floor on quest events,
+  beats and lines, and one (floor, x, y) per member in the end item. Version 3 adds the tags
+  `0x07` `HeroCrossed` and `0x08` `CrossingFailed` and verb code 7, and marks a member in transit
+  with bit `0x80` of its floor byte in the end item (R41: no extra byte, so no existing digest
+  moved beyond the version byte and the portal binding; the addendum's 8.6 was amended). `SagaState::chips_seen` (the roster's count) is not in
   the digest.
 * **Bounds at 32 chips.** At most 32 members, `World::floors` is an `Arc<[Floor]>` (a snapshot
   shares it), and a record costs under a million work units: the worst on the 32-chip log is a
@@ -2303,10 +2306,36 @@ What to know before changing it:
 * R34: the grid rule in the code is right and the addendum's table follows it; the roster also shows on a single page when chips have no floor.
 * R35: A.7's fix round was verified item by item with mutations, without a separate re-review.
 
+What crossing adds (0.18.0, Tasks B.1 to B.5):
+
+* **`LinkPeer`** (bus 0.2.0, an additive event naming both Ethernet port keys). A reader built
+  before it counts the line as a bad line (`tests/unknown_event.rs`). `docs/bus.md` documents it.
+  Only the mock backend writes it today: a ring from each chip's highest live port in the low 12
+  to the next chip's lowest live port (R38; ports inside the low 12 so that Blackhole portals bind).
+  No real backend writes it, so on real hardware portals stay unbound and no hero crosses.
+* **Core.** `links.rs` holds the link table (at most 64 chips by 64 ports, no port keys stored).
+  Each portal of a floor is bound to a live Ethernet port, west to east; a generic floor's portal
+  count follows its known live mask. A `U64` register is read from its exact bits (R39: through
+  an f64 the mock's `0xAAAA...` mask lost its low bits). `Verb::Cross`, `Hook::port`, `Transit`
+  (`TRANSIT_TICKS` 3), `HeroCrossed`, `CrossingFailed` and four crossing beat kinds (notable, so
+  they skip the routine budget). A link that drops while a hero is in transit throws the hero back
+  (`a_link_down_in_transit_throws_the_hero_back`). A crossing line ends in ` ~` when the last
+  live-mask sample of either chip was `Estimated`. `SagaState::portals` lists every portal for the
+  view and is not hashed.
+* **View.** Open portals take the far floor's hue, closed ones are dim, a crossing glows yellow
+  on both ends; a hero in transit is on no tile, both tiles' HUDs say `crossing F2 → F1`, and the
+  roster shows `»`. An empty floor keeps its tile's window (R43). The legend has a portal row.
+* **Traffic** stayed inside 20 KB/s only after `CALM_EVERY` went from 3 to 5 (R44); a calm tile
+  can show a hero that has crossed away for up to 5 ticks.
+* Rulings: R36 the party view's traffic fix (A.9), R37 B.1 and B.2 reviewed together, R38 the
+  mock ring's ports, R39 the exact 64-bit mask, R40 B.3's fix round accepted without re-review,
+  R41 transit in the floor byte, R42 `cross4.jsonl` and its pin unchanged (B.5 builds its failure
+  frames in the test), R43 and R44 B.5's fix round and the numbers measured on the release binary.
+
 ### Re-pinning the digest goldens
 
 `crates/tt-toplike-saga/tests/determinism.rs`, `a_snapshot_of_the_digests_matches`, pins one digest
-per fixture (`quiet.jsonl`, `bringup.jsonl`, `busy.jsonl`, `solo.jsonl`, `party4.jsonl`) for each
+per fixture (`quiet.jsonl`, `bringup.jsonl`, `busy.jsonl`, `solo.jsonl`, `party4.jsonl`, `cross4.jsonl`) for each
 name mode. A change to the digest encoding, the seed rule, the maze, the walk, quest planning, the
 grammar, the lexicon or the event order changes
 them. Re-pin only on purpose: run `cargo test -p tt-toplike-saga --test determinism`, copy the
@@ -2335,6 +2364,7 @@ moved it, and each diff is explained by that change:
 | `feat(saga): heroes cross Ethernet portals into the linked chip's floor` (party Task B.4, Nov 4 2026) | the crossing quest: `Verb::Cross` (code 7), `HeroCrossed` (tag 0x07) and `CrossingFailed` (tag 0x08), four crossing beat kinds, and the transit bit 0x80 on a member's floor byte in the end item | nothing moved: the five fixtures hold no `LinkPeer`, so no portal is bound, no hero crosses, and every member's transit bit is 0. New: `cross4.jsonl` 0x2a88827bd487ef7a (real) and 0x34a41fcbacbba99c (generated). No view frame, story print or panel frame moved. |
 | `feat(saga): portals, crossings and travellers drawn on every tile` (party Task B.5, Nov 4 2026) | the view draws crossings: portals in the far floor's hue (open) or dimmed (closed), a glow on both portals in transit, `crossing F2 → F5` HUDs, empty and crowded tiles, the roster's transit glyph; the core lists every portal in `SagaState::portals` (not hashed) | nothing moved: no digest row (the portal list is not in the digest), and no solo, busy, party4 or panel frame (those logs have no peers, and an unbound portal is drawn as before). New: `CROSS_GOLDEN`, ten frames of `cross4.jsonl` at 80x23 and 140x39 (link 1 down at tick 410, a hero in transit, a crossing thrown back and a dark portal, both injected into the log in the test, and the end of the last full world). |
 | `fix(saga): calmer party tiles and steady windows for crossings, inside the traffic budget` (party Task B.5, fix round 1) | an empty floor keeps its tile's window (`anchor` kept); an unfocused tile's held picture every 5 ticks (`CALM_EVERY`, was 3) | view frames only, no digest row: `PARTY_GOLDEN` all 8 and the busy `GOLDEN` frames at half the log (4 of 8) by `CALM_EVERY`; `CROSS_GOLDEN` all 10 (tick 410 and the end by the kept window, transit, thrown back, dark and the end by `CALM_EVERY`). Solo and panel frames did not move: one floor and the panel draw with `Motion::Full`. |
+| `feat(saga): heroes cross Ethernet links between chips (0.18.0)` (party Task B.6, Nov 4 2026) | docs, versions and verification only | nothing: no digest row, story pin, or view frame moved. |
 
 Pinned now (digest version 3, with the party, its merged chronicle, bound portals and crossings):
 `quiet.jsonl` 0xd6e0200609dcd3eb (both modes), `bringup.jsonl` 0xc9142f2256b8175a (both),
@@ -2348,6 +2378,20 @@ Record a `--headless --mock` run (without `--mock-workloads`), print `--bus-insp
 --saga-digest`, replay the recording into a second directory with `--replay`, and print the
 digest of that one. The two digests must match. Then record a second session the same way: its
 digest must differ, or the seed is not taking the readings.
+
+0.18.0 (digest version 3, Task B.6), each a 12-second `--headless --mock N --record DIR`
+recording, replayed with `--headless --replay DIR --speed 50 --bus-dir DIR2`:
+
+| Run | Records | Digest (printed twice, equal) | Replay at `--speed 50` |
+|---|---|---|---|
+| `--mock 4` | 9,048, 1 world, 10 beats | `0xad8cec85d321c8a0` | span 0.234 s against 11.938 s, same digest |
+| `--mock 32` | 70,390, 1 world, 14 beats | `0x7f96a9496a75fea5` | span 0.199 s against 11.930 s, same digest |
+| second `--mock 4` | 9,048, 1 world, 11 beats | `0x6f82483e31a9010c` (differs) | |
+
+A plain `--mock` run shows no crossing: its live masks never change (no `LinkChanged`) and it
+announces no model, so no crossing hook is ever offered, although its four `LinkPeer` events bind
+the portals. Crossings come from logs with a model on two linked chips or a link coming up
+(`cross4.jsonl`, whose chronicle shows crossing lines ending in `~`).
 
 0.17.0 (digest version 2, Task A.8), each a 12-second `--headless --mock N` recording:
 

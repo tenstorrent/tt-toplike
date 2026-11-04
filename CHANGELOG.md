@@ -17,6 +17,22 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.18.0
+- Saga heroes cross Ethernet links. Each portal on a floor's north edge is bound to its Ethernet
+  port, and a new bus event, `LinkPeer`, names the port at the other end of a link. A hero whose
+  model spans two chips, or whose link has just come up, walks to the portal and steps through it
+  into the floor of the chip at the other end. The crossing takes 3 ticks, and both tiles show it.
+  If the link drops on the way, the hero is thrown back out of the portal it left from.
+- Portals take the far floor's colour when the link is open, go dim when it is closed, and glow
+  while a hero crosses. A tile with no hero says so and keeps its map, and a tile can hold several
+  heroes. The chronicle tells each crossing on both floors, and a line built from estimated
+  readings (every `--mock` reading) ends in `~`. A tile that is not focused shows a held picture,
+  so a hero who has crossed away can show on it for up to 5 ticks.
+- On real hardware no backend writes `LinkPeer` yet, so the far side of a link is unknown and no
+  hero crosses. Only `--mock` (a ring of its own chips) and recorded logs carry it.
+- The saga digest's encoding is now version 3, so `--saga-digest` prints a different number than
+  0.17 did for the same log. The bus crate is 0.2.0 and the saga crate is 0.3.0.
+
 ### 0.17.0
 - Saga has a party: every chip's floor has its own hero, born with the world, and all of them quest
   at the same time. With more than one chip the view shows every floor at once as a grid of tiles,
@@ -32,7 +48,7 @@ list is a summary and is not kept for every release.
   To keep it readable, one floor's quest lines are written per second; a hero not heard for 300
   ticks goes first. A party's birth writes one line for the whole party.
 - A model's dungeon now spans every chip, with the model's sage on the floors of the chips it names.
-- A hero never leaves its floor yet; crossing between linked chips comes next.
+- A hero stays on its floor in 0.17.0; crossing came in 0.18.0.
 - One chip draws the same view and tells the same story as before. The saga digest's encoding is
   now version 2 (floors and every hero's position), so `--saga-digest` prints a different number
   than 0.16 did for the same log. The saga crate is 0.2.0.

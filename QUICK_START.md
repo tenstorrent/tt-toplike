@@ -1,6 +1,6 @@
 # tt-toplike Quick Start
 
-**Version**: 0.17.0
+**Version**: 0.18.0
 **Last Updated**: November 3, 2026
 
 ---
@@ -110,7 +110,7 @@ tt-toplike --mode training    # or press t in any mode (aliases: train, tt-train
 tt-toplike --mode saga    # or press S in any mode
 ```
 - A party of heroes quests through a dungeon built from the box's own signals. Each chip is a floor with its own hero, and a new world begins when a model becomes ready, a chip resets, a model goes away, a training run starts or the box has been quiet for a season
-- With more than one chip, every floor is on screen at once as a grid of tiles. `[` `]` move the focus from floor to floor, and `z` shows the focused floor alone. A hero never leaves its floor yet; crossing between linked chips comes next
+- With more than one chip, every floor is on screen at once as a grid of tiles. `[` `]` move the focus from floor to floor, and `z` shows the focused floor alone. A hero can cross an Ethernet portal into the floor of the linked chip (a `~` marks a crossing built from estimated readings, as under `--mock`; on real hardware the far end of a link is unknown until a link source exists)
 - One chronicle tells what happens on every floor, each line tagged with its floor (`F3`). `y` says in a sentence what set each line off
 - `S` or `Esc` leaves. Not in the `v` cycle or the rotation. `[saga]` in `config.toml` sets `enabled`, `names` and `season_minutes`. See [docs/saga.md](docs/saga.md)
 

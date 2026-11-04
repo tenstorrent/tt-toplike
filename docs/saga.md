@@ -7,9 +7,9 @@ each new world has a new maze. One chronicle beside the maps tells what happens 
 every line of it has a cause in the signal stream.
 
 Press `S` in any view to open Saga, or start in it with `tt-toplike --mode saga`. This is phase 1
-with the party (0.17.0): a hero on every chip's floor, their quests, worlds that begin and end, and
-the merged chronicle. A hero never leaves its floor yet; crossing between linked chips comes next.
-Monsters, treasure and fights come in phase 2.
+with the party and crossing (0.18.0): a hero on every chip's floor, their quests, worlds that begin
+and end, the merged chronicle, and heroes who step through an Ethernet portal into the floor of the
+chip at the other end of the link. Monsters, treasure and fights come in phase 2.
 
 The design is in `docs/superpowers/specs/2026-11-02-saga-design.md`, and the party in its addendum,
 `docs/superpowers/specs/2026-11-03-saga-party-design.md`.
@@ -63,8 +63,8 @@ Ordinary samples do not count, because a quiet machine's readings still wobble. 
   lexicon. Each walks with A* pathfinding and picks its quests on its own: visit the sage of a
   ready model, explore a room, or rest. Its vitality comes from its own chip's heartbeat, clock and
   temperature. Below half, it is drawn orange and its next quest is a rest. After reaching a goal it
-  waits 30 ticks before it plans the next quest. A hero never leaves its floor yet; crossing
-  between linked chips comes next.
+  waits 30 ticks before it plans the next quest. A hero can cross an Ethernet portal into another
+  chip's floor (see "Crossing").
 * **Sages (`Ψ`).** One for each model that is ready when the world is born, on the floors of the
   chips the model names. The sage is drawn at the goal while a hero is on its way to visit it.
 * **Beats.** Each chronicle line is a beat, written from the pack's sentence shapes in one of three
@@ -163,6 +163,58 @@ What the grid gives (the view's area, without the app's status bar; pinned by
 
 One chip draws the single-floor view at every size.
 
+## Crossing
+
+A hero can leave its floor through an Ethernet portal and arrive on the floor of the chip at the
+other end of the link. This needs the link's far end to be known. The bus event `LinkPeer` names
+both ports of a link (`eth:<chip>/<n>`), and the saga keeps a link table from those events.
+
+* **Portals are bound to ports.** The portals on a floor's north edge are listed west to east and
+  match the chip's live Ethernet ports in port order. A portal with a `LinkPeer` record is bound
+  to its far port. A portal with none stays scenery, and no hero crosses through it.
+* **Portal colours.** A bound, open portal is drawn bold in the hue of the floor on its far side.
+  A bound portal whose link is closed is drawn dim, in a mix of that hue and the base colour. A
+  portal with a hero in transit through either end glows yellow. An unbound portal keeps the old
+  teal shimmer. A link is open while both of its ends are live in their chips' live masks.
+* **When a hero crosses.** A model that names both chips of a link gives each floor a crossing
+  quest through that link, and a link coming up gives its chip's floor one. A hero plans a
+  crossing after a sage visit and before rest or exploring. It walks to the portal and, if the
+  link is open, steps in. If the link is closed when it arrives, the quest ends with a line that
+  the portal has gone dark, and the hero takes another quest.
+* **In transit.** A crossing takes 3 ticks. The hero is on no floor then: both tiles say `crossing
+  F2 → F1` in their HUD, the roster marks the hero with `»`, and both portals glow. If the link
+  drops while the hero is in transit, the hero is thrown back out of the portal it left from, and
+  the chronicle says so. Otherwise it arrives on the far portal, takes its vitality from the far
+  chip at once, and dwells 30 ticks before it plans again.
+* **The quest text.** The chronicle writes a line on the floor the hero leaves, one on the floor it
+  reaches, and one for a dark portal or a failed crossing. Floors are counted from 1, like the
+  `F2` tags. For example: "Kestrel the Checkpointed steps into the portal on port 0 and heads for
+  floor 1. ~", "Sorrel the Many-Headed steps out of the portal on port 0, arriving from floor 1.
+  ~", "... reaches the portal on port 1, but it has gone dark. The way to floor 2 is closed.", and
+  "The link to floor 2 fails mid-crossing, and ... is thrown back out of the portal on port 1." The
+  quest's start line ("heads for the portal to F2") is routine and may be dropped by the pace.
+  The status row says `heading for the portal to F2`, `crossing F2 → F1`, `arrived on F1 through
+  a portal` or `thrown back at the portal: the link went down`.
+* **The `~` mark.** A crossing line ends in ` ~` when the last live-mask sample of either chip of
+  the link was an estimate. Every `--mock` reading is one. The mark is part of the line's text, so
+  it is in the digest and a replay keeps it.
+* **Empty and crowded floors.** A hero who crosses leaves its home floor. A floor can have no hero,
+  and its tile says `no hero here` and keeps its memory. A floor can also have several heroes, and
+  the tile draws all of them. The party keeps the same members, at most 32.
+* **Calm tiles lag.** A tile that is not focused draws a held picture every 5 ticks, so a hero who
+  crossed away can still show on it for up to 5 ticks after its HUD says `no hero here`.
+* **The far side is unknown on real hardware until a link source exists.** Only the mock backend
+  (a ring: each chip's highest live port in the low 12 to the next chip's lowest live port, marked
+  as an estimate) and recorded logs carry `LinkPeer` today. No real backend writes it, so on real
+  hardware every portal is unbound and no hero crosses. A real source is future work. A plain
+  `--mock` run binds its portals but never crosses: its live masks never change and it announces
+  no model, so no crossing quest is offered. Crossings appear in recorded logs that carry a model
+  on two linked chips or a link coming up, such as the `cross4.jsonl` test fixture.
+* **Limits.** At most 32 heroes are in transit. The link table holds at most 64 chips by 64 ports.
+  A floor holds at most one crossing hook per portal. Crossing lines skip the routine pace, and a
+  hero dwells 30 ticks after each crossing, so the party writes at most about one crossing line per
+  tick.
+
 ## What the map shows
 
 | Glyph | What it is |
@@ -179,7 +231,7 @@ One chip draws the single-floor view at every size.
 | `░` | A ruin: a fallen wall over a harvested Tensix column or row. The hero can walk across it. |
 | `▯` | A door, where a corridor meets a room. The wall lines run up to it. |
 | `▣` | A GDDR vault, on the west or east edge. |
-| `◎` | A portal for a live Ethernet link, on the north edge. Portals shimmer. |
+| `◎` | A portal for a live Ethernet link, on the north edge. An unbound portal shimmers in teal. A bound one is bold in the far floor's hue when its link is open, dim when closed, and yellow with a glow while a hero crosses (see "Crossing"). |
 | `⌂` | The PCIe gate on the south edge, where the hero enters. |
 | `▼` | The exit: the centre of the room farthest from the gate. |
 
@@ -241,18 +293,20 @@ text and where each hero ends:
 
 ```
 $ tt-toplike-tui --bus-inspect /var/tmp/run1 --saga-digest
-saga digest: 0x7342df1937efd939
-worlds born: 1, beats written: 13, records: 9044 (skipped 0 bad lines), holes: 0
+saga digest: 0xad8cec85d321c8a0
+worlds born: 1, beats written: 10, records: 9048 (skipped 0 bad lines), holes: 0
 ```
 
-That output is from a 12-second `--headless --mock 4` recording (0.17.0). The digest uses the
+That output is from a 12-second `--headless --mock 4` recording (0.18.0). The digest uses the
 replay label, real names and the season the log's header records (see "Config"), so the reader's
 own config does not change it.
 Record a run, replay it into a second recording with `--replay`, and the two recordings print the
-same digest. A second 4-chip recording of the same length printed `0xdebf57ae6a5e9aa4`: each run
+same digest. A second 4-chip recording of the same length printed `0x6f82483e31a9010c`: each run
 starts with its own world. The digest's encoding has a version; 0.17.0 writes version 2, which adds
 the floor of each line and event and one end position per hero, so a digest printed by 0.16 differs
-from one printed by 0.17 on the same log. A live saga labels its first line "(mock)" or not at all, and the digest's saga
+from one printed by 0.17 on the same log. 0.18.0 writes version 3. It adds the tags `0x07` (`HeroCrossed`) and `0x08`
+(`CrossingFailed`) and the quest verb code 7, and marks a hero in transit with bit `0x80` of its
+floor byte in the end item (a floor index is below 32, so the bit is free), so a digest from 0.17 differs from one from 0.18 on the same log. A live saga labels its first line "(mock)" or not at all, and the digest's saga
 labels it "(replay)", so a live saga's own digest differs from this one on the same records. Exit
 status: 0 when the digest was printed (or the output was a closed pipe), 1 when the log cannot be
 read or the output fails.
@@ -376,8 +430,8 @@ saga's settings and every problem in the section.
 * No person has run Saga on real Tenstorrent hardware yet. It has run on the mock backend and on
   recorded fixtures.
 * Chips past 32 have no floor and no hero. The roster row counts them (`+N chips without a floor`).
-* A hero never leaves its floor yet; crossing between linked chips comes next. The Ethernet portals
-  on each floor's north edge are scenery until then.
+* On real hardware no source writes `LinkPeer` yet, so no portal is bound and no hero crosses.
+  The Ethernet portals on each floor's north edge are scenery there (see "Crossing").
 * A real name longer than 32 characters is cut to its first 32, in the chronicle and in a tile's
   quest label alike. Two models whose ids share their first 32 characters show the same name.
 * On tiles 26 to 29 columns wide the HUD shows only the hero's first name, so two tiles can both

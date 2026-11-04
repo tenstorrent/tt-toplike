@@ -5,7 +5,8 @@ chip telemetry, models coming up and serving, training runs, processes, chip lea
 events such as resets. Sources write to it. Views and other programs read it. Every record
 is also written to disk, so a past run can be inspected and replayed.
 
-This page describes what is in the first release (tt-toplike 0.15.0, bus crate 0.1.0). The
+This page describes what is in the first release (tt-toplike 0.15.0, bus crate 0.1.0), plus the
+event `LinkPeer` that bus crate 0.2.0 (tt-toplike 0.18.0) added. The
 design is in `docs/superpowers/specs/2026-11-01-signal-bus-design.md`. The code is in the
 `crates/tt-toplike-bus` library crate (the record types, the log, the world, replay and the
 socket) and in `src/bus/` (the adapters that turn tt-toplike's existing data feeds into
@@ -183,6 +184,7 @@ An event is a discrete thing that happened. The `t` field names the type.
 | `KernelCompiled` | `chip`, `source` | hivemind (compile events) |
 | `Reset` | `chips` | hivemind (reset events), gozer (on a lease release) |
 | `LinkChanged` | `chip`, `mask` (low 16 bits of the Ethernet live-link mask) | backend source |
+| `LinkPeer` | `port`, `peer` (both Ethernet port keys, `eth:<chip>/<n>`) | the mock backend; no real backend yet |
 | `LeaseGranted`, `LeaseReleased` | `lease`, `chips` | gozer |
 | `Spark` | `chip`, `kind` (a fixed string such as `metal.log`) | hivemind |
 | `ViewChanged` | `view` | the TUI, when the displayed view changes |
@@ -1009,10 +1011,19 @@ sequence numbers and times. `--bus-inspect DIR --saga-digest` prints that saga's
 recorded log.
 
 Saga publishes nothing to the bus in this release. Phase 2 adds `saga.*` events (a world born or
-ended, a hero born or dead, a quest, a beat) as one new additive event variant, with source
-`saga`, and the bus crate moves to 0.2.0. The core already skips records from source `saga`, so
-a recording that carries them will not tell its story twice. `ViewChanged` names the view
+ended, a hero born or dead, a quest, a beat) as another new additive event variant, with source
 `saga`.
+
+Saga reads one event for crossing: `LinkPeer`. It says which port sits at the other end of an
+Ethernet link, and a source writes it once per link when it learns the peer, and again when the
+peer changes. It says nothing about whether the link is up; the live-link mask and `LinkChanged`
+do that. The saga keeps a table of peers, binds each portal to its port, and lets a hero cross
+only through a bound portal whose two ends are live. Only the mock backend writes `LinkPeer` today
+(a ring of its own chips, marked as an estimate). A reader built before bus 0.2.0 skips the line
+and counts it as a bad line, so old readers keep working on new logs.
+
+The core already skips records from source `saga`, so a recording that carries saga events will
+not tell its story twice. `ViewChanged` names the view `saga`.
 
 ---
 
