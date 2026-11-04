@@ -1020,7 +1020,11 @@ peer changes. It says nothing about whether the link is up; the live-link mask a
 do that. The saga keeps a table of peers, binds each portal to its port, and lets a hero cross
 only through a bound portal whose two ends are live. Only the mock backend writes `LinkPeer` today
 (a ring of its own chips, marked as an estimate). A reader built before bus 0.2.0 skips the line
-and counts it as a bad line, so old readers keep working on new logs.
+and counts it as a bad line, so old readers keep working on new logs. A live socket is different:
+a 0.17 TUI attached with `--bus-socket` to a 0.18 `--mock` host cannot decode `LinkPeer`, drops
+its connection and takes a new snapshot each time the host sends one (at start and on every full
+resend, every 5 minutes), and its saga starts its story again. Only recorded logs are safe across
+these versions. Real hosts send no `LinkPeer`.
 
 The core already skips records from source `saga`, so a recording that carries saga events will
 not tell its story twice. `ViewChanged` names the view `saga`.

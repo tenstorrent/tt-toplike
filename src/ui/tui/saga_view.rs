@@ -267,7 +267,8 @@ const CHRONICLE_EVERY: u64 = 20;
 /// Ticks between two pictures of an unfocused party tile ([`Held`]). The
 /// TUI advances the story about one tick per update (ten a second by
 /// default), so such a tile changes about twice a second. It was 3 until
-/// Task B.5's fix round: with heroes crossing on `--mock 32`, single runs
+/// Task B.5's fix round: with the ring's portals bound on `--mock 32`
+/// (before the mock flapped a link, so no hero crossed there), single runs
 /// of the binary sent up to 22 KB/s against the 20 KB/s budget, and 5
 /// sends fewer, larger changes.
 const CALM_EVERY: u64 = 5;

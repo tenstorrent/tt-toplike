@@ -2214,10 +2214,12 @@ What to know before changing it:
   -- --mock 32 --mode saga`: a 140 x 40 pty, `TERM=xterm-256color COLORTERM=truecolor`, the bytes
   the TUI writes from 20 s to 40 s of a 40 s run, runs one after another. Set `XDG_CONFIG_HOME` to
   an empty directory. The final 0.17.0 binary: `--mock 32` 19.6, 19.1 and 17.4 KB/s (mean 18.7),
-  inside the 20 KB/s budget; `--mock 1` 16.0, 16.8 and 13.8 (mean 15.6). With crossings (B.3 to
-  B.5) single `--mock 32` runs reached 22.3 KB/s (B.4: 19.0, 20.9, 19.5; B.5: 16.8, 21.3, 20.5 and
+  inside the 20 KB/s budget; `--mock 1` 16.0, 16.8 and 13.8 (mean 15.6). With the ring's portals
+  bound (B.3 to B.5; no hero crossed on a plain `--mock` run until B.7 made the mock flap a link)
+  single `--mock 32` runs reached 22.3 KB/s (B.4: 19.0, 20.9, 19.5; B.5: 16.8, 21.3, 20.5 and
   19.1, 18.4, 19.3; B.5 with an empty floor keeping its window: 18.6, 17.7, 22.3, 17.5). Task
-  B.5's fix round set `CALM_EVERY` to 5: 17.5, 18.1, 18.7, 17.7 and 19.6 (mean 18.3). The A.8 binary, by the
+  B.5's fix round set `CALM_EVERY` to 5: 17.5, 18.1, 18.7, 17.7 and 19.6 (mean 18.3). The first
+  runs with heroes crossing are B.7's: 15.6, 18.4 and 14.7 (mean 16.3). The A.8 binary, by the
   same tool on the same box: `--mock 32` 193.2, 192.0 and 168.5 (mean 184.6); `--mock 1` 13.8,
   19.0 and 16.6 (mean 16.4). One chip's view did not change (its frames are pinned).
 * Where the bytes went, by `print_party_traffic` (an ignored lib test that renders consecutive
@@ -2249,6 +2251,22 @@ What to know before changing it:
   Tiles are one blank column apart, so neighbouring maps can look joined. A hero can stand on its
   tile's top or bottom row (the dead zone reaches them). Unfocused tiles have no light pool.
 * `.target-*` build directories are not git-ignored: stage explicit paths only.
+
+### Known limits (0.18.0, from the final review)
+
+* A `LinkPeer` that recables a port while a hero is in transit through it is not checked. The hero
+  still arrives at the stored far end, and a later mask change on any chip can break the transit
+  with that chip's mask as the cause. Real backends send no `LinkPeer` and the mock's cables are
+  fixed, so it cannot happen today. A real peer source should break such a transit on the
+  `LinkPeer` itself ("Crossing" in `saga.rs`).
+* `portal_order_matches_die3d_cage_order` (`src/animation/die3d/saga_floor_tests.rs`) copies the
+  Wafer Waffler's (Die 3D's) cage-order rule into the test. A change to the rule in that view alone
+  does not turn it red.
+* The traffic guard (`the_party_view_stays_inside_its_traffic_budget`) has no chip heat in its
+  frames and no world birth in its window. Frames with a birth reach about 1,660 to 1,690 bytes
+  against the 1,800 bound.
+* A party tile's HUD says `no hero here`; the one-floor status row says `no hero on F2`. Both
+  mean the same thing.
 
 ### Determinism rules the core keeps
 
@@ -2365,6 +2383,7 @@ moved it, and each diff is explained by that change:
 | `feat(saga): portals, crossings and travellers drawn on every tile` (party Task B.5, Nov 4 2026) | the view draws crossings: portals in the far floor's hue (open) or dimmed (closed), a glow on both portals in transit, `crossing F2 → F5` HUDs, empty and crowded tiles, the roster's transit glyph; the core lists every portal in `SagaState::portals` (not hashed) | nothing moved: no digest row (the portal list is not in the digest), and no solo, busy, party4 or panel frame (those logs have no peers, and an unbound portal is drawn as before). New: `CROSS_GOLDEN`, ten frames of `cross4.jsonl` at 80x23 and 140x39 (link 1 down at tick 410, a hero in transit, a crossing thrown back and a dark portal, both injected into the log in the test, and the end of the last full world). |
 | `fix(saga): calmer party tiles and steady windows for crossings, inside the traffic budget` (party Task B.5, fix round 1) | an empty floor keeps its tile's window (`anchor` kept); an unfocused tile's held picture every 5 ticks (`CALM_EVERY`, was 3) | view frames only, no digest row: `PARTY_GOLDEN` all 8 and the busy `GOLDEN` frames at half the log (4 of 8) by `CALM_EVERY`; `CROSS_GOLDEN` all 10 (tick 410 and the end by the kept window, transit, thrown back, dark and the end by `CALM_EVERY`). Solo and panel frames did not move: one floor and the panel draw with `Motion::Full`. |
 | `feat(saga): heroes cross Ethernet links between chips (0.18.0)` (party Task B.6, Nov 4 2026) | docs, versions and verification only | nothing: no digest row, story pin, or view frame moved. |
+| final fix wave (Nov 4 2026, folded into 0.18.0) | a `ModelGone` lets the other ready models re-offer their crossings; `split_port` reads plain digits only; a cable between two ports of one chip is ignored; the `!` text, the legend's `~` and the `y` words for a live-mask cause | nothing moved: no fixture has two models on one link, a malformed port key or a one-chip cable, and no view frame, story print or panel frame moved (the full lib suite passed without a re-pin). |
 
 Pinned now (digest version 3, with the party, its merged chronicle, bound portals and crossings):
 `quiet.jsonl` 0xd6e0200609dcd3eb (both modes), `bringup.jsonl` 0xc9142f2256b8175a (both),
@@ -2401,6 +2420,10 @@ also come from logs with a model on two linked chips (`cross4.jsonl`).
 B.7 smoke (release, `--mock 4`, 150 s): 109,532 records, 152 beats, 20 `HeroCrossed`, digest
 `0xb5ecf34f983007b8` three times (twice in place, once after `--replay --speed 50`). Crossing lines
 end in `~`. `tools/party_traffic.py` at `--mock 32`, 3 runs: 15.6, 18.4 and 14.7 KB/s (mean 16.3).
+Final fix wave smoke (release, 12-second `--headless --mock 4 --record`): 9,050 records (four
+`LinkPeer`, one `LinkChanged`), 1 world, 10 beats, digest `0x538c5ea1d851c5be` twice in place and
+again after `--replay --speed 50`; a second recording printed `0x2782e7c24489cccc`. Traffic at
+`--mock 32`, 3 runs: 16.9, 14.5 and 16.6 KB/s (mean 16.0). This is the example in docs/saga.md.
 
 0.17.0 (digest version 2, Task A.8), each a 12-second `--headless --mock N` recording:
 

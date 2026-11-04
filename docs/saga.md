@@ -171,13 +171,17 @@ both ports of a link (`eth:<chip>/<n>`), and the saga keeps a link table from th
 
 * **Portals are bound to ports.** The portals on a floor's north edge are listed west to east and
   match the chip's live Ethernet ports in port order. A portal with a `LinkPeer` record is bound
-  to its far port. A portal with none stays scenery, and no hero crosses through it.
+  to its far port. A portal with none stays scenery, and no hero crosses through it. A `LinkPeer`
+  must name ports as the bus writes them (`eth:<chip>/11`: plain digits, no `+` and no leading
+  zero) and two different chips; any other record is ignored.
 * **Portal colours.** A bound, open portal is drawn bold in the hue of the floor on its far side.
   A bound portal whose link is closed is drawn dim, in a mix of that hue and the base colour. A
   portal with a hero in transit through either end glows yellow. An unbound portal keeps the old
   teal shimmer. A link is open while both of its ends are live in their chips' live masks.
 * **When a hero crosses.** A model that names both chips of a link gives each floor a crossing
-  quest through that link, and a link coming up gives its chip's floor one. A hero plans a
+  quest through that link, and a link coming up gives its chip's floor one. A floor holds one
+  crossing quest per portal. When the model that offered it goes away, every other ready model on
+  the same link offers its crossing again. A hero plans a
   crossing after a sage visit and before rest or exploring. It walks to the portal and, if the
   link is open, steps in. If the link is closed when it arrives, the quest ends with a line that
   the portal has gone dark, and the hero takes another quest.
@@ -304,16 +308,19 @@ text and where each hero ends:
 
 ```
 $ tt-toplike-tui --bus-inspect /var/tmp/run1 --saga-digest
-saga digest: 0xad8cec85d321c8a0
-worlds born: 1, beats written: 10, records: 9048 (skipped 0 bad lines), holes: 0
+saga digest: 0x538c5ea1d851c5be
+worlds born: 1, beats written: 10, records: 9050 (skipped 0 bad lines), holes: 0
 ```
 
-That output is from a 12-second `--headless --mock 4` recording (0.18.0). The digest uses the
+That output is from a 12-second `--headless --mock 4 --record DIR` recording made with the final
+0.18.0 build. Its 9,050 records include the four `LinkPeer` events and one `LinkChanged`: chip 0's
+ring port first goes dark at update 100, about 10 seconds in (see "The mock's flap"). The digest
+of your own recording will differ, because each run starts with its own world. The digest uses the
 replay label, real names and the season the log's header records (see "Config"), so the reader's
 own config does not change it.
 Record a run, replay it into a second recording with `--replay`, and the two recordings print the
-same digest. A second 4-chip recording of the same length printed `0x6f82483e31a9010c`: each run
-starts with its own world. The digest's encoding has a version; 0.17.0 writes version 2, which adds
+same digest (`0x538c5ea1d851c5be` again for the recording above). A second 4-chip recording of the
+same length printed `0x2782e7c24489cccc`. The digest's encoding has a version; 0.17.0 writes version 2, which adds
 the floor of each line and event and one end position per hero, so a digest printed by 0.16 differs
 from one printed by 0.17 on the same log. 0.18.0 writes version 3. It adds the tags `0x07` (`HeroCrossed`) and `0x08`
 (`CrossingFailed`) and the quest verb code 7, and marks a hero in transit with bit `0x80` of its
@@ -443,18 +450,31 @@ saga's settings and every problem in the section.
 * Chips past 32 have no floor and no hero. The roster row counts them (`+N chips without a floor`).
 * On real hardware no source writes `LinkPeer` yet, so no portal is bound and no hero crosses.
   The Ethernet portals on each floor's north edge are scenery there (see "Crossing").
+* A `LinkPeer` that recables a port while a hero is crossing through it is not checked. The hero
+  still arrives where the old cable led, and a later change to any chip's live mask can break the
+  crossing and name that chip as the cause. No source sends such a record today: real backends
+  send no `LinkPeer`, and the mock's cables never change. A real peer source will need to break
+  the crossing when the peer record arrives.
+* A party tile with no hero says `no hero here`; the one-floor view's status row says
+  `no hero on F2`. Both mean the same thing.
+* Two tests have known gaps. `portal_order_matches_die3d_cage_order` copies the Wafer Waffler's
+  cage order rule, so a change made to the Wafer Waffler alone does not fail it. The traffic guard's frames have no chip
+  heat and its window has no world birth (a frame with a birth costs about 1,660 to 1,690 bytes,
+  under the guard's 1,800).
 * A real name longer than 32 characters is cut to its first 32, in the chronicle and in a tile's
   quest label alike. Two models whose ids share their first 32 characters show the same name.
 * On tiles 26 to 29 columns wide the HUD shows only the hero's first name, so two tiles can both
   say "Lark"; the floor tags tell them apart. Tiles are separated by one blank column, so the maps
   of neighbouring tiles can look joined.
 * Terminal traffic, measured with `python3 tools/party_traffic.py <binary> --runs 3 -- --mock N
-  --mode saga` (a 140 x 40 pty, bytes written from 20 s to 40 s of a 40 s run): `--mock 32`, whose
-  heroes cross the mock's ring of links, sends about 18 KB/s (17.5, 18.1, 18.7, 17.7 and 19.6 KB/s
-  in five runs), inside the 20 KB/s budget; before the calmer tiles it sent about 185 KB/s. With
-  crossings and a held picture every three ticks single runs reached 22 KB/s, so an unfocused tile
-  now holds its picture for five ticks. One chip sends about 16 KB/s (16.0, 16.8 and 13.8), as
-  before. The margin is small: a busier story with more walking can pass 20 KB/s. The test
+  --mode saga` (a 140 x 40 pty, bytes written from 20 s to 40 s of a 40 s run). The only runs in
+  which heroes crossed are Task B.7's, after the mock began to flap one ring link per chip:
+  `--mock 32` sent 15.6, 18.4 and 14.7 KB/s in three runs (mean 16.3), inside the 20 KB/s budget.
+  Before B.7 a plain `--mock` run had its ring's portals bound but never crossed (no model, and the
+  live masks never changed). Those runs, with an unfocused tile holding its picture for three
+  ticks, reached 22 KB/s in single runs, so an unfocused tile now holds its picture for five ticks;
+  with five they sent 17.5, 18.1, 18.7, 17.7 and 19.6 KB/s. Before the calmer tiles `--mock 32`
+  sent about 185 KB/s. One chip sends about 16 KB/s (16.0, 16.8 and 13.8), as before. The margin is small: a busier story with more walking can pass 20 KB/s. The test
   `the_party_view_stays_inside_its_traffic_budget` bounds the bytes a frame on two 32-chip test
   logs, one with no links and one in which every link of a ring offers crossings.
 * The calm tiles show no light around their heroes, so a hero on an unfocused tile is easiest to
