@@ -92,7 +92,7 @@ tt-toplike (0.16.5) noble; urgency=medium
     desaturates the starfield; harvested Tensix columns and GDDR
     temperatures still show in Insights.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 18:00:00 -0800
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 15:00:00 -0800
 
 tt-toplike (0.16.4) noble; urgency=medium
 
@@ -103,7 +103,7 @@ tt-toplike (0.16.4) noble; urgency=medium
     60x12. Before the first world, or with [saga] enabled = false, it says
     so on one line. The full Saga view did not change.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 16:00:00 -0800
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 14:00:00 -0800
 
 tt-toplike (0.16.3) noble; urgency=medium
 
@@ -112,7 +112,7 @@ tt-toplike (0.16.3) noble; urgency=medium
     nothing set the hero's move off, it says so. Only the view changed; the
     story and its digests are the same.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 14:00:00 -0800
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 13:00:00 -0800
 
 tt-toplike (0.16.2) noble; urgency=medium
 
@@ -181,7 +181,7 @@ tt-toplike (0.15.5) noble; urgency=medium
     None of them is an error.
   * --check-config prints "arcade starts with NAME: N rows".
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 23:00:00 -0800
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 19:11:18 -0800
 
 tt-toplike (0.15.4) noble; urgency=medium
 
@@ -209,7 +209,7 @@ tt-toplike (0.15.4) noble; urgency=medium
   * The backdrop writes far less to the terminal: a serving model's scene
     went from 1.17 MB/s to 74 KB/s on a blank 200x60 view.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 21:00:00 -0800
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 18:11:18 -0800
 
 tt-toplike (0.15.3) noble; urgency=medium
 
@@ -234,7 +234,7 @@ tt-toplike (0.15.3) noble; urgency=medium
   * Tests that depended on the terminal's colour settings or on a real process
     now pass under TERM=dumb, as CI runs them.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 19:00:00 -0800
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 17:11:18 -0800
 
 tt-toplike (0.15.2) noble; urgency=medium
 
@@ -647,7 +647,7 @@ tt-toplike (0.13.11) noble; urgency=medium
     already been returning nothing. Reported and first fixed by Eugene
     Valkov (issue 35).
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 16 Oct 2026 12:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Wed, 14 Oct 2026 11:00:00 +0000
 
 tt-toplike (0.13.10) noble; urgency=medium
 
@@ -877,7 +877,7 @@ tt-toplike (0.13.0) noble; urgency=medium
   * Fix: `/mode training` is recognized; it was reachable only as
     `--mode training`.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sat, 29 Aug 2026 23:00:00 +0000
 
 tt-toplike (0.12.0) noble; urgency=medium
 
@@ -896,7 +896,7 @@ tt-toplike (0.12.0) noble; urgency=medium
     would have drawn a permanently empty board; entry is now a choke point
     mirroring the existing exit one.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sat, 29 Aug 2026 22:00:00 +0000
 
 tt-toplike (0.11.2) noble; urgency=medium
 
@@ -906,7 +906,7 @@ tt-toplike (0.11.2) noble; urgency=medium
     this is purely a scriptable entry point for launchers, kiosks and
     systemd units that previously needed an interactive `t`.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sat, 29 Aug 2026 21:00:00 +0000
 
 tt-toplike (0.11.1) noble; urgency=medium
 
@@ -930,7 +930,7 @@ tt-toplike (0.11.1) noble; urgency=medium
   * Docs: recorded a Training view demo (README + project site), and added
     a `t · training` mode row to the site.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sat, 29 Aug 2026 20:00:00 +0000
 
 tt-toplike (0.11.0) noble; urgency=medium
 
@@ -1000,7 +1000,7 @@ tt-toplike (0.10.2) noble; urgency=medium
     roster entries, almost all stuck on "down". Detection now walks each
     match's process ancestry and keeps only the root of each match family.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 28 Aug 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 27 Aug 2026 23:00:00 +0000
 
 tt-toplike (0.10.1) noble; urgency=medium
 
@@ -1025,7 +1025,7 @@ tt-toplike (0.10.1) noble; urgency=medium
     before the gddr_telemetry change above, isolating this as unrelated
     and pre-existing.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 28 Aug 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 27 Aug 2026 22:00:00 +0000
 
 tt-toplike (0.10.0) noble; urgency=medium
 
@@ -1078,7 +1078,7 @@ tt-toplike (0.10.0) noble; urgency=medium
     packed aggregate carries genuine counts, the row would hide errors it
     used to show. Both are on the manual-verification checklist.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 28 Aug 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 27 Aug 2026 21:00:00 +0000
 
 tt-toplike (0.9.0) noble; urgency=medium
 
@@ -1722,7 +1722,7 @@ tt-toplike (0.4.2) noble; urgency=medium
   * Fix dead code warnings: remove unused _in_tmux detection, unused _temp
     parameter from MemoryFlowVis constructors, and dead fetch_smbus_snapshot.
 
- -- Tenstorrent <software@tenstorrent.com>  Fri, 24 Apr 2026 00:00:00 +0000
+ -- Tenstorrent <software@tenstorrent.com>  Thu, 23 Apr 2026 23:00:00 +0000
 
 tt-toplike (0.4.1) noble; urgency=medium
 
@@ -1793,7 +1793,7 @@ tt-toplike (0.3.0) noble; urgency=medium
     covering LLM inference vs video generation patterns, idle baseline activity,
     and the tt-smi -r reset light show sequence.
 
- -- Tenstorrent <software@tenstorrent.com>  Wed, 16 Apr 2026 00:00:00 +0000
+ -- Tenstorrent <software@tenstorrent.com>  Wed, 15 Apr 2026 23:00:00 +0000
 
 tt-toplike (0.1.0) noble; urgency=medium
 
