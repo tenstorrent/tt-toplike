@@ -25,3 +25,12 @@ fn unknown_series_is_empty() {
     let k = EntityKey::chip("0000:01:00.0");
     assert!(h.series(&k, "nothing").is_empty());
 }
+
+#[test]
+fn zero_cap_keeps_one_sample() {
+    let mut h = History::new(0);
+    let k = EntityKey::chip("0000:01:00.0");
+    h.record(&k, "power", 1.0);
+    h.record(&k, "power", 2.0);
+    assert_eq!(h.series(&k, "power"), [2.0]);
+}

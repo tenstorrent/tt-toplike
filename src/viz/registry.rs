@@ -12,18 +12,18 @@ use super::ctx::Viz;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 /// A handle to a registered viz. Handed out once per registration and never
 /// reused, so a stale handle finds nothing instead of someone else's viz.
-/// `DisplayMode::Plugin` carries one.
+/// The host's view enum will carry one for a plugin view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VizHandle(pub u32);
 
 /// Where a viz came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
-    /// A Rust plugin compiled in from a folder under `src/viz/plugins`.
+    /// A Rust plugin compiled in from a plugin folder.
     Folder,
     /// A YAML plugin loaded from this file.
     File(PathBuf),
@@ -90,15 +90,21 @@ pub fn is_valid_id(id: &str) -> bool {
         })
 }
 
+/// Lock `viz` (recovering a poisoned mutex) and run `f` on it.
+fn run_on<R>(viz: &Arc<Mutex<Box<dyn Viz>>>, f: impl FnOnce(&mut dyn Viz) -> R) -> R {
+    let mut guard = viz.lock().unwrap_or_else(|e| e.into_inner());
+    f(guard.as_mut())
+}
+
 /// One live registration. A failed entry keeps no viz.
 ///
-/// The viz sits in a `Mutex` only to make `Slot` `Sync`: `Viz` is `Send` but
-/// not `Sync`, and a `RwLock<Registry>` in a static needs `Registry: Sync`.
-/// Every access goes through `&mut Registry`, so the mutex is never
-/// contended (`get_mut` reaches it without locking).
+/// The viz is an `Arc<Mutex<..>>`. `Viz` is `Send` but not `Sync`, and the
+/// per-viz mutex makes the slot `Sync` (a `RwLock<Registry>` in a static needs
+/// that). It also lets `with_viz` clone the `Arc`, drop the registry lock and
+/// then run the closure, so a render never holds the registry lock.
 struct Slot {
     entry: VizEntry,
-    viz: Option<Mutex<Box<dyn Viz>>>,
+    viz: Option<Arc<Mutex<Box<dyn Viz>>>>,
 }
 
 /// The registry logic, without global state.
@@ -142,6 +148,22 @@ impl Registry {
         if !is_valid_id(id) {
             return Err(RegisterError::BadId);
         }
+        self.register_built(id, title, source, enabled_by_default, make())
+    }
+
+    /// Like [`Registry::register`] with the viz already built. The global
+    /// `register` builds the viz first, outside the lock, and calls this.
+    pub fn register_built(
+        &mut self,
+        id: &str,
+        title: &str,
+        source: Source,
+        enabled_by_default: bool,
+        viz: Box<dyn Viz>,
+    ) -> Result<VizHandle, RegisterError> {
+        if !is_valid_id(id) {
+            return Err(RegisterError::BadId);
+        }
         if self.handle_of(id).is_some() {
             return Err(RegisterError::Duplicate);
         }
@@ -158,7 +180,7 @@ impl Registry {
                     enabled_by_default,
                     status: EntryStatus::Ok,
                 },
-                viz: Some(Mutex::new(make())),
+                viz: Some(Arc::new(Mutex::new(viz))),
             },
         );
         Ok(handle)
@@ -179,20 +201,38 @@ impl Registry {
             .map(|s| s.entry.handle)
     }
 
+    /// The shared pointer to the viz behind `h`, if it is live and loaded.
+    /// The global `with_viz` takes it under the lock, releases the lock and
+    /// only then runs the closure.
+    pub fn viz_arc(&self, h: VizHandle) -> Option<Arc<Mutex<Box<dyn Viz>>>> {
+        self.slots.get(&h.0)?.viz.clone()
+    }
+
     /// Run `f` on the viz behind `h`. `None` when the handle is unknown or
-    /// removed, or the entry failed to load.
-    pub fn with_viz<R>(&mut self, h: VizHandle, f: impl FnOnce(&mut dyn Viz) -> R) -> Option<R> {
-        let viz = self.slots.get_mut(&h.0)?.viz.as_mut()?;
-        let viz = viz.get_mut().unwrap_or_else(|e| e.into_inner());
-        Some(f(viz.as_mut()))
+    /// removed, or the entry failed to load. A poisoned per-viz mutex (an
+    /// earlier render panicked) is recovered, not propagated.
+    ///
+    /// Re-entering the same handle from inside `f` deadlocks on the per-viz
+    /// mutex. Other registry calls are fine.
+    pub fn with_viz<R>(&self, h: VizHandle, f: impl FnOnce(&mut dyn Viz) -> R) -> Option<R> {
+        Some(run_on(&self.viz_arc(h)?, f))
     }
 
     /// Rebuild the viz behind `h` with `make` and mark it Ok (a YAML file
     /// that was edited and now loads). Returns false for an unknown handle.
     pub fn replace(&mut self, h: VizHandle, make: MakeViz) -> bool {
+        if !self.slots.contains_key(&h.0) {
+            return false;
+        }
+        self.replace_built(h, make())
+    }
+
+    /// Like [`Registry::replace`] with the viz already built. A render in
+    /// flight on the old instance finishes on it.
+    pub fn replace_built(&mut self, h: VizHandle, viz: Box<dyn Viz>) -> bool {
         match self.slots.get_mut(&h.0) {
             Some(slot) => {
-                slot.viz = Some(Mutex::new(make()));
+                slot.viz = Some(Arc::new(Mutex::new(viz)));
                 slot.entry.status = EntryStatus::Ok;
                 true
             }
@@ -226,7 +266,7 @@ impl Registry {
 static GLOBAL: OnceLock<RwLock<Registry>> = OnceLock::new();
 
 /// Run `f` on the global registry under its write lock. A poisoned lock
-/// (a plugin panicked while held) is taken over: the registry's data is
+/// is taken over: the registry's data is
 /// plain and stays consistent.
 fn with_global<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
     let lock = GLOBAL.get_or_init(|| RwLock::new(Registry::new()));
@@ -235,7 +275,7 @@ fn with_global<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
 }
 
 /// [`Registry::register`] on the global registry. Called by plugin
-/// registration code at startup.
+/// registration code at startup. The viz is built before the lock is taken.
 pub fn register(
     id: &str,
     title: &str,
@@ -243,7 +283,11 @@ pub fn register(
     enabled_by_default: bool,
     make: MakeViz,
 ) -> Result<VizHandle, RegisterError> {
-    with_global(|r| r.register(id, title, source, enabled_by_default, make))
+    if !is_valid_id(id) {
+        return Err(RegisterError::BadId);
+    }
+    let viz = make();
+    with_global(|r| r.register_built(id, title, source, enabled_by_default, viz))
 }
 
 /// [`Registry::entries`] on the global registry. Called by the host's view
@@ -260,18 +304,26 @@ pub fn handle_of(id: &str) -> Option<VizHandle> {
 
 /// [`Registry::with_viz`] on the global registry. Called by the host to
 /// render a plugin and to read its legend, explain and help text.
+///
+/// The registry lock is held only to clone the viz's pointer; `f` runs under
+/// the viz's own mutex. So `f` may call other registry functions, and the
+/// YAML watcher is never blocked by a render. Re-entering the same handle
+/// from inside `f` deadlocks.
 pub fn with_viz<R>(h: VizHandle, f: impl FnOnce(&mut dyn Viz) -> R) -> Option<R> {
-    with_global(|r| r.with_viz(h, f))
+    let arc = with_global(|r| r.viz_arc(h))?;
+    Some(run_on(&arc, f))
 }
 
 /// [`Registry::replace`] on the global registry. Called by the YAML watcher
-/// when an edited file loads.
+/// when an edited file loads. The new viz is built outside the lock; a render
+/// in flight finishes on the old instance.
 pub fn replace(h: VizHandle, make: MakeViz) -> bool {
-    with_global(|r| r.replace(h, make))
+    let viz = make();
+    with_global(|r| r.replace_built(h, viz))
 }
 
-/// [`Registry::mark_failed`] on the global registry. Called by the YAML
-/// watcher when an edited file no longer loads.
+/// [`Registry::mark_failed`] on the global registry. Called by the YAML watcher
+/// when an edited file no longer loads.
 pub fn mark_failed(h: VizHandle, msg: &str) -> bool {
     with_global(|r| r.mark_failed(h, msg))
 }

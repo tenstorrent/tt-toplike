@@ -51,6 +51,10 @@ impl VizCtx<'_> {
 ///
 /// The host (the TUI) owns one boxed instance per registered plugin and calls
 /// it only from the draw thread, so it needs `Send` but not `Sync`.
+///
+/// A viz runs inside `registry::with_viz`, under its own mutex. Calling other
+/// registry functions from a method is fine. Re-entering `with_viz` on the
+/// same handle from a method deadlocks.
 pub trait Viz: Send {
     /// The stable kebab-case id (`[a-z0-9]+(-[a-z0-9]+)*`). The registry keys
     /// on it and `--viz <id>` and `[viz] enable` name it.
@@ -94,5 +98,46 @@ pub trait Viz: Send {
     fn on_key(&mut self, key: KeyCode) -> bool {
         let _ = key;
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tt_toplike_bus::{
+        HeaderKind, LocalView, Payload, Provenance, Record, Sample, Value, World,
+    };
+
+    /// `chips()` lists a chip the world holds a reading for.
+    #[test]
+    fn chips_lists_a_chip_with_a_reading() {
+        let chip = EntityKey::chip("0000:01:00.0");
+        let mut world = World::new();
+        world.apply(&Record {
+            seq: 1,
+            t_mono_ns: 1,
+            t_wall_ms: 1,
+            source: "test".into(),
+            payload: Payload::Sample(Sample {
+                entity: chip.clone(),
+                signal: "power".into(),
+                value: Value::F64(42.0),
+                prov: Provenance::Measured,
+            }),
+        });
+        let view = LocalView {
+            seq: 1,
+            world,
+            now_mono_ns: 1,
+            header_kind: HeaderKind::Live,
+        };
+        let history = History::default();
+        let ctx = VizCtx {
+            world: &view,
+            history: &history,
+            tick: 0,
+            now_mono_ns: 1,
+        };
+        assert_eq!(ctx.chips(), vec![chip]);
     }
 }
