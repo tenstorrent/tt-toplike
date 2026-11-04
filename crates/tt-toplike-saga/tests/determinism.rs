@@ -21,7 +21,7 @@
 //!   chip and four chips). `tests/party.rs` keeps them in step with the
 //!   generator. Their digests were first pinned on the single-chip code
 //!   before the party (0.16.4), then re-pinned with the others for digest
-//!   version 2.
+//!   versions 2 and 3.
 //!
 //! In generated-name mode the published beats carry aliased causes (ledger
 //! ruling R17), so the digests differ between the two name modes and every
@@ -259,14 +259,22 @@ fn one_temperature_bit_changes_the_first_world() {
 /// generator's later draws all change. In generated mode an unwritten
 /// quest's reason is aliased through `clean_cause`. `bringup` and `solo`
 /// did not move.
+///
+/// Every row was re-pinned for digest version 3 (Task B.3 of the party
+/// plan): only the version byte moved. Task B.3 also binds each portal to
+/// an Ethernet port and lets a generic floor's portal count follow its live
+/// mask. With `DIGEST_VERSION` set back to 2 on the B.3 code, every row
+/// matched the version 2 pins, so no fixture's floors, walks or lines
+/// changed: `quiet` (mock chips) and the party logs are Blackhole-shaped,
+/// and no fixture has a generic chip with a known mask.
 #[test]
 fn a_snapshot_of_the_digests_matches() {
     let golden: [(&str, u64, u64); 5] = [
-        ("quiet.jsonl", 0x6508927b58eeed16, 0x6508927b58eeed16),
-        ("bringup.jsonl", 0x88bb8d2b104511c3, 0x88bb8d2b104511c3),
-        ("busy.jsonl", 0xb57380171988a4e6, 0xc96c1d6b13a18291),
-        ("solo.jsonl", 0xe9ed5f1dae160dfa, 0x5a73462b53067a2a),
-        ("party4.jsonl", 0x245050e12931e637, 0x03610514c0841cc7),
+        ("quiet.jsonl", 0xb624ad206fc0b183, 0xb624ad206fc0b183),
+        ("bringup.jsonl", 0xc9142f2256b8175a, 0xc9142f2256b8175a),
+        ("busy.jsonl", 0x23a8d7bcf22b2d8b, 0xfd4e69d1d98aa692),
+        ("solo.jsonl", 0xa2eadd2b95cffd79, 0x3abf9f424e37b575),
+        ("party4.jsonl", 0x01b9f4175d5de836, 0x0976f42c301be352),
     ];
     let mut actual = Vec::new();
     for (name, _, _) in golden {

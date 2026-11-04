@@ -1040,6 +1040,7 @@ fn open_floor(w: u8, h: u8, walls: &[(u8, u8)]) -> Floor {
         rooms: vec![tt_toplike_saga::maze::Rect { x: 0, y: 0, w, h }],
         entrance: (0, h - 1),
         exit: (w - 1, 0),
+        portals: Vec::new(),
     }
 }
 

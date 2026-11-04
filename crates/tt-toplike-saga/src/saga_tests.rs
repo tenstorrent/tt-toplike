@@ -336,7 +336,7 @@ fn floor_specs_follow_the_chips_seen_in_key_order() {
     assert_eq!(chips, [&chip_a(), &chip_b()]);
     assert_eq!(saga.topo[0].arch, Arch::Blackhole);
     assert_eq!(saga.topo[0].dead_cols, [6, 9]);
-    assert_eq!(saga.topo[0].portals, 4);
+    assert_eq!(saga.topo[0].portal_ports, [4, 5, 6, 7]);
     assert_eq!(saga.topo[1].arch, Arch::Generic);
     // The world was built from them.
     assert_eq!(saga.state().world.chips, [chip_a(), chip_b()]);
@@ -658,7 +658,8 @@ fn every_event_variant_has_its_own_tag() {
 }
 
 /// The bytes of `one_of_each()[i]` at tick 9, written out by hand from the
-/// module comment's table (digest version 2).
+/// module comment's table (digest version 3, whose items are those of
+/// version 2: only the version byte moved).
 ///
 /// The encoding is written down in three places: the table in `saga.rs`'s
 /// module comment (and the addendum's section 3.6), the encoders in
@@ -731,7 +732,7 @@ fn the_encoding_table_matches_the_code() {
     encode_end(&mut encoded, 0x0102, &[(5, 6, 7)]);
     assert_eq!(encoded, [0x30, 2, 1, 0, 0, 0, 0, 0, 0, 1, 5, 6, 7]);
     // The version item.
-    assert_eq!((TAG_VERSION, DIGEST_VERSION), (0x00, 2));
+    assert_eq!((TAG_VERSION, DIGEST_VERSION), (0x00, 3));
 }
 
 #[test]
@@ -741,7 +742,7 @@ fn an_empty_saga_digest_has_the_version_item() {
     let saga = Saga::new(config(NameMode::Real, Label::Live));
     let hero = &saga.state.party[0].hero;
     let (x, y) = hero.pos;
-    let mut hand = vec![0x00, 0x02, 0x30];
+    let mut hand = vec![0x00, 0x03, 0x30];
     hand.extend_from_slice(&[0; 8]);
     hand.extend_from_slice(&[1, hero.floor, x, y]);
     assert_eq!(saga.digest(), crate::seed::fnv1a64(&hand));
@@ -799,7 +800,7 @@ fn the_digest_encoding_matches_a_hand_written_byte_string() {
         ),
     ];
     // The version item comes first, once.
-    let mut hand: Vec<u8> = vec![0x00, 0x02];
+    let mut hand: Vec<u8> = vec![0x00, 0x03];
     // WorldBorn: tag, tick 5, world 1, Forge.
     hand.extend_from_slice(&[0x01, 5, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1]);
     // QuestStarted: tag, tick 6, world 1, floor 0, VisitSage, target present
@@ -830,7 +831,7 @@ fn the_digest_encoding_matches_a_hand_written_byte_string() {
     hand.extend_from_slice(&[0x02, 0x01, 0, 0, 0, 0, 0, 0]);
 
     // The encoder writes exactly these bytes, after the version item.
-    let mut encoded = vec![0x00, 0x02];
+    let mut encoded = vec![0x00, 0x03];
     for (tick, ev) in &events {
         encode_event(&mut encoded, *tick, ev);
     }
@@ -1561,4 +1562,41 @@ fn a_model_ready_reads_only_the_first_64_chips_it_names() {
     };
     assert!(hooked(63), "the 64th entry is read");
     assert!(!hooked(64), "the 65th entry is not read");
+}
+
+#[test]
+fn the_saga_records_masks_and_peers_in_its_link_table() {
+    let mut saga = Saga::new(config(NameMode::Real, Label::Live));
+    // A peer record may come before the far chip's first sample (the bus
+    // source writes each chip's peers right after that chip's own readings),
+    // so it is kept even though chip B is not yet seen.
+    saga.feed(&sample(&chip_a(), ETH_LIVE_MASK, Value::U64(0x1_0003)));
+    saga.feed(&event(Event::LinkPeer {
+        port: EntityKey::eth_port(&chip_a(), 1),
+        peer: EntityKey::eth_port(&chip_b(), 0),
+    }));
+    assert_eq!(
+        saga.links().peer(&chip_a(), 1),
+        Some((chip_b(), 0)),
+        "the peer is recorded"
+    );
+    assert_eq!(saga.links().mask(&chip_a()), Some(0x1_0003));
+    assert!(saga.links().live(&chip_a(), 1));
+    assert!(!saga.links().live(&chip_b(), 0), "chip B's mask is unseen");
+    // A `LinkChanged` carries the low 16 bits: it replaces those and keeps
+    // the rest of the mask.
+    saga.feed(&event(Event::LinkChanged {
+        chip: chip_a(),
+        mask: 0x0001,
+    }));
+    assert_eq!(saga.links().mask(&chip_a()), Some(0x1_0001));
+    assert!(!saga.links().live(&chip_a(), 1));
+    // The cause of the change is the event, with its ordinal.
+    let cause = saga.links().mask_cause(&chip_a()).cloned().unwrap();
+    assert_eq!((cause.signal.as_str(), cause.ordinal), ("LinkChanged", 3));
+    // A sample sets the whole mask again.
+    saga.feed(&sample(&chip_a(), ETH_LIVE_MASK, Value::U64(0x3)));
+    assert_eq!(saga.links().mask(&chip_a()), Some(0x3));
+    let cause = saga.links().mask_cause(&chip_a()).cloned().unwrap();
+    assert_eq!((cause.signal.as_str(), cause.ordinal), (ETH_LIVE_MASK, 4));
 }

@@ -660,3 +660,122 @@ fn chips_seen_counts_the_streams_chips() {
         assert_eq!(s.state().world.chips.len(), floors, "{chips} chips");
     }
 }
+
+/// The ring of `cross4.jsonl` as (floor, port, far floor, far port): chip
+/// `i`'s highest live port to chip `i + 1`'s port 0. Chip `i`'s mask has
+/// `2 + i` low bits, so its highest port is `1 + i`.
+const CROSS4_RING: [(u8, u8, u8, u8); 4] = [(0, 1, 1, 0), (1, 2, 2, 0), (2, 3, 3, 0), (3, 4, 0, 0)];
+
+/// Whether ring link `k` of `cross4.jsonl` is up once tick `tick` is over.
+/// Link 1 (chip 1's port 2) is down from tick 400 to tick 429. At tick 600
+/// chip 0's mask becomes 0x30 (ports 4 and 5): both of chip 0's ring ports,
+/// 0 and 1, go dark with no new peer record (review finding 6 of B.1/B.2),
+/// so links 0 and 3 close for good.
+fn cross4_link_up(k: usize, tick: u64) -> bool {
+    match k {
+        1 => !(400..430).contains(&tick),
+        0 | 3 => tick < 600,
+        _ => true,
+    }
+}
+
+#[test]
+fn the_saga_keeps_the_cross_logs_link_table() {
+    // After each tick, every ring portal is bound to the right far floor
+    // and port, and is open exactly while both of its ends are live.
+    let records = party::records_with_links(4, CROSS4_TICKS);
+    // A long season, so the quiet stretch after tick 600 births no dream.
+    // A world born then would take its floors from chip 0's new mask
+    // (ports 4 and 5), and its floor 0 would have no portal on ports 0 and
+    // 1, which leaves links 0 and 3 unbound (checked at the end).
+    let mut long = Saga::new(SagaConfig {
+        season_ticks: 12_000,
+        names: NameMode::Real,
+        label: Label::Mock,
+    });
+    let mut last = 0;
+    let mut checked = 0;
+    for r in &records {
+        long.feed(r);
+        let tick = long.state().tick;
+        if tick == last {
+            continue;
+        }
+        // Tick `last` is over: every one of its records has been fed. The
+        // record just fed is the next tick's pacemaker sweep, which says
+        // nothing about links.
+        let done = last;
+        last = tick;
+        if !long.state().has_world() {
+            continue;
+        }
+        let world = &long.state().world;
+        let links = long.links();
+        for (k, &(floor, port, far, far_port)) in CROSS4_RING.iter().enumerate() {
+            assert_eq!(
+                links.bound(world, floor, port),
+                Some((far, far_port)),
+                "tick {done}"
+            );
+            assert_eq!(
+                links.bound(world, far, far_port),
+                Some((floor, port)),
+                "tick {done}"
+            );
+            let want = cross4_link_up(k, done).then_some((far, far_port));
+            assert_eq!(
+                links.open(world, floor, port),
+                want,
+                "tick {done}, link {k}"
+            );
+            let back = cross4_link_up(k, done).then_some((floor, port));
+            assert_eq!(
+                links.open(world, far, far_port),
+                back,
+                "tick {done}, link {k} back"
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked > 700, "only {checked} ticks were checked");
+
+    // With the 200-tick season of the determinism tests, a dream is born
+    // in the quiet stretch, after chip 0's mask lost ports 0 and 1: its
+    // floor 0 has portals on ports 4 and 5 only, so links 0 and 3 are no
+    // longer bound, and links 1 and 2 still are.
+    let mut short = saga(NameMode::Real);
+    for r in &records {
+        short.feed(r);
+    }
+    let world = &short.state().world;
+    assert!(
+        world.born_tick > 600,
+        "a world was born after the mask change"
+    );
+    let ports: Vec<u8> = world.floors[0].portals.iter().map(|&(p, _)| p).collect();
+    assert_eq!(ports, [4, 5]);
+    let links = short.links();
+    assert_eq!(links.bound(world, 0, 1), None);
+    assert_eq!(links.bound(world, 3, 4), None);
+    assert_eq!(links.open(world, 1, 2), Some((2, 0)));
+    assert_eq!(links.open(world, 2, 3), Some((3, 0)));
+}
+
+#[test]
+fn the_logs_without_peers_bind_no_portal() {
+    // The party logs hold no `LinkPeer`, so no portal of any of their
+    // floors is bound, live mask or not.
+    for (chips, ticks) in [(1u8, 300u64), (4, 300)] {
+        let records = party::records(chips, ticks);
+        let mut saga = saga(NameMode::Real);
+        for r in &records {
+            saga.feed(r);
+        }
+        let world = &saga.state().world;
+        for floor in 0..world.floors.len() as u8 {
+            for &(port, _) in &world.floors[floor as usize].portals {
+                assert_eq!(saga.links().bound(world, floor, port), None);
+            }
+        }
+    }
+}

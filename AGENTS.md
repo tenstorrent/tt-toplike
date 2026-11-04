@@ -2189,9 +2189,9 @@ What it does:
 * **Bounds at 32 chips.** At most 32 members, `World::floors` is an `Arc<[Floor]>` (a snapshot
   shares it), and a record costs under a million work units: the worst on the 32-chip log is a
   birth at 64,520, the mean per tick 391. A walk step is not a work unit, so the 32 steps a tick
-  are not in those figures. The saga holds at most 192 entity keys (64 kept chips, 64 ready
-  models, 64 named keys that are not kept chips; a world's chips are kept chips), 224 entities
-  with the 32 heroes, under the spec's 500.
+  are not in those figures. The saga holds at most 256 entity keys (64 kept chips, 64 ready
+  models, 64 named keys that are not kept chips, and from B.3 the link table's own 64 chip
+  keys; a world's chips are kept chips), 288 entities with the 32 heroes, under the spec's 500.
 * **The view** (`src/ui/tui/saga_party.rs`). A world of two or more floors draws a grid of
   tiles that follow their heroes (`party_grid`; smallest tile 24 x 7), a roster row when the floors need more
   than one page or chips have no floor (R34), floor tags in eight brand hues, and the focused
@@ -2325,11 +2325,13 @@ moved it, and each diff is explained by that change:
 | `fix(saga): the party keys show at 80 columns and only the focused tile marks a reached goal` (party Task A.7, fix round 1) | the status row puts the party's keys right after the quest (`[ ] z` when short), then the tick and the mapped share; only the focused tile's HUD shows `✓` | no digest. The 8 busy view frames and the 8 party frames: every status row moved, and the unfocused tiles lost their `✓`. The solo frames, the story print and the four panel frames did not move. |
 | `fix(saga): a world's birth opens the routine window again` (party Task A.8) | a birth clears the pace window's owner | nothing: no digest, story pin, busy, party, solo or panel frame moved. `routine_lines_come_from_one_floor_per_window` now keys windows by world. |
 | `fix(saga): the party view's tiles move less, inside the 20 KB/s budget` (party Task A.9) | calm unfocused tiles from a held picture, banded focused tile, dead-zone windows, held tile heat, chronicle batches of 20 ticks | no digest. The 8 party frames: the tiles and the chronicle's batches (with the batching undone they still differ from the old pins). The 8 busy view frames: the tiles alone (with the batching undone the hashes are the same). The solo frames, the story print and the four panel frames did not move. |
+| `feat(saga): portals know their Ethernet port, and a link table from the bus (digest version 3)` (party Task B.3, Nov 4 2026) | `DIGEST_VERSION` 3 (only the version byte; the items are version 2's); each portal is bound to an Ethernet port; a generic floor's portal count follows its known live mask | every row, both modes, by the version byte alone: with the version set back to 2 on the B.3 code every row matched the version 2 pins, so no fixture's floor changed (the fixtures' chips are Blackhole-shaped or have no mask). No view frame, story print or panel frame moved. New: `a_blackhole_floor_keeps_its_cells`, a hash of 500 Blackhole floors pinned on 0.17.0's code before the change. |
 
-Pinned now (digest version 2, with the party and its merged chronicle): `quiet.jsonl`
-0x6508927b58eeed16 (both modes), `bringup.jsonl` 0x88bb8d2b104511c3 (both), `busy.jsonl`
-0xb57380171988a4e6 (real) and 0xc96c1d6b13a18291 (generated), `solo.jsonl` 0xe9ed5f1dae160dfa
-and 0x5a73462b53067a2a, `party4.jsonl` 0x245050e12931e637 and 0x03610514c0841cc7.
+Pinned now (digest version 3, with the party, its merged chronicle and bound portals):
+`quiet.jsonl` 0xb624ad206fc0b183 (both modes), `bringup.jsonl` 0xc9142f2256b8175a (both),
+`busy.jsonl` 0x23a8d7bcf22b2d8b (real) and 0xfd4e69d1d98aa692 (generated), `solo.jsonl`
+0xa2eadd2b95cffd79 and 0x3abf9f424e37b575, `party4.jsonl` 0x01b9f4175d5de836 and
+0x0976f42c301be352.
 
 ### Checking the contract with the binary
 

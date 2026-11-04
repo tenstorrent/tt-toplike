@@ -60,7 +60,7 @@ fn custom(
         dead_rows,
         west_vaults: vaults.0,
         east_vaults: vaults.1,
-        portals,
+        portal_ports: (0..portals).collect(),
     }
 }
 
@@ -180,6 +180,7 @@ fn floor_from(rows: &[&str]) -> Floor {
         }],
         entrance: (1, 1),
         exit: (1, 1),
+        portals: Vec::new(),
     }
 }
 

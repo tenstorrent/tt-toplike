@@ -34,7 +34,9 @@ fn custom(
         dead_rows,
         west_vaults: vaults.0,
         east_vaults: vaults.1,
-        portals,
+        // Ports 0 to `portals - 1`: these shapes test the maze, which
+        // places one portal per entry whatever the port numbers are.
+        portal_ports: (0..portals).collect(),
     }
 }
 
@@ -183,7 +185,7 @@ fn the_exit_and_every_vault_are_reachable() {
                 spec.west_vaults as usize + spec.east_vaults as usize,
                 "seed {i}"
             );
-            assert_eq!(portals, spec.portals as usize, "seed {i}");
+            assert_eq!(portals, spec.portal_ports.len(), "seed {i}");
         } else {
             assert!(vaults > 0 && portals > 0, "seed {i}");
         }
@@ -335,4 +337,75 @@ fn the_gate_is_on_the_south_edge_and_portals_on_the_north() {
             }
         }
     }
+}
+
+/// The cells of 500 Blackhole floors, each with its own seed, Ethernet mask,
+/// Tensix mask and traffic level, folded into one FNV-1a hash (cell codes in
+/// row-major order, floor after floor).
+fn blackhole_cells_hash() -> u64 {
+    let mut h = crate::seed::fnv1a64(&[]);
+    for i in 0..SEEDS {
+        let mix = i.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(17) ^ i;
+        // Every few seeds the mask is missing, so the "no reading" rule is
+        // covered too.
+        let eth = (i % 7 != 3).then_some(mix);
+        let tensix = (i % 5 != 2).then_some(mix >> 23);
+        let spec = FloorSpec::for_chip(&chip(), None, tensix, eth, Arch::Blackhole);
+        let floor = generate(&spec, i ^ 0x5eed, traffic_for(i));
+        let codes: Vec<u8> = floor.cells.iter().map(|&c| c as u8).collect();
+        h = crate::seed::fnv1a64_extend(h, &codes);
+        h = crate::seed::fnv1a64_extend(h, &[floor.w, floor.h]);
+    }
+    h
+}
+
+#[test]
+fn a_blackhole_floor_keeps_its_cells() {
+    // Pinned on 0.17.0, when a Blackhole spec held only a portal count (the
+    // popcount of the low 12 bits of the mask, or 12 without a reading).
+    // Binding portals to ports (task B.3) must not move one Blackhole cell:
+    // the maze draws the same `spread` positions for the same count.
+    assert_eq!(
+        blackhole_cells_hash(),
+        0xe470_d8ba_cd05_fa25,
+        "Blackhole floor cells moved"
+    );
+}
+
+#[test]
+fn portals_are_listed_west_to_east_with_their_ports() {
+    for i in 0..SEEDS {
+        let floor = floor_for(i);
+        let spec = spec_for(i);
+        // One entry per port, in the spec's order, unless the north edge
+        // has fewer cells than ports (shape 5): then the lowest ports get
+        // the cells there are.
+        let inner = floor.w as usize - 2;
+        let kept = spec.portal_ports.len().min(inner);
+        assert_eq!(floor.portals.len(), kept, "seed {i}");
+        let ports: Vec<u8> = floor.portals.iter().map(|&(p, _)| p).collect();
+        assert_eq!(ports, spec.portal_ports[..kept], "seed {i}");
+        // West to east: x strictly ascending, every one on the north edge,
+        // inside the corners, on a portal cell.
+        for pair in floor.portals.windows(2) {
+            assert!(pair[0].1 .0 < pair[1].1 .0, "seed {i}: {pair:?}");
+        }
+        for &(port, (x, y)) in &floor.portals {
+            assert_eq!(y, 0, "seed {i}: port {port} off the north edge");
+            assert!(
+                x >= 1 && x + 1 < floor.w,
+                "seed {i}: port {port} in a corner"
+            );
+            assert_eq!(floor.cell(x, y), Cell::Portal, "seed {i}: port {port}");
+        }
+        // And no portal cell is missing from the list.
+        let cells = floor.cells.iter().filter(|&&c| c == Cell::Portal).count();
+        assert_eq!(cells, floor.portals.len(), "seed {i}");
+    }
+    // The k-th live port, counted from the lowest, gets the k-th portal from
+    // the west, whatever the port numbers are.
+    let spec = FloorSpec::for_chip(&chip(), None, None, Some(0b1000_0010_0100), Arch::Blackhole);
+    let floor = generate(&spec, 7, 0.0);
+    let ports: Vec<u8> = floor.portals.iter().map(|&(p, _)| p).collect();
+    assert_eq!(ports, vec![2, 5, 11]);
 }

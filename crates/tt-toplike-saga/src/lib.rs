@@ -33,6 +33,7 @@ pub mod chronicle;
 pub(crate) mod cost;
 pub mod event;
 pub mod hero;
+pub mod links;
 pub mod maze;
 pub mod observe;
 pub mod pack;
@@ -45,4 +46,5 @@ pub mod topology;
 pub mod world;
 
 pub use event::{Biome, EndWhy, SagaEvent};
+pub use links::Links;
 pub use saga::{Label, Member, Saga, SagaConfig, SagaState};

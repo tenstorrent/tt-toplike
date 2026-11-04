@@ -33,9 +33,15 @@
 //!   inner length is cut to that length.
 //! * **Gate.** The PCIe gate sits on the south edge (y = h - 1) at a column
 //!   from the seed. Die 3D draws the PCIe connector below the die's last row.
-//! * **Portals.** One per live Ethernet link, on the north edge (y = 0),
-//!   spread the same way as vaults. Die 3D draws the Ethernet cages above the
-//!   die's first row. A count larger than the edge's inner length is cut.
+//! * **Portals.** One per entry of [`FloorSpec::portal_ports`], on the north
+//!   edge (y = 0), spread the same way as vaults. Die 3D draws the Ethernet
+//!   cages above the die's first row. The k-th port of the list (they are
+//!   ascending) gets the k-th portal from the west, which is the order of
+//!   Die 3D's cages (the root crate's `portal_order_matches_die3d_cage_order`
+//!   checks it). [`Floor::portals`] lists each port with its cell. A list
+//!   longer than the edge's inner length is cut, and the ports past the cut
+//!   get no portal. The draws depend only on the number of ports, so two
+//!   specs with the same count give the same cells.
 //! * Every vault, portal and the gate gets a narrow corridor from the cell
 //!   just inside it to the nearest room centre.
 //! * **Entrance and exit.** The entrance is the gate. The exit is the centre
@@ -130,6 +136,10 @@ pub struct Floor {
     pub entrance: (u8, u8),
     /// The centre of the room farthest from the entrance.
     pub exit: (u8, u8),
+    /// Each portal's Ethernet port and its cell, west to east: one entry per
+    /// port of the spec's `portal_ports`, in that order, unless the north
+    /// edge cut the list (see "Portals" in the module comment).
+    pub portals: Vec<(u8, (u8, u8))>,
 }
 
 impl Floor {
@@ -487,8 +497,20 @@ pub fn generate(spec: &FloorSpec, seed: u64, traffic: f32) -> Floor {
     for y in spread(&mut rng, spec.east_vaults, 1, h - 1) {
         place(&mut c, &mut rng, (w - 1, y), (w - 2, y), Cell::Vault);
     }
-    for x in spread(&mut rng, spec.portals, 1, w - 1) {
+    // `spread` gives ascending columns, so zipping them with the ascending
+    // ports puts the lowest port in the west. A spec lists at most 64
+    // ports (a u64 mask), so the count fits a u8 whatever the spec says;
+    // a longer hand-made list is cut to 255 here and to the edge by
+    // `spread`.
+    let count = spec.portal_ports.len().min(u8::MAX as usize) as u8;
+    let mut portals = Vec::with_capacity(count as usize);
+    for (&port, x) in spec
+        .portal_ports
+        .iter()
+        .zip(spread(&mut rng, count, 1, w - 1))
+    {
         place(&mut c, &mut rng, (x, 0), (x, 1), Cell::Portal);
+        portals.push((port, (x, 0)));
     }
     let gate_x = rng.range(1, w as u32 - 1) as u8;
     let entrance = (gate_x, h - 1);
@@ -546,6 +568,7 @@ pub fn generate(spec: &FloorSpec, seed: u64, traffic: f32) -> Floor {
         rooms,
         entrance,
         exit,
+        portals,
     }
 }
 

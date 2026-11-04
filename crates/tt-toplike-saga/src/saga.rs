@@ -21,7 +21,8 @@
 //!    records the chip as seen, while fewer than [`MAX_CHIPS`] chips are kept
 //!    (a chip beyond the cap stops here). A topology reading
 //!    (`toplike.harvesting_state`, `toplike.enabled_tensix_col`,
-//!    `toplike.eth.live_mask`) updates that chip's floor spec. A sample on
+//!    `toplike.eth.live_mask`) updates that chip's floor spec, and the live
+//!    mask also goes into the link table ([`Links`]). A sample on
 //!    the chip itself goes into the [`TrailBook`]: temperatures through
 //!    [`push_temperature`], so the baseline series exists (ledger ruling R15),
 //!    and every other number as it is (the vitality inputs through
@@ -30,7 +31,8 @@
 //!    this tick.
 //! 3. An event updates the list of ready models (a `ModelReady` adds one
 //!    while fewer than [`MAX_READY_MODELS`] are listed, a `ModelGone` removes
-//!    it). A tick counts one more tick.
+//!    it) and the link table (a `LinkChanged` on a kept chip, a `LinkPeer`;
+//!    see "Links"). A tick counts one more tick.
 //! 4. On a tick, every chip that has ever reported a heartbeat gets one push
 //!    of the [`HEARTBEAT_ALIVE`] series: 1.0 if its heartbeat advanced within
 //!    the last [`HEARTBEAT_GRACE_TICKS`] ticks (the tick of the change and
@@ -49,7 +51,24 @@
 //! has reported `toplike.enabled_tensix_col`, a register that only Blackhole
 //! telemetry carries (`src/models/telemetry.rs` in the root crate says so).
 //! Every other chip is [`Arch::Generic`]. A world takes its floors from the
-//! specs at its birth and keeps them for its life.
+//! specs at its birth and keeps them for its life. Each portal of a floor
+//! belongs to one Ethernet port, a live port of the chip's mask at the
+//! world's birth ([`FloorSpec::portal_ports`], [`maze::Floor::portals`]).
+//!
+//! # Links
+//!
+//! The saga keeps a link table ([`Saga::links`], [`crate::links`]): each
+//! kept chip's latest live mask, from its `toplike.eth.live_mask` samples
+//! and its `LinkChanged` events, and every Ethernet peer a `LinkPeer` names.
+//! A `LinkChanged` carries the mask's low 16 bits, so it replaces those bits
+//! and keeps the rest. A `LinkPeer` goes into the table even when its chips
+//! have not been sampled yet, within the table's own cap of [`MAX_CHIPS`]
+//! chips: the bus source writes a chip's peers right after that chip's own
+//! readings, before the next chip's first one. For a world, a portal is
+//! bound when its port's peer has a portal on another floor of that world,
+//! and open while both ends are live ([`Links::open`]). No rule of the story
+//! reads the table yet (the crossing quest will), so it moves no event and
+//! is not part of the digest.
 //!
 //! # Worlds, the party and quests
 //!
@@ -222,6 +241,7 @@
 //! | chips a `ModelReady` names | the first [`crate::world::MAX_NAMED_CHIPS`] (64) entries of its list are read | [`crate::world::named_chips`] |
 //! | named chip keys that are not kept chips | [`MAX_CHIPS`] (64), in one set shared by every ready model; first seen wins | here |
 //! | party members | one per floor of the world, so at most [`crate::world::MAX_FLOORS`] (32) | here |
+//! | the link table | [`MAX_CHIPS`] (64) chips, 64 ports each: at most 4,096 peers | [`crate::links`] |
 //! | a member's hooks | [`MAX_READY_MODELS`] sage hooks (they come from the ready list), plus explore and rest | here |
 //! | undrained events | [`MAX_PENDING_EVENTS`] (4096); the oldest is dropped and counted in [`Saga::dropped_events`] | here |
 //! | chronicle lines | [`CAPACITY`] (500) | [`crate::chronicle`] |
@@ -252,8 +272,11 @@
 //! R31). First seen wins: a key is held if the set already holds it or has
 //! room. A later key is read but not kept, so a model that names it has no
 //! sage on that chip's floor, even if the chip is kept later. A key leaves
-//! the set when no ready model names it any more. So the saga holds at
-//! most 128 + 64 = 192 entity keys, and 224 entities with the 32 heroes.
+//! the set when no ready model names it any more. The link table holds at
+//! most [`MAX_CHIPS`] chip keys of its own, which can be chips the saga
+//! does not keep (a `LinkPeer` names both ends), and no port keys. So the
+//! saga holds at most 128 + 64 + 64 = 256 entity keys, and 288 entities
+//! with the 32 heroes.
 //!
 //! **Cost of one record.** At most one world is born per record: an event
 //! births at most once, and a sweep's samples can start one training run,
@@ -296,12 +319,12 @@
 //! [`Saga::digest`] is FNV-1a 64 over one byte stream, written by hand so
 //! that it is the same on every platform and compiler (ledger ruling R19).
 //! No `Debug` output is hashed. The stream is a sequence of items, each
-//! starting with a one-byte tag. This is version 2 of the encoding
-//! ([`DIGEST_VERSION`]; the party addendum, section 3.6):
+//! starting with a one-byte tag. This is version 3 of the encoding
+//! ([`DIGEST_VERSION`]; the party addendum, sections 3.6 and 8.6):
 //!
 //! | Tag | Item | Fields after the tag, in order |
 //! |---|---|---|
-//! | `0x00` | the encoding version, once, first (hashed by [`Saga::new`]) | version (2) |
+//! | `0x00` | the encoding version, once, first (hashed by [`Saga::new`]) | version (3) |
 //! | `0x01` | `WorldBorn` event | tick, world, biome |
 //! | `0x02` | `WorldEnded` event | tick, world, why |
 //! | `0x03` | `HeroBorn` event | tick, world, name, floor |
@@ -313,9 +336,12 @@
 //! | `0x30` | the end (only in [`Saga::digest`]) | current world seed, member count, then floor, x and y for each member in index order |
 //!
 //! The end item's count is the party's size: 1 for a one-chip world and
-//! before the first world. Version 1 (0.16.x) had no version item, no
-//! floors on quest events, beats or lines, and the hero's floor, x and y in
-//! place of the count and triples.
+//! before the first world. Version 3 has the items of version 2. Its
+//! version byte moved when portals were bound to Ethernet ports, so the
+//! digests that task moved are kept apart from the digests the crossing
+//! quest will move when it adds its events. Version 1 (0.16.x) had no version
+//! item, no floors on quest events, beats or lines, and the hero's floor, x
+//! and y in place of the count and triples.
 //!
 //! Field encodings:
 //!
@@ -355,6 +381,7 @@ use crate::hero::{
     push_temperature, vitality, Cause, Hero, ASIC_TEMPERATURE, HEARTBEAT_ALIVE,
     HEARTBEAT_GRACE_TICKS, VITALITY_SIGNALS,
 };
+use crate::links::Links;
 use crate::maze;
 use crate::observe::{Feed, Observation};
 use crate::pack::Pack;
@@ -593,6 +620,8 @@ pub struct Saga {
     topo_dirty: bool,
     /// Ready models, the cause of their `ModelReady` and their chips.
     ready: BTreeMap<EntityKey, Ready>,
+    /// Live masks and Ethernet peers (see "Links" in the module comment).
+    links: Links,
     /// The chip keys ready models named that are not kept chips, shared by
     /// every ready model: at most [`MAX_CHIPS`] (see "Bounds").
     named_unseen: BTreeSet<EntityKey>,
@@ -665,6 +694,7 @@ impl Saga {
             topo: Vec::new(),
             topo_dirty: false,
             ready: BTreeMap::new(),
+            links: Links::new(),
             named_unseen: BTreeSet::new(),
             members: vec![MemberCore {
                 hooks: Vec::new(),
@@ -678,7 +708,7 @@ impl Saga {
             events: VecDeque::new(),
             dropped_events: 0,
             // The version item goes in first, so a saga that has seen
-            // nothing already has a version 2 digest.
+            // nothing already has a version 3 digest.
             trace: fnv1a64(&[TAG_VERSION, DIGEST_VERSION]),
             enc: Vec::new(),
             obs: Vec::new(),
@@ -716,6 +746,12 @@ impl Saga {
     /// The state for a view to draw.
     pub fn state(&self) -> &SagaState {
         &self.state
+    }
+
+    /// The link table: every kept chip's live mask and every Ethernet peer
+    /// the bus has named (see "Links" in the module comment).
+    pub fn links(&self) -> &Links {
+        &self.links
     }
 
     /// The events raised since the last call, oldest first. The saga keeps
@@ -776,7 +812,7 @@ impl Saga {
                 entity,
                 signal,
                 value,
-            } => self.on_sample(entity, signal, *value),
+            } => self.on_sample(entity, signal, *value, ordinal),
             Observation::Event(e) => self.on_event(e, ordinal),
             Observation::Tick => {
                 self.state.tick += 1;
@@ -846,8 +882,9 @@ impl Saga {
         }
     }
 
-    /// A sample: chip readings, trails and heartbeats.
-    fn on_sample(&mut self, entity: &EntityKey, signal: &str, value: f64) {
+    /// A sample: chip readings, the link table's masks, trails and
+    /// heartbeats.
+    fn on_sample(&mut self, entity: &EntityKey, signal: &str, value: f64, ordinal: u64) {
         let Some(chip) = entity.chip_owner() else {
             return;
         };
@@ -884,7 +921,15 @@ impl Saga {
         match signal {
             HARVESTING_STATE => self.topo_dirty |= changed(&mut seen.harvesting),
             ENABLED_TENSIX_COL => self.topo_dirty |= changed(&mut seen.tensix_cols),
-            ETH_LIVE_MASK => self.topo_dirty |= changed(&mut seen.eth_live_mask),
+            ETH_LIVE_MASK => {
+                self.topo_dirty |= changed(&mut seen.eth_live_mask);
+                let cause = Cause {
+                    entity: chip.clone(),
+                    signal: ETH_LIVE_MASK.to_string(),
+                    ordinal,
+                };
+                self.links.observe_mask(&chip, bits, cause);
+            }
             HEARTBEAT => {
                 let advanced = seen.heartbeat.is_none_or(|(last, _)| last != value);
                 if advanced {
@@ -902,9 +947,32 @@ impl Saga {
         }
     }
 
-    /// An event: the list of ready models.
+    /// An event: the list of ready models, and the link table.
     fn on_event(&mut self, e: &Event, ordinal: u64) {
         match e {
+            Event::LinkChanged { chip, mask } => {
+                // Only a kept chip's mask is kept, as with the sample. The
+                // event carries the low 16 bits: they replace the same
+                // bits of the mask, and the rest stays.
+                if self.chips.contains_key(chip) {
+                    let old = self.links.mask(chip).unwrap_or(0);
+                    let merged = (old & !0xffff) | u64::from(*mask);
+                    let cause = Cause {
+                        entity: chip.clone(),
+                        signal: "LinkChanged".to_string(),
+                        ordinal,
+                    };
+                    self.links.observe_mask(chip, merged, cause);
+                }
+            }
+            Event::LinkPeer { port, peer } => {
+                let cause = Cause {
+                    entity: port.clone(),
+                    signal: "LinkPeer".to_string(),
+                    ordinal,
+                };
+                self.links.observe_peer(port, peer, cause);
+            }
             Event::ModelReady { model, chips } => {
                 // A model already listed takes the new cause and chips; a
                 // new one is listed only below MAX_READY_MODELS.
@@ -1569,11 +1637,13 @@ impl Saga {
 // ---------------------------------------------------------------------------
 
 /// The version of the digest's byte encoding, hashed first by every saga.
-/// Version 2 added the version item itself and a floor on every quest event,
-/// beat and chronicle line, and gave the end item one triple per member
-/// (the addendum, section 3.6). Version 1, the encoding of 0.16.x, had no
+/// Version 3 (task B.3 of the party plan) has the items of version 2; it
+/// marks the saga whose portals know their Ethernet ports. Version 2 added
+/// the version item itself and a floor on every quest event, beat and
+/// chronicle line, and gave the end item one triple per member (the
+/// addendum, section 3.6). Version 1, the encoding of 0.16.x, had no
 /// version item.
-pub const DIGEST_VERSION: u8 = 2;
+pub const DIGEST_VERSION: u8 = 3;
 /// Stream tag of the version item.
 const TAG_VERSION: u8 = 0x00;
 /// Stream tag of a world seed.

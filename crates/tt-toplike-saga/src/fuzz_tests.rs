@@ -247,6 +247,7 @@ fn memory_stays_bounded() {
         held.extend(saga.ready.values().flat_map(|r| &r.chips));
         held.extend(saga.named_unseen.iter());
         held.extend(w.chips.iter());
+        held.extend(saga.links.held_keys());
         held.extend(
             saga.members
                 .iter()

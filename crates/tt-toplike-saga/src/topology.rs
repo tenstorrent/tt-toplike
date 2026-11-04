@@ -2,9 +2,27 @@
 //! the chip's real tile grid.
 //!
 //! A [`FloorSpec`] says how big the chip's tile grid is, which die columns
-//! are harvested (dead), how many GDDR vaults sit on each side and how many
-//! Ethernet portals the chip has. The maze builder (a later task) turns it
+//! are harvested (dead), how many GDDR vaults sit on each side and which
+//! Ethernet ports get a portal. The maze builder ([`crate::maze`]) turns it
 //! into a floor. This module only does the arithmetic from readings to a spec.
+//!
+//! # Portals and ports
+//!
+//! Each portal belongs to one Ethernet port (the party addendum, section
+//! 8.2), so a hero can later cross the link behind it.
+//! [`FloorSpec::portal_ports`] lists those ports, ascending:
+//!
+//! * **Blackhole:** the live ports among the low 12 (one per Ethernet cage).
+//!   With no mask reading, ports 0 to 11, so an unread chip is not drawn as
+//!   cut off. The count is the same popcount the spec held before ports
+//!   existed, so a Blackhole floor's cells did not move when ports came in.
+//! * **Every other architecture:** the live ports among the low 16 when the
+//!   mask is known, else ports 0 and 1. Before ports existed such a floor
+//!   always had two portals whatever its mask said, so a generic floor with
+//!   a known mask can have a different count, and different cells, than it
+//!   had in 0.17.0. The 16 is a cap that keeps the north edge readable. It
+//!   is no hardware number: the bus mask is 64 bits wide, and this crate
+//!   copies no port count for chips other than Blackhole.
 //!
 //! # Where the Blackhole numbers come from
 //!
@@ -50,6 +68,8 @@ const BLACKHOLE_ROWS: u8 = 12;
 const BLACKHOLE_VAULTS_PER_SIDE: u8 = 4;
 /// Ethernet cages on a Blackhole die, one per live-link mask bit.
 const BLACKHOLE_ETH_PORTS: u8 = 12;
+/// The ports a non-Blackhole floor reads from a known mask: the low 16.
+const GENERIC_ETH_PORTS: u8 = 16;
 /// Tensix die columns of a Blackhole die (columns 1 to 14).
 const BLACKHOLE_TENSIX_COLS: u8 = 14;
 
@@ -58,7 +78,8 @@ const BLACKHOLE_TENSIX_COLS: u8 = 14;
 const GENERIC_COLS: u8 = 16;
 const GENERIC_ROWS: u8 = 10;
 const GENERIC_VAULTS_PER_SIDE: u8 = 2;
-const GENERIC_PORTALS: u8 = 2;
+/// The ports of a non-Blackhole floor whose mask is not known.
+const GENERIC_PORTAL_PORTS: [u8; 2] = [0, 1];
 
 /// The chip family a floor is drawn for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,8 +109,15 @@ pub struct FloorSpec {
     pub west_vaults: u8,
     /// GDDR vaults on the east side (Blackhole channels 4 to 7).
     pub east_vaults: u8,
-    /// Ethernet portals (live links).
-    pub portals: u8,
+    /// The Ethernet port of each portal, ascending, at most 64 ports (see
+    /// "Portals and ports" in the module comment). The number of portals is
+    /// its length. The maze places them west to east in this order.
+    pub portal_ports: Vec<u8>,
+}
+
+/// The set bits of `mask` among its low `ports` bits, ascending.
+fn live_ports(mask: u64, ports: u8) -> Vec<u8> {
+    (0..ports).filter(|p| mask & (1u64 << p) != 0).collect()
 }
 
 impl FloorSpec {
@@ -99,10 +127,12 @@ impl FloorSpec {
     ///   bit `b` among the low 14 bits marks die column `b + 1` dead, the same
     ///   rule Die 3D uses. Higher bits are ignored. A missing value means no
     ///   dead columns, since nothing is known to be harvested.
-    /// * `eth_live_mask` is `toplike.eth.live_mask`. The portal count is the
-    ///   number of set bits among the low 12 (one per Ethernet cage). A
-    ///   missing value counts all 12 cages, so an unread chip is not drawn as
-    ///   cut off.
+    /// * `eth_live_mask` is `toplike.eth.live_mask`. A Blackhole floor gets
+    ///   one portal per set bit among the low 12 (one per Ethernet cage),
+    ///   bound to that port. A missing value gives all 12 cages, so an
+    ///   unread chip is not drawn as cut off. Other architectures read the
+    ///   low 16 bits, or get ports 0 and 1 with no reading (see "Portals and
+    ///   ports" in the module comment).
     /// * `harvesting` is `toplike.harvesting_state`. Its bit layout is not
     ///   documented in `docs/bus.md` (which says only "register value") or in
     ///   `src/bus/signals.rs`, and Die 3D does not read it. The simplest
@@ -113,7 +143,8 @@ impl FloorSpec {
     ///
     /// Architectures other than Blackhole have no copied numbers, so they take
     /// the generic dimensions and no dead columns (the Tensix mask rule is
-    /// Blackhole's). The `arch` value is still recorded.
+    /// Blackhole's). Their portals follow the mask as above. The `arch`
+    /// value is still recorded.
     ///
     /// The function does not panic for any input. Every column and row index
     /// it returns is below `cols` and `rows`, and both sizes stay within
@@ -131,6 +162,9 @@ impl FloorSpec {
         if arch != Arch::Blackhole {
             let mut spec = FloorSpec::generic(chip);
             spec.arch = arch;
+            if let Some(mask) = eth_live_mask {
+                spec.portal_ports = live_ports(mask, GENERIC_ETH_PORTS);
+            }
             return spec;
         }
 
@@ -148,14 +182,9 @@ impl FloorSpec {
             None => Vec::new(),
         };
 
-        let portals = match eth_live_mask {
-            Some(mask) => {
-                let low = mask & ((1u64 << BLACKHOLE_ETH_PORTS) - 1);
-                // At most 12, so the cast cannot truncate.
-                low.count_ones() as u8
-            }
-            None => BLACKHOLE_ETH_PORTS,
-        };
+        // One portal per live cage, bound to its port. No reading: every
+        // cage.
+        let portal_ports = live_ports(eth_live_mask.unwrap_or(u64::MAX), BLACKHOLE_ETH_PORTS);
 
         FloorSpec {
             chip: chip.clone(),
@@ -166,12 +195,12 @@ impl FloorSpec {
             dead_rows: Vec::new(),
             west_vaults: BLACKHOLE_VAULTS_PER_SIDE,
             east_vaults: BLACKHOLE_VAULTS_PER_SIDE,
-            portals,
+            portal_ports,
         }
     }
 
     /// The floor for a chip whose architecture is not known: default
-    /// dimensions, nothing harvested.
+    /// dimensions, nothing harvested, and portals on ports 0 and 1.
     pub fn generic(chip: &EntityKey) -> FloorSpec {
         FloorSpec {
             chip: chip.clone(),
@@ -182,7 +211,7 @@ impl FloorSpec {
             dead_rows: Vec::new(),
             west_vaults: GENERIC_VAULTS_PER_SIDE,
             east_vaults: GENERIC_VAULTS_PER_SIDE,
-            portals: GENERIC_PORTALS,
+            portal_ports: GENERIC_PORTAL_PORTS.to_vec(),
         }
     }
 }
