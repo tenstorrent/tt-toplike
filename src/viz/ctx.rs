@@ -1,0 +1,98 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+//! The plugin trait and the context a plugin renders with.
+
+use super::history::History;
+use crossterm::event::KeyCode;
+use ratatui::{buffer::Buffer, layout::Rect};
+use tt_toplike_bus::{EntityKey, EntityKind, WorldRead};
+
+/// One signal a viz reads, declared so the host (and the docs) can list what
+/// a plugin depends on.
+///
+/// Returned by [`Viz::signals`]; read by the host's plugin listing and by
+/// the `explain` text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignalSpec {
+    /// The kind of entity the signal is read from.
+    pub kind: EntityKind,
+    /// The signal name on the bus, for example `"asic_temp"`.
+    pub name: String,
+}
+
+/// What a viz sees on one render: the world, the history the host keeps, and
+/// the clock.
+///
+/// Built by the host once per frame (and by [`super::testkit`] in tests) and
+/// passed to [`Viz::render`] by reference.
+pub struct VizCtx<'a> {
+    /// Read access to the bus world.
+    pub world: &'a dyn WorldRead,
+    /// Recent values of the signals the host records.
+    pub history: &'a History,
+    /// The frame counter of the host's draw loop.
+    pub tick: u64,
+    /// The bus clock's monotonic time in nanoseconds; the scale every
+    /// reading's `t_mono_ns` is on.
+    pub now_mono_ns: u64,
+}
+
+impl VizCtx<'_> {
+    /// Every chip the world holds a reading for, in key order.
+    ///
+    /// A convenience for plugins; it is `world.entities(EntityKind::Chip)`.
+    pub fn chips(&self) -> Vec<EntityKey> {
+        self.world.entities(EntityKind::Chip)
+    }
+}
+
+/// A full-screen view supplied as a plugin.
+///
+/// The host (the TUI) owns one boxed instance per registered plugin and calls
+/// it only from the draw thread, so it needs `Send` but not `Sync`.
+pub trait Viz: Send {
+    /// The stable kebab-case id (`[a-z0-9]+(-[a-z0-9]+)*`). The registry keys
+    /// on it and `--viz <id>` and `[viz] enable` name it.
+    fn id(&self) -> &str;
+
+    /// The name shown in the view cycle and the title bar.
+    fn title(&self) -> &str;
+
+    /// The smallest terminal (width, height) the viz can draw in. The host
+    /// shows a "needs W x H" message below it instead of calling `render`.
+    fn min_size(&self) -> (u16, u16) {
+        (40, 10)
+    }
+
+    /// The signals the viz reads. Informational; the default is none.
+    fn signals(&self) -> Vec<SignalSpec> {
+        Vec::new()
+    }
+
+    /// Draw the view into `area` of `buf`. Called every frame by the host.
+    fn render(&mut self, buf: &mut Buffer, area: Rect, ctx: &VizCtx);
+
+    /// Lines for the legend panel, shown by the host on request.
+    fn legend(&self) -> Vec<String>;
+
+    /// A plain-language account of what the view shows, for the explain panel.
+    fn explain(&self) -> String;
+
+    /// Help text listing the viz's keys, for the help panel.
+    fn help(&self) -> String;
+
+    /// Receive the viz's `[viz.<id>]` table from the config file. Called by
+    /// the host once after construction and again on config reload. The
+    /// default ignores it.
+    fn configure(&mut self, cfg: &toml_edit::Table) {
+        let _ = cfg;
+    }
+
+    /// Offer a key press to the viz. Return `true` if it was used, so the host
+    /// does not act on it. The default uses none.
+    fn on_key(&mut self, key: KeyCode) -> bool {
+        let _ = key;
+        false
+    }
+}

@@ -107,6 +107,10 @@ pub mod ui;
 #[cfg(feature = "tui")]
 pub mod saga;
 
+// Viz plugins: the trait, registry, history and test helpers. TUI-side only.
+#[cfg(feature = "tui")]
+pub mod viz;
+
 // Re-exports for convenience
 pub use backend::{BackendConfig, TelemetryBackend};
 pub use error::{Result, TTTopError};
