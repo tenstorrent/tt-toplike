@@ -72,6 +72,12 @@
 //! reads the table (see "Crossing"). The table itself is not hashed: what
 //! the digest sees of it is the crossings it allows.
 //!
+//! For views, the state lists every portal of the world with its far end
+//! and whether it is open ([`SagaState::portals`]). The list is rebuilt at
+//! the end of each observation that changed a live mask or a peer, and at
+//! each world's birth. No rule of the story reads it, and the digest does
+//! not hash it.
+//!
 //! # Worlds, the party and quests
 //!
 //! A world has one floor per chip (at most [`crate::world::MAX_FLOORS`]),
@@ -322,6 +328,7 @@
 //! | named chip keys that are not kept chips | [`MAX_CHIPS`] (64), in one set shared by every ready model; first seen wins | here |
 //! | party members | one per floor of the world, so at most [`crate::world::MAX_FLOORS`] (32) | here |
 //! | the link table | [`MAX_CHIPS`] (64) chips, 64 ports each: at most 4,096 peers | [`crate::links`] |
+//! | the state's portal list | one entry per portal of the world: at most 32 floors x 16 | here |
 //! | a member's hooks | [`MAX_READY_MODELS`] sage hooks (they come from the ready list), plus explore and rest | here |
 //! | a floor's crossing hooks | one per portal of the floor (at most 16), holding a port and a reason and no target key | here |
 //! | heroes in transit | one transit per member: at most 32 | [`crate::hero`] |
@@ -635,6 +642,31 @@ pub struct SagaState {
     /// Views read it; no rule of the story does, and it is not part of
     /// [`Saga::digest`].
     pub chips_seen: usize,
+    /// Every portal of the world, floor by floor and west to east on each
+    /// floor (the order of [`crate::maze::Floor::portals`]), with its far
+    /// end and whether it is open, as the link table says now (see "Links"
+    /// in the module comment). The saga rebuilds it after every record that
+    /// changes a live mask or a peer, and at each world's birth, so a view
+    /// can colour each portal without reading the table. Empty before the
+    /// first world. It holds one entry per portal, so at most
+    /// [`crate::world::MAX_FLOORS`] x 16. Views read it; no rule of the
+    /// story does, and it is not part of [`Saga::digest`].
+    pub portals: Vec<PortalState>,
+}
+
+/// One portal of the current world, for a view ([`SagaState::portals`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortalState {
+    /// The floor the portal is on.
+    pub floor: u8,
+    /// Its Ethernet port on that floor's chip.
+    pub port: u8,
+    /// The floor and port at the other end of its link, when the portal is
+    /// bound ([`Links::bound`]); `None` when no peer record leads to a
+    /// portal of this world.
+    pub far: Option<(u8, u8)>,
+    /// Whether it is open: bound, and both ends live ([`Links::open`]).
+    pub open: bool,
 }
 
 impl SagaState {
@@ -738,6 +770,10 @@ pub struct Saga {
     ready: BTreeMap<EntityKey, Ready>,
     /// Live masks and Ethernet peers (see "Links" in the module comment).
     links: Links,
+    /// Set by a record that changed a live mask or a peer, and by a world's
+    /// birth: [`SagaState::portals`] is rebuilt at the end of the
+    /// observation.
+    portals_dirty: bool,
     /// The chip keys ready models named that are not kept chips, shared by
     /// every ready model: at most [`MAX_CHIPS`] (see "Bounds").
     named_unseen: BTreeSet<EntityKey>,
@@ -817,6 +853,7 @@ impl Saga {
             topo_dirty: false,
             ready: BTreeMap::new(),
             links: Links::new(),
+            portals_dirty: false,
             named_unseen: BTreeSet::new(),
             members: vec![MemberCore {
                 hooks: Vec::new(),
@@ -849,6 +886,7 @@ impl Saga {
                 chronicle: Chronicle::new(),
                 tick: 0,
                 chips_seen: 0,
+                portals: Vec::new(),
             },
             #[cfg(test)]
             walled_sage: None,
@@ -1032,6 +1070,37 @@ impl Saga {
                 self.member_tick(i);
             }
         }
+
+        if self.portals_dirty {
+            self.portals_dirty = false;
+            self.rebuild_portals();
+        }
+    }
+
+    /// Lists every portal of the world with its far end and whether it is
+    /// open ([`SagaState::portals`]). The list is reused, so a rebuild
+    /// allocates nothing once it has grown to the world's portal count.
+    fn rebuild_portals(&mut self) {
+        let mut out = std::mem::take(&mut self.state.portals);
+        out.clear();
+        let world = &self.state.world;
+        if world.id > 0 {
+            for (f, floor) in world.floors.iter().enumerate() {
+                // A world has at most MAX_FLOORS (32) floors.
+                let f = f as u8;
+                for &(port, _) in &floor.portals {
+                    let far = self.links.bound(world, f, port);
+                    let open = far.is_some() && self.links.open(world, f, port).is_some();
+                    out.push(PortalState {
+                        floor: f,
+                        port,
+                        far,
+                        open,
+                    });
+                }
+            }
+        }
+        self.state.portals = out;
     }
 
     /// A sample: chip readings, the link table's masks, trails and
@@ -1093,6 +1162,7 @@ impl Saga {
                 };
                 let old = self.links.mask(&chip);
                 self.links.observe_mask(&chip, bits, cause);
+                self.portals_dirty |= old != Some(bits);
                 note_rise(seen, old, bits);
                 self.check_transits(&chip);
             }
@@ -1129,6 +1199,7 @@ impl Saga {
                         ordinal,
                     };
                     self.links.observe_mask(chip, merged, cause.clone());
+                    self.portals_dirty |= old != Some(merged);
                     note_rise(seen, old, merged);
                     // The event reports every rise among its 16 bits that
                     // no earlier `LinkChanged` reported: the bus source
@@ -1151,6 +1222,7 @@ impl Saga {
                     ordinal,
                 };
                 self.links.observe_peer(port, peer, cause);
+                self.portals_dirty = true;
             }
             Event::ModelReady { model, chips } => {
                 // A model already listed takes the new cause and chips; a
@@ -1361,6 +1433,7 @@ impl Saga {
         }
         let (id, biome) = (world.id, world.biome);
         self.state.world = world;
+        self.portals_dirty = true;
         // Each floor's crossings: one per open link whose two chips a ready
         // model runs on, the first model in key order giving the reason.
         self.cross_hooks = vec![Vec::new(); self.state.world.floors.len()];

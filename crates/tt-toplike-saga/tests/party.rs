@@ -873,3 +873,56 @@ fn generated_mode_leaves_no_fixture_name_in_the_cross_log() {
         "no crossing for demo-pair in real mode"
     );
 }
+
+// ---- Portals for the view (Task B.5) ----------------------------------------------
+
+#[test]
+fn the_states_portals_mirror_the_link_table() {
+    // `SagaState::portals` lists every portal of the world, floor by floor
+    // and west to east, with its far end when bound and whether it is open,
+    // as the link table says after every record. A view reads it, so it
+    // must never lag the table, and it holds one entry per portal, so it is
+    // bounded by the floors' portals (at most 16 on each of 32 floors).
+    let records = support::read_fixture("cross4.jsonl");
+    let mut s = saga(NameMode::Real);
+    let (mut closed_seen, mut open_seen) = (false, false);
+    for r in &records {
+        s.feed(r);
+        let state = s.state();
+        let world = &state.world;
+        let mut want = Vec::new();
+        if state.has_world() {
+            for (f, floor) in world.floors.iter().enumerate() {
+                let f = f as u8;
+                for &(port, _) in &floor.portals {
+                    let far = s.links().bound(world, f, port);
+                    let open = s.links().open(world, f, port).is_some();
+                    want.push(tt_toplike_saga::PortalState {
+                        floor: f,
+                        port,
+                        far,
+                        open,
+                    });
+                }
+            }
+        }
+        assert_eq!(state.portals, want, "tick {}", state.tick);
+        assert!(state.portals.len() <= 32 * 16);
+        closed_seen |= state.portals.iter().any(|p| p.far.is_some() && !p.open);
+        open_seen |= state.portals.iter().any(|p| p.open);
+    }
+    assert!(
+        open_seen && closed_seen,
+        "the log shows open and closed portals"
+    );
+    // The party logs have no peers: every portal is listed, none is bound.
+    let records = support::read_fixture("party4.jsonl");
+    let mut s = saga(NameMode::Real);
+    for r in &records {
+        s.feed(r);
+    }
+    let state = s.state();
+    let count: usize = state.world.floors.iter().map(|f| f.portals.len()).sum();
+    assert_eq!(state.portals.len(), count);
+    assert!(state.portals.iter().all(|p| p.far.is_none() && !p.open));
+}

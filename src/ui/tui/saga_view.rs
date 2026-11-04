@@ -73,6 +73,12 @@
 //!   fading trail of `•` over its last [`TRAIL_LEN`] steps.
 //! * **The goal** pulses between `◈` and `◆` in yellow, or shows the sage
 //!   `Ψ` in a pulsing teal when the quest is a visit.
+//! * **Portals** shimmer in teal while no link is known for their port. A
+//!   portal whose Ethernet link leads to another floor is drawn in that
+//!   floor's hue: bold while the link is open, dim while it is down, and in
+//!   the hero's yellow while a hero crosses through it ([`portal_style`]).
+//!   Heroes cross between floors (see "Crossings" in `saga_party.rs`); a
+//!   floor can then hold several heroes, and all of them are drawn.
 //! * **Colour.** Each biome has its own floor and wall hues (a dungeon is
 //!   teal and blue, a forge yellow and orange, a dream green and teal). The
 //!   hero's chip's temperature, when the view knows it, warms the floor from
@@ -137,7 +143,7 @@ use tt_toplike_saga::hero::astar;
 use tt_toplike_saga::maze::{Cell, Floor};
 use tt_toplike_saga::pack::{Glyphs, Pack, Palette, Rgb, WallKind, ARM_E, ARM_N, ARM_S, ARM_W};
 use tt_toplike_saga::quest::{Verb, REST_BELOW};
-use tt_toplike_saga::{Biome, Member, SagaState};
+use tt_toplike_saga::{Biome, Member, PortalState, SagaState};
 use unicode_width::UnicodeWidthChar;
 
 use crate::ui::colors;
@@ -1301,6 +1307,97 @@ pub fn sage_style(frame: u64) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+/// What a portal shows ([`portal_look`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortalLook {
+    /// No peer record leads from its port to a portal of this world: it
+    /// is drawn as before crossings existed, the teal shimmer.
+    Unbound,
+    /// Bound and open, to this floor (an index).
+    Open(u8),
+    /// Bound to this floor, but one end of the link is down.
+    Closed(u8),
+    /// A hero is in transit through it: it is the portal the hero stepped
+    /// into or the portal it will step out of.
+    Crossing,
+}
+
+/// What the portal on floor `floor` with port `port` shows, from the
+/// core's portal list ([`SagaState::portals`]) and the heroes in transit.
+fn portal_look(state: &SagaState, floor: usize, port: u8) -> PortalLook {
+    let crossing = state.party.iter().any(|m| {
+        m.hero.transit.as_ref().is_some_and(|t| {
+            (m.hero.floor as usize == floor && t.from_port == port)
+                || (t.to_floor as usize == floor && t.to_port == port)
+        })
+    });
+    if crossing {
+        return PortalLook::Crossing;
+    }
+    let listed = state
+        .portals
+        .iter()
+        .find(|p| p.floor as usize == floor && p.port == port);
+    match listed {
+        Some(&PortalState {
+            far: Some((far, _)),
+            open: true,
+            ..
+        }) => PortalLook::Open(far),
+        Some(&PortalState {
+            far: Some((far, _)),
+            ..
+        }) => PortalLook::Closed(far),
+        _ => PortalLook::Unbound,
+    }
+}
+
+/// How much of a closed portal's far hue it keeps, in percent of the way
+/// from the base: enough to tell which floor it leads to, dim enough to
+/// tell it from an open one.
+const CLOSED_PORTAL: u32 = 45;
+
+/// The style of the portal on floor `floor` with port `port`, at column
+/// `x` of the floor, at `frame`, lit to `light` (as [`Tint::at`] takes it),
+/// on a map that moves as `motion` says ([`portal_look`] says which case):
+///
+/// * **No link known:** as before crossings existed: the teal shimmer, held
+///   still at its dim step on a calm tile. On real hardware, where nothing
+///   reports Ethernet peers yet, every portal is drawn this way.
+/// * **Open:** bold, in the hue of the floor at the other end of the link
+///   (`saga_party::floor_hue`), so a link can be followed from tile to
+///   tile by its colour. It holds still.
+/// * **Closed:** the same hue, dimmed and not bold.
+/// * **A hero crossing through it:** the hero's yellow on a yellow glow,
+///   on both of the link's portals for the three ticks of the transit. It
+///   holds still, so an unfocused tile changes only when a crossing starts
+///   or ends.
+#[allow(clippy::too_many_arguments)]
+fn portal_style(
+    state: &SagaState,
+    look: &Look,
+    floor: usize,
+    port: u8,
+    x: usize,
+    frame: u64,
+    light: u32,
+    motion: Motion,
+) -> Style {
+    let p = &look.p;
+    let base = p.base;
+    match portal_look(state, floor, port) {
+        PortalLook::Unbound if motion == Motion::Calm => look.portal_dim.at(base, light),
+        PortalLook::Unbound => look.cell(Cell::Portal, x, frame).at(base, light),
+        PortalLook::Open(far) => Tint::bold(saga_party::floor_hue(p, far)).at(base, light),
+        PortalLook::Closed(far) => {
+            Tint::new(mix(base, saga_party::floor_hue(p, far), CLOSED_PORTAL)).at(base, light)
+        }
+        PortalLook::Crossing => fg(p.yellow)
+            .bg(rgb(mix(base, p.yellow, 35)))
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
 /// The goal beacon's glyph at `frame`: the two glyphs swap at each half
 /// pulse.
 fn goal_glyph(glyphs: &Glyphs, frame: u64) -> char {
@@ -1452,32 +1549,43 @@ struct Seat {
 /// The lead's seat: the lead's floor ([`hero_floor_index`], the first floor
 /// when there is none) and the lead's hero. The view drew this seat
 /// before the party, and a world of one floor and the arcade panel still
-/// draw it.
+/// draw it. While the lead is in transit the seat has no member: the map
+/// shows the floor the lead left, centred on the portal it stepped into,
+/// with no hero on it, and the status row says where the lead is going.
+/// A world of one floor has no link to cross, so its seat always has the
+/// lead.
 fn lead_seat(state: &SagaState) -> Seat {
-    let pos = state.lead().hero.pos;
+    let lead = &state.lead().hero;
+    let pos = lead.pos;
     Seat {
         floor: hero_floor_index(state).unwrap_or(0),
-        member: Some(0),
+        member: lead.transit.is_none().then_some(0),
         centre: (pos.0 as usize, pos.1 as usize),
         pose: None,
     }
 }
 
 /// The seat of floor `floor`: the first member, in index order, whose hero
-/// stands on it ([`member_floor`]). In the party stage member `i` stands on
-/// floor `i`, so tile `i` follows hero `i`.
+/// stands on it ([`member_floor`]). Until a hero crosses, member `i`
+/// stands on floor `i`, so tile `i` follows hero `i`. A floor with no hero
+/// on it centres on the portal a hero just stepped into, while that hero
+/// is in transit from it, and otherwise on the floor's gate, the way in.
 fn floor_seat(state: &SagaState, floor: usize) -> Seat {
     let member = (0..state.party.len()).find(|&m| member_floor(state, m) == Some(floor));
-    let centre = match member {
-        Some(m) => {
+    let leaving = (0..state.party.len()).find(|&m| {
+        let hero = &state.party[m].hero;
+        hero.transit.is_some() && hero.floor as usize == floor
+    });
+    let centre = match (member, leaving) {
+        (Some(m), _) | (None, Some(m)) => {
             let pos = state.party[m].hero.pos;
             (pos.0 as usize, pos.1 as usize)
         }
-        None => state
+        (None, None) => state
             .world
             .floors
             .get(floor)
-            .map_or((0, 0), |f| (f.w as usize / 2, f.h as usize / 2)),
+            .map_or((0, 0), |f| (f.entrance.0 as usize, f.entrance.1 as usize)),
     };
     Seat {
         floor,
@@ -1522,13 +1630,21 @@ pub fn render_saga_off(area: (u16, u16), enabled: bool) -> Vec<Line<'static>> {
     out
 }
 
-/// The index of the hero's floor in the world's floors: the hero's own
-/// index, or 0 (the first floor) when that index is past the end, since the
-/// core plans on the first floor then too. `None` when the world has no
-/// floors. The title and the map both use it, so they always name the same
-/// floor.
+/// The index of the lead hero's floor in the world's floors: the hero's
+/// own index, or 0 (the first floor) when that index is past the end, since
+/// the core plans on the first floor then too. While the lead is in transit
+/// it is the floor the lead left, so the single-floor view and the arcade
+/// panel keep showing that floor, and its memory, until the lead arrives
+/// (see [`lead_seat`]). `None` when the world has no floors. The title and
+/// the map both use it, so they always name the same floor.
 fn hero_floor_index(state: &SagaState) -> Option<usize> {
-    member_floor(state, 0)
+    let n = state.world.floors.len();
+    let i = state.party.first()?.hero.floor as usize;
+    match n {
+        0 => None,
+        _ if i < n => Some(i),
+        _ => Some(0),
+    }
 }
 
 /// The hero's floor (see [`hero_floor_index`]).
@@ -1781,6 +1897,27 @@ fn map_rows(
             .map_or(m.quest.verb == Verb::VisitSage, |p| p.sage)
     });
     let goal_at = member.map(|m| seat.pose.map_or(m.quest.goal, |p| p.goal));
+    // The other heroes standing on the floor, where the memory last saw
+    // them (the newest step of each trail): a floor holds several once
+    // heroes cross. They are drawn without their own light or glow; the
+    // memory already lights what they walk past.
+    let others: Vec<((u8, u8), Style)> = if fits {
+        memory
+            .trails
+            .iter()
+            .filter(|t| Some(t.member) != seat.member)
+            .filter_map(|t| {
+                let at = *t.steps.front()?;
+                let weak = state
+                    .party
+                    .get(t.member)
+                    .is_some_and(|m| m.hero.vitality < REST_BELOW);
+                Some((at, if weak { look.hero_weak } else { look.hero_well }))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     for (r, row) in out.iter_mut().enumerate() {
         let y = y0 + r;
         if y >= fh {
@@ -1803,8 +1940,11 @@ fn map_rows(
             };
             let near_hero =
                 !calm && hero_at.is_some() && x.abs_diff(hx) <= 1 && y.abs_diff(hy) <= 1;
+            let other = others.iter().find(|(p, _)| *p == at).map(|&(_, s)| s);
             let (glyph, style) = if Some(at) == hero_at {
                 (glyphs.hero, hero)
+            } else if let Some(style) = other {
+                (glyphs.hero, style)
             } else if Some(at) == goal_at {
                 // The goal shows through the dark. A calm tile holds the
                 // pulse still at its midpoint.
@@ -1836,9 +1976,23 @@ fn map_rows(
                         look.wall
                     };
                     (wall_glyph(glyphs, floor, x as i32, y as i32), tint)
-                } else if calm && cell == Cell::Portal {
-                    // No shimmer on a calm tile.
-                    (glyphs.cell(cell), look.portal_dim)
+                } else if cell == Cell::Portal {
+                    // A portal's colour says where its link leads and
+                    // whether it is open ([`portal_style`]).
+                    let port = floor
+                        .portals
+                        .iter()
+                        .find(|&&(_, c)| c == at)
+                        .map(|&(p, _)| p);
+                    let style = match port {
+                        Some(port) => {
+                            portal_style(state, look, seat.floor, port, x, frame, light, motion)
+                        }
+                        None if calm => look.portal_dim.at(base, light),
+                        None => look.cell(cell, x, frame).at(base, light),
+                    };
+                    row.put(glyphs.cell(cell), halo(style, near_hero, cell, look));
+                    continue;
                 } else {
                     (glyphs.cell(cell), look.cell(cell, x, frame))
                 };
@@ -2418,13 +2572,18 @@ fn status_tick(row: &mut Row, state: &SagaState, look: &Look) {
     }
 }
 
-/// The status row's hero, vitality and quest for the seat's hero (the lead
-/// when the seat has none).
+/// The status row's hero, vitality and quest for the seat's hero. A seat
+/// with no hero shows a hero in transit from or to its floor
+/// ([`traveller`]), and otherwise `no hero on F2`.
 fn status_body(row: &mut Row, state: &SagaState, look: &Look, seat: Seat) {
-    let member = seat
+    let Some(member) = seat
         .member
+        .or_else(|| traveller(state, seat.floor))
         .and_then(|m| state.party.get(m))
-        .unwrap_or(state.lead());
+    else {
+        row.push(&format!(" no hero on F{}", seat.floor + 1), look.dim);
+        return;
+    };
     let hero = &member.hero;
     let (v, bar_style) = vitality(member, look);
     let filled = ((v * VITALITY_CELLS as f32).round() as usize).min(VITALITY_CELLS);
@@ -2439,7 +2598,7 @@ fn status_body(row: &mut Row, state: &SagaState, look: &Look, seat: Seat) {
             bar_style.add_modifier(Modifier::BOLD),
         )
         .push("  • ", sep)
-        .push(&quest_text(member), look.quest);
+        .push(&quest_text(state, member), look.quest);
 }
 
 /// How much of the seat's floor the view has mapped, when the memory is
@@ -2490,10 +2649,76 @@ fn separator(look: &Look) -> Style {
     fg(mix(look.p.base, look.p.accent, 80))
 }
 
+/// The first member, in index order, in transit from or to floor `floor`:
+/// the hero both tiles of a crossing name in their HUDs.
+fn traveller(state: &SagaState, floor: usize) -> Option<usize> {
+    state.party.iter().position(|m| {
+        m.hero
+            .transit
+            .as_ref()
+            .is_some_and(|t| m.hero.floor as usize == floor || t.to_floor as usize == floor)
+    })
+}
+
+/// Where a member's crossing quest stands ([`cross_stage`]). Floors are
+/// indices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrossStage {
+    /// Walking to the portal, which leads to this floor when it is known.
+    Walking(Option<usize>),
+    /// In transit, from the first floor to the second.
+    Transit(usize, usize),
+    /// Arrived on this floor; the hero dwells there before its next quest.
+    Arrived(usize),
+    /// Thrown back onto its own portal when the link went down mid-crossing;
+    /// the hero dwells there before its next quest.
+    ThrownBack,
+}
+
+/// Where member `member`'s crossing quest stands. The core keeps a
+/// crossing quest through the dwell after an arrival or a failure (the
+/// quest changes only when the hero plans again), so the view tells the
+/// stages apart: in transit while the hero has a transit; arrived when the
+/// hero stands on the floor of the quest's target (the far Ethernet port's
+/// chip); thrown back when it stands on its goal, its own portal, on any
+/// other floor (a portal found dark replans at once, so it never stands
+/// there with the quest); walking otherwise.
+fn cross_stage(state: &SagaState, member: &Member) -> CrossStage {
+    let hero = &member.hero;
+    if let Some(t) = &hero.transit {
+        return CrossStage::Transit(hero.floor as usize, t.to_floor as usize);
+    }
+    let far = member
+        .quest
+        .target
+        .as_ref()
+        .and_then(|k| k.chip_owner())
+        .and_then(|chip| state.world.chips.iter().position(|c| *c == chip));
+    if far == Some(hero.floor as usize) {
+        CrossStage::Arrived(hero.floor as usize)
+    } else if hero.pos == member.quest.goal {
+        CrossStage::ThrownBack
+    } else {
+        CrossStage::Walking(far)
+    }
+}
+
 /// A member's quest in words: `exploring`, `resting`, `visiting the sage
 /// NAME`, with `(done)` once the hero stands on the goal. See "Names" in the
-/// module comment for where NAME comes from.
-fn quest_text(member: &Member) -> String {
+/// module comment for where NAME comes from. A crossing says where it
+/// stands ([`cross_stage`]): `heading for the portal to F2`, `crossing F2 →
+/// F5`, `arrived on F5 through a portal`, or `thrown back at the portal:
+/// the link went down`; it never says `(done)`.
+fn quest_text(state: &SagaState, member: &Member) -> String {
+    if member.quest.verb == Verb::Cross {
+        return match cross_stage(state, member) {
+            CrossStage::Walking(Some(f)) => format!("heading for the portal to F{}", f + 1),
+            CrossStage::Walking(None) => "heading for a portal".to_string(),
+            CrossStage::Transit(a, b) => format!("crossing F{} → F{}", a + 1, b + 1),
+            CrossStage::Arrived(f) => format!("arrived on F{} through a portal", f + 1),
+            CrossStage::ThrownBack => "thrown back at the portal: the link went down".to_string(),
+        };
+    }
     let q = &member.quest;
     let target = quest_target(member);
     let named = |what: &str, fallback: &str| match &target {
@@ -2508,9 +2733,8 @@ fn quest_text(member: &Member) -> String {
         Verb::Escort => named("escorting", "escorting a traveller"),
         Verb::Cleanse => named("cleansing", "cleansing a vault"),
         Verb::Rebuild => named("rebuilding", "rebuilding a bridge"),
-        // The target label is the far port's long key, so the status row
-        // says only what the hero is doing. Task B.5 draws the crossing.
-        Verb::Cross => "crossing a portal".to_string(),
+        // Answered above.
+        Verb::Cross => String::new(),
     };
     if q.verb != Verb::Rest && member.hero.pos == q.goal {
         text.push_str(" (done)");
@@ -2679,7 +2903,7 @@ fn hud_row(state: &SagaState, memory: &SagaMemory, look: &Look, w: usize) -> Row
     }
     let lead = mark.map_or(0, |m| 1 + cols(m));
     let name = state.lead().hero.name.as_str();
-    let quest = quest_text(state.lead());
+    let quest = quest_text(state, state.lead());
     // " name  ▰▰▰▰▰▰▰▰▰▰  99%  • quest", as `status_after` draws it.
     let full = lead + 1 + cols(name) + 2 + VITALITY_CELLS + 5 + 4 + cols(&quest);
     if full <= w {
@@ -2878,10 +3102,37 @@ pub fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'static>> {
             (c(g.hero), fg(p.orange)),
             (c(g.hero), fg(base).bg(rgb(p.green))),
             (
-                "  roster: on this page, off it, weak, focused".to_string(),
+                c(saga_party::TRANSIT_GLYPH),
+                fg(saga_party::floor_hue(&p, 1)).add_modifier(Modifier::BOLD),
+            ),
+            (
+                "  roster: on this page, off it, weak, focused, crossing".to_string(),
                 dim,
             ),
         ]),
+        line({
+            // A portal open to floor 2, the same portal closed, and a
+            // portal with a hero crossing through it, as `portal_style`
+            // draws them fully lit.
+            let hue = saga_party::floor_hue(&p, 1);
+            vec![
+                (c(g.portal), Tint::bold(hue).at(base, 100)),
+                (
+                    c(g.portal),
+                    Tint::new(mix(base, hue, CLOSED_PORTAL)).at(base, 100),
+                ),
+                (
+                    c(g.portal),
+                    fg(p.yellow)
+                        .bg(rgb(mix(base, p.yellow, 35)))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                (
+                    "  portal open to F2 in its colour, closed, a hero crossing".to_string(),
+                    dim,
+                ),
+            ]
+        }),
     ]
 }
 

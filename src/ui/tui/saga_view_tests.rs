@@ -766,7 +766,16 @@ fn the_overlays_fit_their_row_targets() {
             .collect();
         let want: &[&str] = match kind {
             OverlayPanel::Help => &["[ ]", "focus the floor", "zoom"],
-            OverlayPanel::Legend => &["THE PARTY", "F1 ", "F8 ", "roster"],
+            // Task B.5 adds the crossing: the roster's transit glyph and
+            // the portals' colours.
+            OverlayPanel::Legend => &[
+                "THE PARTY",
+                "F1 ",
+                "F8 ",
+                "roster",
+                "crossing",
+                "portal open to F2",
+            ],
             OverlayPanel::Explain => &["F3", "z shows the focused floor"],
         };
         for w in want {
@@ -1891,7 +1900,7 @@ fn a_narrow_hud_keeps_the_hero_the_vitality_and_the_quest() {
     let state = busy_state();
     let name = state.party[0].hero.name.clone();
     let first = name.split(' ').next().unwrap().to_string();
-    let quest = quest_text(state.lead());
+    let quest = quest_text(&state, state.lead());
     let pct = format!(
         "{:>3.0}%",
         state.party[0].hero.vitality.clamp(0.0, 1.0) * 100.0

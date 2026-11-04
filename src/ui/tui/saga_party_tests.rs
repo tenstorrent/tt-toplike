@@ -100,12 +100,14 @@ fn end_of(which: &str) -> &'static (SagaState, PartyMemory) {
     static P4: OnceLock<(SagaState, PartyMemory)> = OnceLock::new();
     static P32: OnceLock<(SagaState, PartyMemory)> = OnceLock::new();
     static P40: OnceLock<(SagaState, PartyMemory)> = OnceLock::new();
+    static CROSS: OnceLock<(SagaState, PartyMemory)> = OnceLock::new();
     let (cell, log): (&OnceLock<_>, fn() -> &'static [Record]) = match which {
         "solo" => (&SOLO, solo),
         "busy" => (&BUSY, busy),
         "party4" => (&P4, party4),
         "32" => (&P32, log32),
         "40" => (&P40, log40),
+        "cross" => (&CROSS, cross4),
         _ => unreachable!("no log {which}"),
     };
     cell.get_or_init(|| {
@@ -295,9 +297,10 @@ fn below_the_minimum_tile_the_focused_floor_draws_alone() {
 
 // ---- Sizes and borders -----------------------------------------------------------
 
-/// Every size from 0x0 to 500x200 fits for 1, 2, 4 and 32 chips: no line
-/// wider than the area and no more lines than its rows, with the focus on
-/// several floors, with "why" on and the story stopped, and zoomed.
+/// Every size from 0x0 to 500x200 fits for 1, 2, 4 and 32 chips, and for
+/// the end of the four-chip cross log: no line wider than the area and no
+/// more lines than its rows, with the focus on several floors, with "why"
+/// on and the story stopped, and zoomed.
 #[test]
 fn the_party_view_fits_every_size_for_1_2_4_and_32_chips() {
     let widths: Vec<u16> = (0..=130)
@@ -309,7 +312,7 @@ fn the_party_view_fits_every_size_for_1_2_4_and_32_chips() {
         .chain([200])
         .collect();
     tc(|| {
-        for which in ["solo", "busy", "party4", "32"] {
+        for which in ["solo", "busy", "party4", "32", "cross"] {
             let (state, party) = end_of(which);
             let n = state.world.floors.len();
             let variants = [
@@ -346,11 +349,13 @@ fn all_seen(party: &PartyMemory) -> PartyMemory {
 /// cell of every floor is seen, and each hero stands at its floor's right
 /// edge, so every tile's window scrolls to the floor's last column. The
 /// 40-chip story has chips without a floor, so its roster row shows on one
-/// page and its grid is what `fit` gives with the roster counted.
+/// page and its grid is what `fit` gives with the roster counted. The cross
+/// log's end has portals bound to links (`the_cross_scenes_fit_every_size`
+/// checks its crossing scenes).
 #[test]
 fn no_party_row_ends_in_a_right_side_border() {
     use crate::animation::arcade::RIGHT_EDGE_GLYPHS;
-    for which in ["busy", "party4", "32", "40"] {
+    for which in ["busy", "party4", "32", "40", "cross"] {
         let (state, party) = end_of(which);
         let party = all_seen(party);
         let mut right = state.clone();
@@ -1401,5 +1406,818 @@ fn an_unfocused_tile_draws_the_held_picture() {
     assert!(
         held_differs > 0 && held_differs < checked,
         "{held_differs} of {checked}"
+    );
+}
+
+// ---- Crossing (Task B.5) ---------------------------------------------------------
+//
+// `cross4.jsonl` is four chips in a ring of links (the saga crate's
+// generator, `records_with_links`): floor 1's port 1 to floor 2's port 0,
+// floor 2's port 2 to floor 3's port 0, floor 3's port 3 to floor 4's port
+// 0, floor 4's port 4 to floor 1's port 0 (floors counted from 1, as the
+// view's tags count them). Link 1 (floor 2's port 2) is down from tick 400
+// to 429, and floor 1's two ring ports go dark for good at tick 600. Its
+// first crossing is member 1, from floor 2 to floor 1, at tick 202. It has
+// no failed crossing and no dark portal (ruling R42 keeps the fixture as it
+// is), so those scenes inject a link going down into the log, as the saga
+// crate's own tests do.
+
+fn cross4() -> &'static [Record] {
+    static R: OnceLock<Vec<Record>> = OnceLock::new();
+    R.get_or_init(|| fixture("cross4.jsonl"))
+}
+
+/// A crossing as `HeroCrossed` reports it, with floors and member as
+/// indices.
+#[derive(Debug, Clone, Copy)]
+struct Crossing {
+    member: usize,
+    from: usize,
+    from_port: u8,
+    to: usize,
+    to_port: u8,
+}
+
+/// A saga and a party memory that observes after each record, as the TUI
+/// does, over `cross4.jsonl` and any records a scene adds.
+struct Scene {
+    saga: Saga,
+    party: PartyMemory,
+    /// The next record of `cross4.jsonl` to feed.
+    next: usize,
+}
+
+impl Scene {
+    fn new() -> Scene {
+        Scene {
+            saga: Saga::new(config(NameMode::Real)),
+            party: PartyMemory::new(),
+            next: 0,
+        }
+    }
+
+    fn feed(&mut self, r: &Record) -> Vec<tt_toplike_saga::SagaEvent> {
+        self.saga.feed(r);
+        self.party.observe(self.saga.state());
+        self.saga.drain_events()
+    }
+
+    /// Feeds the log until `stop` is true of the saga and the events of
+    /// the record just fed.
+    fn until(&mut self, mut stop: impl FnMut(&Saga, &[tt_toplike_saga::SagaEvent]) -> bool) {
+        while let Some(r) = cross4().get(self.next) {
+            self.next += 1;
+            let events = self.feed(r);
+            if stop(&self.saga, &events) {
+                return;
+            }
+        }
+        panic!("cross4.jsonl ended before the scene");
+    }
+
+    /// Feeds the log up to its next `HeroCrossed`.
+    fn until_crossing(&mut self) -> Crossing {
+        let mut found = None;
+        self.until(|_, events| {
+            found = events.iter().find_map(|e| match *e {
+                tt_toplike_saga::SagaEvent::HeroCrossed {
+                    member,
+                    from_floor,
+                    from_port,
+                    to_floor,
+                    to_port,
+                    ..
+                } => Some(Crossing {
+                    member: member as usize,
+                    from: from_floor as usize,
+                    from_port,
+                    to: to_floor as usize,
+                    to_port,
+                }),
+                _ => None,
+            });
+            found.is_some()
+        });
+        found.unwrap()
+    }
+
+    /// Takes port `port` of floor `floor`'s chip down, as the bus source
+    /// writes it: the chip's live-mask sample without the port's bit, then
+    /// a `LinkChanged`. The saga reads neither record's number nor time.
+    fn link_down(&mut self, floor: usize, port: u8) {
+        use tt_toplike_bus::{Event, Payload, Provenance, Sample, Value};
+        let chip = self.saga.state().world.chips[floor].clone();
+        let mask = self.saga.links().mask(&chip).expect("the chip has a mask") & !(1u64 << port);
+        let record = |payload| Record {
+            seq: 0,
+            t_mono_ns: 0,
+            t_wall_ms: 0,
+            source: "backend".to_string(),
+            payload,
+        };
+        self.feed(&record(Payload::Sample(Sample {
+            entity: chip.clone(),
+            signal: "toplike.eth.live_mask".to_string(),
+            value: Value::U64(mask),
+            prov: Provenance::Estimated,
+        })));
+        self.feed(&record(Payload::Event(Event::LinkChanged {
+            chip,
+            mask: mask as u16,
+        })));
+    }
+
+    fn state(&self) -> &SagaState {
+        self.saga.state()
+    }
+}
+
+/// The log fed up to its first crossing: member 1 is in transit from floor
+/// 2 to floor 1.
+fn transit_scene() -> (Scene, Crossing) {
+    let mut s = Scene::new();
+    let c = s.until_crossing();
+    (s, c)
+}
+
+/// The first crossing fails: the far end goes down while the hero is in
+/// transit, and the log is fed to the `CrossingFailed`, which comes on the
+/// hero's next tick.
+fn failure_scene() -> (Scene, Crossing) {
+    let (mut s, c) = transit_scene();
+    s.link_down(c.to, c.to_port);
+    s.until(|_, events| {
+        events
+            .iter()
+            .any(|e| matches!(e, tt_toplike_saga::SagaEvent::CrossingFailed { .. }))
+    });
+    (s, c)
+}
+
+/// The first crossing arrives: the log is fed past its transit.
+fn arrival_scene() -> (Scene, Crossing) {
+    let (mut s, c) = transit_scene();
+    s.until(|saga, _| saga.state().party[c.member].hero.transit.is_none());
+    (s, c)
+}
+
+/// A portal goes dark under a hero walking to it: the log is fed until a
+/// hero sets out to cross, the far end of its portal is taken down, and the
+/// log is fed until the hero reaches the dark portal and takes another
+/// quest. Returns the member.
+fn dark_scene() -> (Scene, usize) {
+    let mut s = Scene::new();
+    let mut walker = None;
+    s.until(|saga, _| {
+        walker = saga.state().party.iter().position(|m| {
+            m.quest.verb == Verb::Cross && m.hero.transit.is_none() && m.hero.pos != m.quest.goal
+        });
+        walker.is_some()
+    });
+    let m = walker.unwrap();
+    let state = s.state();
+    let hero = &state.party[m];
+    let floor = hero.hero.floor as usize;
+    let port = state.world.floors[floor]
+        .portals
+        .iter()
+        .find(|&&(_, cell)| cell == hero.quest.goal)
+        .map(|&(p, _)| p)
+        .expect("a crossing's goal is a portal");
+    let (far, far_port) = s
+        .saga
+        .links()
+        .bound(&state.world, floor as u8, port)
+        .expect("the portal is bound");
+    s.link_down(far as usize, far_port);
+    s.until(|saga, _| saga.state().party[m].quest.verb != Verb::Cross);
+    let dark = s
+        .state()
+        .chronicle
+        .lines(5)
+        .any(|b| b.text.contains("dark") && b.floor == Some(floor as u8));
+    assert!(dark, "the chronicle says the portal is dark");
+    (s, m)
+}
+
+/// The log fed to tick 410: link 1 (floor 2's port 2 to floor 3's port 0)
+/// is down, so its two portals are closed.
+fn link_down_scene() -> Scene {
+    let mut s = Scene::new();
+    s.until(|saga, _| saga.state().tick == 410);
+    s
+}
+
+/// `portal_style` for the portal on `floor` with port `port`, fully lit and
+/// with everything moving.
+fn lit_portal(state: &SagaState, floor: usize, port: u8) -> Style {
+    let look = Look::new(state.world.biome, None);
+    portal_style(state, &look, floor, port, 0, 0, 100, Motion::Full)
+}
+
+/// Every cell of floor `floor` as [`map_rows`] draws it from that floor's
+/// seat, every cell seen, the window as large as the floor.
+fn floor_cells(
+    state: &SagaState,
+    party: &PartyMemory,
+    floor: usize,
+    motion: Motion,
+) -> Vec<Vec<(char, Style)>> {
+    let fl = &state.world.floors[floor];
+    let mut memory = party.floor(floor).unwrap().clone();
+    memory.see_everything();
+    let look = Look::for_floor(state, &memory, floor);
+    map_rows(
+        state,
+        &memory,
+        &look,
+        floor_seat(state, floor),
+        fl.w as usize + 1,
+        fl.h as usize,
+        0,
+        motion,
+    )
+    .into_iter()
+    .map(|r| cells(&r.line()))
+    .collect()
+}
+
+/// A colour's brightness: the sum of its channels.
+fn brightness(c: Option<Color>) -> u32 {
+    match c {
+        Some(Color::Rgb(r, g, b)) => r as u32 + g as u32 + b as u32,
+        other => panic!("expected a truecolor colour, got {other:?}"),
+    }
+}
+
+/// Every portal's cell on floor `floor` is drawn with `portal_style`, so
+/// what the tests below check of the style is what the map shows. The
+/// hero, a goal and the glow ring are drawn over a portal, so a cell under
+/// one of them is skipped.
+fn assert_map_uses_portal_style(state: &SagaState, party: &PartyMemory, floor: usize) {
+    let fl = &state.world.floors[floor];
+    let mut memory = party.floor(floor).unwrap().clone();
+    memory.see_everything();
+    let look = Look::for_floor(state, &memory, floor);
+    let glyph = Pack::builtin().glyphs.portal;
+    for motion in [Motion::Full, Motion::Banded, Motion::Calm] {
+        let rows = floor_cells(state, party, floor, motion);
+        let seat = floor_seat(state, floor);
+        let hero = seat.member.map(|m| state.party[m].hero.pos);
+        let lit = hero.map_or(vec![0; fl.w as usize * fl.h as usize], |h| light(fl, h));
+        for &(port, (x, y)) in &fl.portals {
+            let (ch, style) = rows[y as usize][x as usize];
+            let near = hero.is_some_and(|h| h.0.abs_diff(x) <= 1 && h.1.abs_diff(y) <= 1);
+            if ch != glyph || near {
+                continue;
+            }
+            let l = lit[y as usize * fl.w as usize + x as usize] as u32;
+            let l = match motion {
+                Motion::Calm => Calm::LIGHT,
+                Motion::Banded => band(l),
+                Motion::Full => l,
+            };
+            let want = portal_style(state, &look, floor, port, x as usize, 0, l, motion);
+            assert_eq!(style, want, "floor {floor} port {port} {motion:?}");
+        }
+    }
+}
+
+/// An open portal is drawn in the hue of the floor at the other end of its
+/// link, so the eye can follow the link from tile to tile. At tick 100 of
+/// the cross log every ring link is open: floor 1's port 1 leads to floor 2
+/// and its port 0 to floor 4.
+#[test]
+fn an_open_portal_takes_the_far_floor_hue() {
+    let mut s = Scene::new();
+    s.until(|saga, _| saga.state().tick == 100);
+    let state = s.state();
+    let p = &Pack::builtin().palette;
+    tc(|| {
+        let open: Vec<_> = state.portals.iter().filter(|p| p.open).collect();
+        assert_eq!(open.len(), 8, "four links, two ends each: {open:?}");
+        for portal in open {
+            let (far, _) = portal.far.unwrap();
+            let style = lit_portal(state, portal.floor as usize, portal.port);
+            assert_eq!(
+                style.fg,
+                Some(rgb(saga_party::floor_hue(p, far))),
+                "{portal:?}"
+            );
+            assert!(style.add_modifier.contains(Modifier::BOLD), "{portal:?}");
+        }
+        assert_eq!(
+            lit_portal(state, 0, 1).fg,
+            Some(rgb(saga_party::floor_hue(p, 1)))
+        );
+        assert_eq!(
+            lit_portal(state, 0, 0).fg,
+            Some(rgb(saga_party::floor_hue(p, 3)))
+        );
+        for floor in 0..4 {
+            assert_map_uses_portal_style(state, &s.party, floor);
+        }
+    });
+}
+
+/// A bound portal whose link is down is drawn dim and not bold, in a
+/// darker shade of the far floor's hue: at tick 410 link 1 is down, so
+/// floor 2's port 2 and floor 3's port 0 are closed.
+#[test]
+fn a_closed_portal_is_dim() {
+    let s = link_down_scene();
+    let state = s.state();
+    let p = &Pack::builtin().palette;
+    let closed: Vec<(u8, u8)> = state
+        .portals
+        .iter()
+        .filter(|p| p.far.is_some() && !p.open)
+        .map(|p| (p.floor, p.port))
+        .collect();
+    assert_eq!(closed, [(1, 2), (2, 0)], "link 1 down, portals closed");
+    tc(|| {
+        for (floor, port) in closed {
+            let style = lit_portal(state, floor as usize, port);
+            let far = if floor == 1 { 2 } else { 1 };
+            let open = rgb(saga_party::floor_hue(p, far));
+            assert!(
+                brightness(style.fg) < brightness(Some(open)),
+                "floor {floor} port {port}: {style:?}"
+            );
+            assert!(!style.add_modifier.contains(Modifier::BOLD));
+        }
+        for floor in [1, 2] {
+            assert_map_uses_portal_style(state, &s.party, floor);
+        }
+    });
+}
+
+/// A portal no peer record leads to is drawn as before the crossing: the
+/// teal shimmer, or its dim teal on a calm tile. The party logs have no
+/// peers, and in the cross log floor 2's port 1 and floor 3's ports 1 and 2
+/// lead nowhere.
+#[test]
+fn a_portal_without_a_peer_is_drawn_as_before() {
+    let (party4_state, _) = end_of("party4");
+    let s = link_down_scene();
+    tc(|| {
+        for state in [party4_state, s.state()] {
+            let look = Look::new(state.world.biome, None);
+            let base = look.p.base;
+            let mut unbound = 0;
+            for portal in state.portals.iter().filter(|p| p.far.is_none()) {
+                unbound += 1;
+                let (f, port) = (portal.floor as usize, portal.port);
+                for x in 0..8 {
+                    for frame in [0, 3, 6, 9] {
+                        for light in [0, 55, 100] {
+                            assert_eq!(
+                                portal_style(state, &look, f, port, x, frame, light, Motion::Full),
+                                look.cell(Cell::Portal, x, frame).at(base, light)
+                            );
+                            assert_eq!(
+                                portal_style(state, &look, f, port, x, frame, light, Motion::Calm),
+                                look.portal_dim.at(base, light)
+                            );
+                        }
+                    }
+                }
+            }
+            assert!(unbound >= 3, "{unbound} unbound portals");
+        }
+    });
+}
+
+/// While a hero is in transit, the portal it stepped into and the portal it
+/// will step out of both glow in the hero's colour, and both tiles' HUDs
+/// say `crossing F2 → F1`. No other portal glows.
+#[test]
+fn a_hero_in_transit_glows_on_both_portals() {
+    let (s, c) = transit_scene();
+    let state = s.state();
+    assert_eq!(
+        (c.member, c.from, c.to),
+        (1, 1, 0),
+        "the log's first crossing"
+    );
+    let p = &Pack::builtin().palette;
+    tc(|| {
+        let glow = lit_portal(state, c.from, c.from_port);
+        assert_eq!(glow, lit_portal(state, c.to, c.to_port));
+        assert_eq!(glow.fg, Some(rgb(p.yellow)), "the hero's colour");
+        assert!(glow.bg.is_some(), "a glow behind the glyph");
+        for portal in &state.portals {
+            let (f, port) = (portal.floor as usize, portal.port);
+            if (f, port) != (c.from, c.from_port) && (f, port) != (c.to, c.to_port) {
+                assert_ne!(lit_portal(state, f, port), glow, "{portal:?}");
+            }
+        }
+        // The glow holds still: the same at every frame, on a calm tile too.
+        let look = Look::new(state.world.biome, None);
+        for frame in 0..12 {
+            for motion in [Motion::Full, Motion::Calm] {
+                let s = portal_style(state, &look, c.from, c.from_port, 3, frame, 50, motion);
+                assert_eq!(s.bg, glow.bg);
+            }
+        }
+        assert_map_uses_portal_style(state, &s.party, c.from);
+        assert_map_uses_portal_style(state, &s.party, c.to);
+        let lines = render_saga(
+            state,
+            &s.party,
+            flags(c.from, false, false, false),
+            (140, 39),
+            0,
+        );
+        let huds: Vec<String> = text(&lines)
+            .into_iter()
+            .flat_map(|t| t.split('▌').skip(1).map(str::to_string).collect::<Vec<_>>())
+            .filter(|h| h.starts_with('F'))
+            .collect();
+        let crossing: Vec<&String> = huds
+            .iter()
+            .filter(|h| h.contains("crossing F2 → F1"))
+            .collect();
+        assert_eq!(crossing.len(), 2, "{huds:?}");
+        assert!(
+            crossing.iter().any(|h| h.starts_with("F1 "))
+                && crossing.iter().any(|h| h.starts_with("F2 "))
+        );
+        let status = text(&lines).last().unwrap().clone();
+        assert!(status.contains("crossing F2 → F1"), "{status}");
+    });
+}
+
+/// A floor whose only hero has crossed away has a tile with no hero: its
+/// HUD says `no hero here`, its window centres on the floor's gate, and
+/// nothing on it is drawn as a hero.
+#[test]
+fn an_empty_floor_tile_says_so() {
+    let (s, c) = arrival_scene();
+    let state = s.state();
+    let hero = Pack::builtin().glyphs.hero;
+    assert_eq!(state.on_floor(c.from as u8).count(), 0, "floor 2 is empty");
+    let seat = floor_seat(state, c.from);
+    assert_eq!(seat.member, None);
+    let gate = state.world.floors[c.from].entrance;
+    assert_eq!(seat.centre, (gate.0 as usize, gate.1 as usize));
+    tc(|| {
+        for focus in [c.from, c.to] {
+            let lines = render_saga(
+                state,
+                &s.party,
+                flags(focus, false, false, false),
+                (140, 39),
+                0,
+            );
+            let huds = text(&lines);
+            assert!(
+                huds.iter().any(|t| t.contains("▌F2 no hero here")),
+                "{huds:?}"
+            );
+        }
+        let rows = floor_cells(state, &s.party, c.from, Motion::Calm);
+        assert!(rows.iter().flatten().all(|&(ch, _)| ch != hero));
+    });
+}
+
+/// Two heroes on one floor are both drawn: after the first crossing,
+/// floor 1 holds its own hero and the hero who arrived.
+#[test]
+fn two_heroes_on_one_tile_both_draw() {
+    let (s, c) = arrival_scene();
+    let state = s.state();
+    let hero = Pack::builtin().glyphs.hero;
+    assert_eq!(state.on_floor(c.to as u8).count(), 2);
+    tc(|| {
+        for motion in [Motion::Full, Motion::Banded, Motion::Calm] {
+            let rows = floor_cells(state, &s.party, c.to, motion);
+            let mut at: Vec<(usize, usize)> = Vec::new();
+            for (y, row) in rows.iter().enumerate() {
+                for (x, &(ch, _)) in row.iter().enumerate() {
+                    if ch == hero {
+                        at.push((x, y));
+                    }
+                }
+            }
+            let mut want: Vec<(usize, usize)> = state
+                .on_floor(c.to as u8)
+                .map(|(_, m)| (m.hero.pos.0 as usize, m.hero.pos.1 as usize))
+                .collect();
+            want.sort_by_key(|&(x, y)| (y, x));
+            assert_eq!(at, want, "{motion:?}");
+        }
+    });
+}
+
+/// A floor's memory belongs to the floor: its lit cells stay when its hero
+/// leaves, through the transit and after the hero arrives elsewhere. The
+/// lead (member 0) crosses too, from floor 1 at tick 280, and its old
+/// floor keeps its fog; the lead's memory (the single-floor view's and the
+/// arcade panel's) stays on that floor while the lead is in transit.
+#[test]
+fn a_floor_keeps_its_memory_after_its_hero_leaves() {
+    let seen = |m: &SagaMemory| m.seen.iter().filter(|&&s| s).count();
+    let mut s = Scene::new();
+    // Member 1 leaves floor 2.
+    let c = s.until_crossing();
+    assert_eq!((c.member, c.from), (1, 1));
+    let before = seen(s.party.floor(1).unwrap());
+    assert!(before > 50, "{before} cells seen");
+    s.until(|saga, _| saga.state().tick > 220);
+    assert_eq!(seen(s.party.floor(1).unwrap()), before);
+    // The lead leaves floor 1.
+    let c = s.until_crossing();
+    assert_eq!((c.member, c.from), (0, 0), "the lead crosses");
+    let state = s.state();
+    let before = seen(s.party.floor(0).unwrap());
+    assert!(before > 50, "{before} cells seen");
+    let lead = s.party.lead(state);
+    assert!(
+        lead.fits_floor(state, 0),
+        "the lead's memory is its old floor's"
+    );
+    assert_eq!(seen(lead), before);
+    // The arcade panel copies the lead's memory and observes the state.
+    let mut panel = SagaMemory::new();
+    panel.copy_from(lead);
+    panel.observe(state);
+    assert!(panel.fits_floor(state, 0));
+    assert_eq!(seen(&panel), before);
+    // After the arrival, up to the world's end at tick 300.
+    s.until(|saga, _| saga.state().party[0].hero.transit.is_none());
+    s.until(|saga, _| saga.state().tick > 295);
+    assert_eq!(s.state().world.born_tick, 80, "the same world");
+    assert!(seen(s.party.floor(0).unwrap()) >= before);
+}
+
+/// The arcade panel (and a world drawn through the lead's seat) shows the
+/// floor the lead left while the lead is in transit, with no hero drawn on
+/// the lead's portal, and its HUD says where the lead is going.
+#[test]
+fn the_arcade_panel_follows_the_lead_through_a_crossing() {
+    let mut s = Scene::new();
+    let c = loop {
+        let c = s.until_crossing();
+        if c.member == 0 {
+            break c;
+        }
+    };
+    let state = s.state();
+    let seat = lead_seat(state);
+    assert_eq!(seat.floor, c.from);
+    assert_eq!(seat.member, None, "the lead is on no map");
+    // The panel's memory, taken as `ArcadeVisualization::set_saga` takes
+    // it, is the old floor's, with what its heroes saw there.
+    let mut panel = SagaMemory::new();
+    panel.copy_from(s.party.lead(state));
+    panel.observe(state);
+    assert!(panel.fits_floor(state, c.from));
+    assert!(panel.seen.iter().filter(|&&s| s).count() > 50);
+    // No hero is drawn where the lead stepped into the portal.
+    let look = Look::for_state(state, &panel);
+    let fl = &state.world.floors[c.from];
+    let rows = map_rows(
+        state,
+        &panel,
+        &look,
+        seat,
+        fl.w as usize + 1,
+        fl.h as usize,
+        0,
+        Motion::Full,
+    );
+    let (x, y) = state.party[0].hero.pos;
+    let row = rows.into_iter().nth(y as usize).unwrap();
+    let at = cells(&row.line())[x as usize].0;
+    assert_ne!(
+        at,
+        Pack::builtin().glyphs.hero,
+        "the lead is drawn on its portal"
+    );
+    let feed = PanelFeed::Live {
+        state: std::sync::Arc::new(state.clone()),
+        stopped: false,
+    };
+    let lines = tc(|| render_saga_panel(&feed, &panel, (70, 16), 0));
+    let t = text(&lines);
+    assert!(t[0].contains("crossing F1 → F2"), "{}", t[0]);
+}
+
+/// The HUD and the status row say where a crossing stands: walking to the
+/// portal, in transit, arrived, or thrown back. After a failure the hero
+/// stands on its goal, and the view no longer calls that a finished quest.
+#[test]
+fn the_quest_words_follow_the_crossing() {
+    let (s, c) = failure_scene();
+    let state = s.state();
+    let m = &state.party[c.member];
+    assert_eq!(m.quest.verb, Verb::Cross);
+    assert_eq!(m.hero.pos, m.quest.goal, "back on its portal");
+    let text = quest_text(state, m);
+    assert!(text.contains("thrown back"), "{text}");
+    assert!(!text.contains("(done)"), "{text}");
+    let word = quest_word(state, m, true);
+    assert!(word.starts_with("thrown back"), "{word}");
+    assert!(!word.contains('✓'), "{word}");
+
+    let (s, c) = arrival_scene();
+    let state = s.state();
+    let m = &state.party[c.member];
+    assert_eq!(m.quest.verb, Verb::Cross, "the dwell keeps the quest");
+    assert_eq!(quest_text(state, m), "arrived on F1 through a portal");
+    assert_eq!(quest_word(state, m, true), "arrived");
+
+    let (s, c) = transit_scene();
+    let state = s.state();
+    let m = &state.party[c.member];
+    assert_eq!(quest_text(state, m), "crossing F2 → F1");
+    assert_eq!(quest_word(state, m, false), "crossing F2 → F1");
+
+    let mut s = Scene::new();
+    let mut walker = None;
+    s.until(|saga, _| {
+        walker = saga
+            .state()
+            .party
+            .iter()
+            .position(|m| m.quest.verb == Verb::Cross && m.hero.pos != m.quest.goal);
+        walker.is_some()
+    });
+    let state = s.state();
+    let m = &state.party[walker.unwrap()];
+    assert_eq!(quest_text(state, m), "heading for the portal to F1");
+    assert_eq!(quest_word(state, m, false), "cross to F1");
+}
+
+/// The roster draws a member in transit with its own glyph, in the hue of
+/// the floor it is going to.
+#[test]
+fn the_roster_marks_a_hero_in_transit() {
+    let (s, c) = transit_scene();
+    let state = s.state();
+    let p = &Pack::builtin().palette;
+    let grid = party_grid(4, 140, 39).unwrap();
+    let row = tc(|| roster_row(state, flags(0, false, false, false), &grid, 0, 140).line());
+    let cs = cells(&row);
+    // ` party ` then two columns per member.
+    let (ch, style) = cs[7 + 2 * c.member];
+    assert_eq!(ch, TRANSIT_GLYPH);
+    let hue = tc(|| rgb(saga_party::floor_hue(p, c.to as u8)));
+    assert_eq!(style.fg, Some(hue));
+    let hero = Pack::builtin().glyphs.hero;
+    for m in (0..4).filter(|&m| m != c.member) {
+        assert_eq!(cs[7 + 2 * m].0, hero);
+    }
+}
+
+/// The cross log's scenes fit every size, and no row of them ends in a
+/// right-side border glyph.
+#[test]
+fn the_cross_scenes_fit_every_size() {
+    use crate::animation::arcade::RIGHT_EDGE_GLYPHS;
+    let scenes = cross_scenes();
+    let widths: Vec<u16> = (0..=90).chain((91..=500).step_by(23)).collect();
+    let heights: Vec<u16> = (0..=30).chain((31..=200).step_by(17)).collect();
+    tc(|| {
+        for (what, scene, focus) in &scenes {
+            let state = scene.state();
+            let party = all_seen(&scene.party);
+            for &w in &widths {
+                for &h in &heights {
+                    for f in [
+                        flags(*focus, false, false, false),
+                        flags(*focus, false, true, true),
+                        flags(*focus, true, false, false),
+                    ] {
+                        let lines = render_saga(state, &party, f, (w, h), 7);
+                        assert_fits(&lines, w, h, what);
+                        if w == 0 {
+                            continue;
+                        }
+                        for (i, line) in lines.iter().enumerate() {
+                            if let Some(&(ch, _)) = cells(line).get(w as usize - 1) {
+                                assert!(
+                                    !RIGHT_EDGE_GLYPHS.contains(&ch),
+                                    "{what} {w}x{h} row {i} ends in {ch:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+}
+
+/// The scenes of the cross log the golden frames draw, with the floor each
+/// focuses on:
+///
+/// 1. tick 410: link 1 down, its two portals closed;
+/// 2. the first crossing in transit (member 1, floor 2 to floor 1);
+/// 3. that crossing failed (the far end taken down in transit);
+/// 4. a hero turned away from a dark portal;
+/// 5. the end of the log's last full world, after five crossings (and with
+///    floor 1's two ring ports dark since tick 600).
+fn cross_scenes() -> Vec<(&'static str, Scene, usize)> {
+    let (transit, c) = transit_scene();
+    let (failure, _) = failure_scene();
+    let (dark, m) = dark_scene();
+    let dark_floor = dark.state().party[m].hero.floor as usize;
+    let mut end = Scene::new();
+    for r in before_last_world(cross4()) {
+        end.feed(r);
+    }
+    vec![
+        ("link 1 down, portals closed", link_down_scene(), 1),
+        ("in transit", transit, c.from),
+        ("thrown back", failure, c.from),
+        ("dark portal", dark, dark_floor),
+        ("the end", end, 1),
+    ]
+}
+
+/// The cross log's scenes ([`cross_scenes`]) at 80x23 and 140x39: ten
+/// frames.
+fn cross_frames() -> Vec<u64> {
+    tc(|| {
+        let mut out = Vec::new();
+        for (_, scene, focus) in cross_scenes() {
+            for size in [(80u16, 23u16), (140, 39)] {
+                let f = flags(focus, false, false, false);
+                out.push(frame_hash(&render_saga(
+                    scene.state(),
+                    &scene.party,
+                    f,
+                    size,
+                    5,
+                )));
+            }
+        }
+        out
+    })
+}
+
+/// The hashes of [`cross_frames`], pinned in Task B.5 of the party plan
+/// when crossings were first drawn (two per scene, 80x23 then 140x39). A
+/// change to the portals' colours, the crossing HUDs, the empty and crowded
+/// tiles or anything else the party view draws moves them; re-pin on
+/// purpose with `print_cross_frames` and say why in the commit.
+const CROSS_GOLDEN: [u64; 10] = [
+    11722815006697725173,
+    13870344704332187710,
+    984997619531047103,
+    5625932373186045120,
+    3079193025079201650,
+    2057903539046483634,
+    11931093669237426526,
+    3379984889357984948,
+    1918058013855084556,
+    16184640831157277284,
+];
+
+/// Prints the hashes for [`CROSS_GOLDEN`]. Run with
+/// `cargo test --locked --lib --features tui print_cross_frames -- --ignored --nocapture`.
+#[test]
+#[ignore = "prints the hashes to pin"]
+fn print_cross_frames() {
+    println!("{:?}", cross_frames());
+}
+
+/// Prints the frames of [`cross_scenes`] as text at 140x39, to look at.
+#[test]
+#[ignore = "prints the frames"]
+fn print_cross_scenes() {
+    for (what, scene, focus) in cross_scenes() {
+        println!("== {what}, tick {}", scene.state().tick);
+        let lines = tc(|| {
+            render_saga(
+                scene.state(),
+                &scene.party,
+                flags(focus, false, false, false),
+                (140, 39),
+                5,
+            )
+        });
+        for t in text(&lines) {
+            println!("{t}");
+        }
+    }
+}
+
+#[test]
+fn cross_frames_are_pinned() {
+    assert_eq!(cross_frames(), CROSS_GOLDEN.to_vec());
+}
+
+/// Crossings keep the party view inside its traffic budget: the frames of
+/// the cross log from tick 190 to 300 (two crossings' worth of glow, HUD
+/// changes, and a floor left empty) at 140x39.
+#[test]
+fn crossings_stay_inside_the_traffic_budget() {
+    let per_frame = party_bytes_per_frame(cross4(), 190, 300, 140, 39);
+    assert!(
+        per_frame <= PARTY_BYTES_PER_FRAME,
+        "{per_frame} bytes a frame, over {PARTY_BYTES_PER_FRAME}"
     );
 }

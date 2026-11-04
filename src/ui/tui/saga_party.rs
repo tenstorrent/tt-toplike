@@ -45,7 +45,9 @@
 //!   some chips have no floor. `party`, then one hero glyph per member in
 //!   index order, two columns each, in the member's floor hue: bright when
 //!   the member's tile is on the page shown, dim otherwise, orange below
-//!   half vitality, and drawn on its hue's background when focused. Then
+//!   half vitality, and drawn on its hue's background when focused. A
+//!   member in transit is drawn as [`TRANSIT_GLYPH`] in the hue of the
+//!   floor it is going to. Then
 //!   `+N chips without a floor` when the world left chips out, and the page
 //!   (`page 2 of 6`, or `2/6` when the row is short of room).
 //! * **The grid** ([`party_grid`]): under 100 columns it sits above the
@@ -58,6 +60,30 @@
 //!   "Terminal traffic"). Each band is tinted with its
 //!   floor's hue; the focused tile's band is brighter and its tag is drawn
 //!   reversed.
+//!
+//! # Crossings
+//!
+//! Heroes cross Ethernet links between floors (the party addendum, section
+//! 8), so a floor can be empty or hold several heroes:
+//!
+//! * **Portals** are coloured by the floor at the other end of their link:
+//!   bold in that floor's hue while the link is open, dimmed while it is
+//!   down, and the old teal shimmer when no link is known (`portal_style`
+//!   in the parent module).
+//! * **In transit** (three ticks) the hero is on no map. The portal it
+//!   stepped into and the portal it will step out of glow in the hero's
+//!   yellow, and both tiles' HUDs say `crossing F2 → F5`.
+//! * **A floor with no hero** centres its window on its gate (on the portal
+//!   while a hero is leaving through it), and its HUD says `no hero here`.
+//! * **Several heroes on one floor** are all drawn; the tile's window and
+//!   HUD follow the first of them in index order.
+//! * **A crossing quest's words** follow the crossing: `cross to F2`,
+//!   `crossing F2 → F5`, then `arrived` or `thrown back` for the dwell that
+//!   follows (`cross_stage` in the parent module).
+//!
+//! Each of these changes a tile only when a crossing starts or ends, so an
+//! unfocused tile stays calm. `crossings_stay_inside_the_traffic_budget`
+//! measures the cross log.
 //! * **Chronicle:** the merged chronicle, each member's line tagged with its
 //!   floor (`t42 · F3 Wren sets out`) in the floor's hue.
 //! * **Status row:** the focused hero's name, vitality and quest, then
@@ -90,6 +116,10 @@ const CHRONICLE_KEEP: usize = 5;
 
 /// Cells of a tile HUD's vitality bar.
 const HUD_BAR_CELLS: usize = 4;
+
+/// The roster's glyph for a member in transit between two floors, in the
+/// hue of the floor it is going to.
+pub const TRANSIT_GLYPH: char = '»';
 
 /// The brand's red `#FF9E8A`, and the `+` tints of teal `#9BDBF0` and green
 /// `#92C9BF` (the docs-site theme, `tt_theme.css`). The pack's palette has
@@ -437,14 +467,18 @@ fn tile_hud(state: &SagaState, look: &Look, seat: Seat, w: usize, focused: bool)
     row.push("▌", fg(hue).bg(rgb(band_bg)))
         .push(&tag, tag_style)
         .push(" ", band);
-    let Some(member) = seat.member.and_then(|m| state.party.get(m)) else {
+    // A hero in transit from or to this floor takes the HUD for the three
+    // ticks of its crossing, on both tiles (`crossing F2 → F5`); else the
+    // seat's hero.
+    let shown = traveller(state, seat.floor).or(seat.member);
+    let Some(member) = shown.and_then(|m| state.party.get(m)) else {
         row.push("no hero here", look.dim.bg(rgb(band_bg)));
         row.fill_to(inner, band);
         return row;
     };
     let (v, bar_style) = vitality(member, look);
     let filled = ((v * HUD_BAR_CELLS as f32).round() as usize).min(HUD_BAR_CELLS);
-    let quest = quest_word(member, focused);
+    let quest = quest_word(state, member, focused);
     let width = |s: &str| -> usize {
         s.chars()
             .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
@@ -482,9 +516,21 @@ fn tile_hud(state: &SagaState, look: &Look, seat: Seat, w: usize, focused: bool)
 /// `rest`, `visit demo-sage` (the core's target label, the alias in
 /// generated mode). The focused tile adds `✓` once its hero stands on its
 /// goal; the other tiles leave it off, so a grid of 32 is not a wall of
-/// marks (the status row says `(done)` for the focused hero too).
-fn quest_word(member: &Member, focused: bool) -> String {
+/// marks (the status row says `(done)` for the focused hero too). A
+/// crossing says where it stands (`cross_stage` in the parent module):
+/// `cross to F2`, `crossing F2 → F5`, `arrived` or `thrown back`, and never
+/// takes the mark.
+fn quest_word(state: &SagaState, member: &Member, focused: bool) -> String {
     let q = &member.quest;
+    if q.verb == Verb::Cross {
+        return match cross_stage(state, member) {
+            CrossStage::Walking(Some(f)) => format!("cross to F{}", f + 1),
+            CrossStage::Walking(None) => "cross".to_string(),
+            CrossStage::Transit(a, b) => format!("crossing F{} → F{}", a + 1, b + 1),
+            CrossStage::Arrived(_) => "arrived".to_string(),
+            CrossStage::ThrownBack => "thrown back".to_string(),
+        };
+    }
     let target = quest_target(member);
     let named = |what: &str, fallback: &str| match &target {
         Some(t) => format!("{what} {t}"),
@@ -498,9 +544,8 @@ fn quest_word(member: &Member, focused: bool) -> String {
         Verb::Escort => named("escort", "escort"),
         Verb::Cleanse => named("cleanse", "cleanse"),
         Verb::Rebuild => named("rebuild", "rebuild"),
-        // The target label is the far port's long key, so the tile says
-        // only what the hero is doing. Task B.5 draws the crossing itself.
-        Verb::Cross => "cross".to_string(),
+        // Answered above.
+        Verb::Cross => String::new(),
     };
     if focused && q.verb != Verb::Rest && member.hero.pos == q.goal {
         text.push_str(" ✓");
@@ -521,9 +566,16 @@ fn roster_row(state: &SagaState, flags: SagaFlags, grid: &Grid, page: usize, w: 
     let mut row = Row::new(w);
     row.push(" party ", look.head);
     for m in 0..state.party.len() {
-        let floor = member_floor(state, m).unwrap_or(0);
-        let hue = floor_hue(p, floor as u8);
-        let weak = state.party[m].hero.vitality < REST_BELOW;
+        let hero = &state.party[m].hero;
+        // A hero in transit counts on the floor it left, and is drawn
+        // with its own glyph in the hue of the floor it is going to.
+        let floor =
+            member_floor(state, m).unwrap_or((hero.floor as usize).min(n.saturating_sub(1)));
+        let (glyph, hue) = match &hero.transit {
+            Some(t) => (TRANSIT_GLYPH, floor_hue(p, t.to_floor)),
+            None => (glyph, floor_hue(p, floor as u8)),
+        };
+        let weak = hero.vitality < REST_BELOW;
         let colour = if weak { p.orange } else { hue };
         let style = if floor == focus {
             fg(p.base).bg(rgb(colour)).add_modifier(Modifier::BOLD)

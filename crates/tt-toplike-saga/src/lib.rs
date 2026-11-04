@@ -47,4 +47,4 @@ pub mod world;
 
 pub use event::{Biome, EndWhy, SagaEvent};
 pub use links::Links;
-pub use saga::{Label, Member, Saga, SagaConfig, SagaState};
+pub use saga::{Label, Member, PortalState, Saga, SagaConfig, SagaState};
