@@ -12,7 +12,7 @@ tt-toplike (0.17.0) noble; urgency=medium
     32 chips gets floors for the first 32.
   * One chronicle holds every floor's lines, each tagged with its floor. One
     floor's quest lines are written per second, and a hero not heard for 300
-    sweeps goes first. A party's birth writes one line for the whole party.
+    ticks goes first. A party's birth writes one line for the whole party.
   * A model's dungeon now spans every chip, with the model's sage on the
     floors of the chips it names.
   * A hero never leaves its floor yet; crossing between linked chips comes
@@ -22,7 +22,7 @@ tt-toplike (0.17.0) noble; urgency=medium
     different number than 0.16 did for the same log. The saga crate is
     0.2.0.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 15:30:00 -0800
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 18:05:00 -0800
 
 tt-toplike (0.16.6) noble; urgency=medium
 

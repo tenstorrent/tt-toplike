@@ -30,12 +30,12 @@ list is a summary and is not kept for every release.
   about 18 KB/s, inside the view's 20 KB/s budget.
 - One chronicle holds every floor's lines, each tagged with its floor (`F3`) in the floor's colour.
   To keep it readable, one floor's quest lines are written per second; a hero not heard for 300
-  sweeps goes first. A party's birth writes one line for the whole party.
+  ticks goes first. A party's birth writes one line for the whole party.
 - A model's dungeon now spans every chip, with the model's sage on the floors of the chips it names.
 - A hero never leaves its floor yet; crossing between linked chips comes next.
-- One chip draws the same view and tells the same story as before. The saga digest's encoding is now version 2 (floors and every
-  hero's position), so `--saga-digest` prints a different number than 0.16 did for the same log.
-  The saga crate is 0.2.0.
+- One chip draws the same view and tells the same story as before. The saga digest's encoding is
+  now version 2 (floors and every hero's position), so `--saga-digest` prints a different number
+  than 0.16 did for the same log. The saga crate is 0.2.0.
 
 ### 0.16.6
 - The status bar flags a stalled ARC. A chip whose firmware heartbeat reads 0 shows a red `ARC!` after

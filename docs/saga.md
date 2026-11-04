@@ -41,8 +41,8 @@ corridors).
 
 ## When worlds begin and end
 
-There is always one world once the first is born. The first world is born at the first sweep at
-which the saga has seen 64 samples, or at the fifth sweep, whichever comes first, so the seed is
+There is always one world once the first is born. The first world is born at the first tick at
+which the saga has seen 64 samples, or at the fifth tick, whichever comes first, so the seed is
 never taken from an almost empty pool. After that, signals decide:
 
 | Signal | What happens |
@@ -50,7 +50,7 @@ never taken from an almost empty pool. After that, signals decide:
 | A model becomes ready (`ModelReady`) | The world ends and a dungeon is born on every chip, with a sage for the model on the floors of the chips the model names (on every floor when it names none). |
 | That model goes away (`ModelGone`) | Its dungeon collapses and a dungeon on every chip follows. A model that did not make the current world can go away without ending it. |
 | A chip resets (`Reset`) | If the reset names one of the world's chips, or names no chip, the world collapses and a dungeon on every chip follows. |
-| A training run starts (the first `toplike.train.step`) | A forge is born on every chip. When no training sample has arrived for 600 sweeps, the run is over and a dungeon follows. |
+| A training run starts (the first `toplike.train.step`) | A forge is born on every chip. When no training sample has arrived for 600 ticks, the run is over and a dungeon follows. |
 | A quiet season (20 minutes by default) | The world fades and a dream is born. A dream that stays quiet fades into another dream, so the cycle never stops. |
 
 Any bus event except `ViewChanged` counts as activity, and so does any `toplike.train.*` sample.
@@ -63,7 +63,7 @@ Ordinary samples do not count, because a quiet machine's readings still wobble. 
   lexicon. Each walks with A* pathfinding and picks its quests on its own: visit the sage of a
   ready model, explore a room, or rest. Its vitality comes from its own chip's heartbeat, clock and
   temperature. Below half, it is drawn orange and its next quest is a rest. After reaching a goal it
-  waits 30 sweeps before it plans the next quest. A hero never leaves its floor yet; crossing
+  waits 30 ticks before it plans the next quest. A hero never leaves its floor yet; crossing
   between linked chips comes next.
 * **Sages (`Ψ`).** One for each model that is ready when the world is born, on the floors of the
   chips the model names. The sage is drawn at the goal while a hero is on its way to visit it.
@@ -88,12 +88,12 @@ on floor `i`. On a box with one chip, the view and the story are the same as bef
   never change another hero's walk. A hero visits only the sages on its own floor, and a model
   going away sends every hero walking to its sage to plan again.
 * **The pace of the chronicle.** With many heroes, every quest started and finished would put one
-  or two lines in the chronicle each sweep, too fast to read. So a hero's routine lines (a quest
-  started or finished, a rest, an ambient line) share one budget. Sweeps fall into windows of 10 (one second at the
-  default interval), and the first floor to write a routine line in a window owns it: only that
-  floor's routine lines are written in that window. A hero that has written nothing for 300 sweeps
-  gets the next open window first, so on the 32-chip test log every floor writes a line at least
-  once a minute, and the chronicle is never silent for more than 26 sweeps. A world's birth opens
+  or two lines in the chronicle each tick, too fast to read. So a hero's routine lines (a quest
+  started or finished, a rest, an ambient line) share one budget. Ticks fall into windows of 10
+  (one second at the default interval), and the first floor to write a routine line in a window
+  owns it: only that floor's routine lines are written in that window. A hero that has written
+  nothing for 300 ticks gets the next open window first, so on the 32-chip test log every floor
+  writes a line at least once a minute, and the chronicle is never silent for more than 26 ticks. A world's birth opens
   the window again. Lines about the world (born, ended, the party's birth) are always written. A
   line that is not written still raises its event, so the digest and every reader of the events
   see every quest, and the tile of that hero still shows its quest.
@@ -200,7 +200,7 @@ with the core's own shortest path. Every floor's memory starts over when a new w
 
 ## The chronicle and the why key
 
-The chronicle keeps the last 500 lines. Each line starts with the sweep it was written at (`t42`)
+The chronicle keeps the last 500 lines. Each line starts with the tick it was written at (`t42`)
 and a mark for its tone: `·` calm in teal, `▲` tense in orange, `★` triumphant in yellow. The
 names of heroes, places, sages and monsters are bold. Older lines are drawn a little dimmer.
 Press `y` to show what set each line off, in a sentence under it: `why: this goes back to the model
