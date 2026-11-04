@@ -547,7 +547,7 @@ fn an_out_of_range_floor_is_the_first_floor_in_title_and_map() {
     let first_map = tc(|| {
         let mut s = state.clone();
         s.party[0].hero.floor = 0;
-        map_rows(&s, &memory, &look, lead_seat(&s), 140, 30, 0)
+        map_rows(&s, &memory, &look, lead_seat(&s), 140, 30, 0, Motion::Full)
             .into_iter()
             .map(Row::line)
             .collect::<Vec<_>>()
@@ -559,10 +559,19 @@ fn an_out_of_range_floor_is_the_first_floor_in_title_and_map() {
     assert!(all.contains(&format!("floor 1 of {n}")), "{all}");
     assert_eq!(text(&[title]), text(&[first_title]));
     let map = tc(|| {
-        map_rows(&state, &memory, &look, lead_seat(&state), 140, 30, 0)
-            .into_iter()
-            .map(Row::line)
-            .collect::<Vec<_>>()
+        map_rows(
+            &state,
+            &memory,
+            &look,
+            lead_seat(&state),
+            140,
+            30,
+            0,
+            Motion::Full,
+        )
+        .into_iter()
+        .map(Row::line)
+        .collect::<Vec<_>>()
     });
     assert_eq!(text(&map), text(&first_map));
 }
@@ -1136,6 +1145,7 @@ fn whole_floor_cells(state: &SagaState, memory: &SagaMemory) -> (Vec<Vec<(char, 
         floor.w as usize + 1,
         floor.h as usize,
         0,
+        Motion::Full,
     );
     let cells = rows
         .into_iter()
@@ -1326,7 +1336,7 @@ fn the_map_keeps_its_last_column_blank() {
         tc(|| {
             // The map pane alone, narrower than the floor so it scrolls.
             for cols in [20usize, 39, 52, 53, 54] {
-                for row in map_rows(&s, &memory, &look, lead_seat(&s), cols, 30, 0) {
+                for row in map_rows(&s, &memory, &look, lead_seat(&s), cols, 30, 0, Motion::Full) {
                     let t: String = row
                         .line()
                         .spans
@@ -1523,15 +1533,25 @@ fn golden_frames() -> Vec<u64> {
 /// (short form at 80 columns), then the tick and the mapped share, and only
 /// the focused tile shows `✓`. All eight frames moved. The solo frames did
 /// not: a world of one floor has no keys and no tiles.
+///
+/// Re-pinned in Task A.9 of the party plan (the party view's terminal
+/// traffic). The busy log draws two tiles; the second, unfocused, is now
+/// drawn calm (one colour and one light level, no glow ring, a still goal,
+/// its floor's held picture), the focused one's light and trail come in
+/// three shades, and both windows centre on their floors' anchors. All
+/// eight frames moved, by the tiles alone: with the chronicle's batching
+/// undone the eight hashes are the same, because the cut points fall where
+/// no beat waits for its batch. The solo frames and the panel frames did
+/// not move: one floor and the arcade panel draw with `Motion::Full`.
 const GOLDEN: [u64; 8] = [
-    11917712682132199184,
-    11920290857694584326,
-    16856285753327876517,
-    624419604945615386,
-    15220565761517867015,
-    13439700959490747240,
-    17051540309075168881,
-    8921639599995668388,
+    3674594377808877050,
+    12971899383197475698,
+    15086896828299096079,
+    3437629226145115506,
+    13759421490679217398,
+    5443883914392978094,
+    9332047876186902558,
+    11092563024355352674,
 ];
 
 /// Prints the hashes for [`GOLDEN`]. Run with
@@ -1838,10 +1858,19 @@ fn the_panel_map_and_hud_are_the_views_own() {
         };
         let lines = render_saga_panel(&feed, &memory, (39, 11), 5);
         let look = Look::for_state(state, &memory);
-        let want: Vec<Line<'static>> = map_rows(state, &memory, &look, lead_seat(state), 39, 10, 5)
-            .into_iter()
-            .map(Row::line)
-            .collect();
+        let want: Vec<Line<'static>> = map_rows(
+            state,
+            &memory,
+            &look,
+            lead_seat(state),
+            39,
+            10,
+            5,
+            Motion::Full,
+        )
+        .into_iter()
+        .map(Row::line)
+        .collect();
         assert_eq!(frame_hash(&lines[1..]), frame_hash(&want));
         // Where the whole status row fits up to the quest (70 columns
         // here), the HUD is the status row after the mark.

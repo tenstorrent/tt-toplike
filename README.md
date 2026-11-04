@@ -272,7 +272,7 @@ tt-toplike-tui --bus-attach /tmp/tt-toplike-$UID/replay.sock    # a TUI that rea
 Press `S` in any view, or start with `tt-toplike --mode saga`. A party of heroes quests through
 a dungeon built from this box's own signals: each chip is a floor with its own hero, a Blackhole
 floor follows the chip's tile grid, and the seed comes from the readings themselves. With more
-than one chip, the view shows every floor at once as a grid of tiles, each centred on its hero;
+than one chip, the view shows every floor at once as a grid of tiles, each following its hero;
 `[` and `]` move the focus from floor to floor, and `z` shows the focused floor alone. Boxes with
 more than 32 chips get floors for the first 32. A hero never leaves its floor yet; crossing
 between linked chips comes next. A model becoming ready, a reset, a model going away, a training

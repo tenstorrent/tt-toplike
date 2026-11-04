@@ -2,15 +2,40 @@
 // SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 
 //! The party view: every floor of the world on screen at once, one tile per
-//! floor, each tile centred on its own hero (the party addendum, section 5).
+//! floor, each tile following its own hero (the party addendum, section 5).
 //!
 //! [`super::render_saga`] sends a world of two or more floors here. A world
 //! of one floor never comes here and draws exactly as it did before the
 //! party. The tiles reuse the single-floor drawing: each tile's map comes
 //! from [`super::map_rows`] with that floor's own memory
-//! ([`super::PartyMemory::floor`]), so the walls, the fog, the light, the
-//! remembered cells, the trail, the glow and the heat colour are the same as
-//! in the single-floor view.
+//! ([`super::PartyMemory::floor`]), so the walls, the fog, the remembered
+//! cells and the trail are drawn as in the single-floor view.
+//!
+//! # Terminal traffic
+//!
+//! The terminal is sent every cell that changes from one frame to the next,
+//! with its colour, and the view's budget is 20 KB/s at 140 x 40 (spec 9).
+//! Fifteen tiles drawn as the single-floor view draws its map sent about
+//! 185 KB/s with `--mock 32` (Task A.9 of the party plan measured where the
+//! bytes went with `print_party_traffic` in the tests). So the tiles move
+//! less than the single-floor view:
+//!
+//! * **Windows move in steps.** A tile's window centres on its floor's
+//!   anchor, which moves only when the hero walks out of a dead zone around
+//!   it (`follow` in the parent module), so a tile is redrawn whole only now
+//!   and then.
+//! * **The focused tile is drawn in shades** (`Motion::Banded`): all of its
+//!   animation, with the light's falloff and the trail's fade in three
+//!   shades each.
+//! * **The other tiles are calm** (`Motion::Calm`): one colour and one light
+//!   level for all they have seen, no glow ring, a still goal and still
+//!   portals, and the floor's held picture (`Held`), taken every three
+//!   ticks, so a hero hops a few cells at a time.
+//! * **The heat tint holds** until the chip's reading moves 3 °C.
+//! * **The chronicle comes in batches** of 20 ticks (`chronicle_until`).
+//!
+//! `the_party_view_stays_inside_its_traffic_budget` bounds the bytes a frame
+//! on the 32-chip log, and `tools/party_traffic.py` measures the binary.
 //!
 //! # The screen
 //!
@@ -29,7 +54,8 @@
 //!   three fifths of the width, as the single-floor map pane does.
 //! * **A tile** ([`tile_rows`]): a HUD row in a dark band (`▌F3`, the hero's
 //!   name, a four-cell vitality bar and the quest with its target label),
-//!   then the floor's map centred on its hero. Each band is tinted with its
+//!   then a window of the floor's map that keeps the hero in view (see
+//!   "Terminal traffic"). Each band is tinted with its
 //!   floor's hue; the focused tile's band is brighter and its tag is drawn
 //!   reversed.
 //! * **Chronicle:** the merged chronicle, each member's line tagged with its
@@ -238,7 +264,8 @@ pub(super) fn render_party(
     let tiles = grid_rows(state, party, &grid, page, focus, grid_w, frame);
     if side {
         let chron_w = w - grid_w - 1;
-        let chron = chronicle_rows(state, flags, &look, chron_w, body, true, true);
+        let until = chronicle_until(state, flags);
+        let chron = chronicle_rows(state, flags, &look, chron_w, body, true, true, until);
         let mut tiles = tiles.into_iter();
         out.extend(chron.into_iter().map(|c| {
             let t = tiles.next().unwrap_or_else(|| Row::new(grid_w));
@@ -248,9 +275,18 @@ pub(super) fn render_party(
         let chron_h = body - grid.height();
         out.extend(tiles.into_iter().map(Row::line));
         out.extend(
-            chronicle_rows(state, flags, &look, w, chron_h, true, true)
-                .into_iter()
-                .map(Row::line),
+            chronicle_rows(
+                state,
+                flags,
+                &look,
+                w,
+                chron_h,
+                true,
+                true,
+                chronicle_until(state, flags),
+            )
+            .into_iter()
+            .map(Row::line),
         );
     }
     let seat = floor_seat(state, focus);
@@ -279,7 +315,7 @@ fn grid_rows(
         }
         let (gx, gy) = (slot % grid.cols, slot / grid.cols);
         let memory = party.floor(floor).unwrap_or(&NO_MEMORY);
-        let look = Look::for_floor(state, memory, floor);
+        let look = Look::for_tile(state, memory, floor);
         let rows = tile_rows(
             state,
             memory,
@@ -301,7 +337,9 @@ fn grid_rows(
 }
 
 /// One tile, `w` x `h`: the HUD row ([`tile_hud`]) over `h - 1` rows of
-/// floor `floor` centred on its hero ([`map_rows`]). `memory` is that
+/// floor `floor` ([`map_rows`]), drawn from [`tile_view`]: the floor as it
+/// is now with everything moving in shades on the focused tile, its held
+/// picture drawn calm on the others. `memory` is that
 /// floor's memory and `look` its look (its own heat). Every row leaves the
 /// tile's last column blank.
 #[allow(clippy::too_many_arguments)]
@@ -315,8 +353,8 @@ fn tile_rows(
     focused: bool,
     frame: u64,
 ) -> Vec<Row> {
-    let seat = floor_seat(state, floor);
-    let mut out = vec![tile_hud(state, look, seat, w, focused)];
+    let mut out = vec![tile_hud(state, look, floor_seat(state, floor), w, focused)];
+    let (memory, seat) = tile_view(state, memory, floor, focused);
     out.extend(map_rows(
         state,
         memory,
@@ -325,8 +363,51 @@ fn tile_rows(
         w,
         h.saturating_sub(1),
         frame,
+        if focused {
+            Motion::Banded
+        } else {
+            Motion::Calm
+        },
     ));
     out
+}
+
+/// The memory and the seat a tile's map draws floor `floor` from: the
+/// focused tile draws the floor as it is now; another tile draws the
+/// floor's held picture (`Held` in the parent module), which the memory
+/// takes every few ticks, with the hero and its goal where they were then.
+/// The HUD row always shows the hero as it is now.
+fn tile_view<'a>(
+    state: &SagaState,
+    memory: &'a SagaMemory,
+    floor: usize,
+    focused: bool,
+) -> (&'a SagaMemory, Seat) {
+    match memory.held().filter(|_| !focused) {
+        Some((held, pose)) => {
+            let seat = tile_seat(state, held, floor);
+            (held, Seat { pose, ..seat })
+        }
+        None => (memory, tile_seat(state, memory, floor)),
+    }
+}
+
+/// The seat a tile draws floor `floor` from: [`floor_seat`], with the
+/// window centred on the floor's anchor ([`SagaMemory`]'s `anchor`), which
+/// moves only when the hero walks out of a dead zone around it (`follow` in
+/// the parent module). So a tile's window moves now and then in a large
+/// step, and the tile is redrawn whole only then. With no anchor (no hero,
+/// or a memory of another floor) the window centres as [`floor_seat`] says.
+fn tile_seat(state: &SagaState, memory: &SagaMemory, floor: usize) -> Seat {
+    let seat = floor_seat(state, floor);
+    let anchor = memory
+        .anchor
+        .filter(|_| memory.fits_floor(state, floor))
+        .map(|(x, y)| (x as usize, y as usize));
+    Seat {
+        centre: anchor.unwrap_or(seat.centre),
+        ..seat
+    }
 }
 
 /// A tile's HUD row: `▌F3 Wren the Unthrottled ▰▰▰▱ visit demo-sage` in a

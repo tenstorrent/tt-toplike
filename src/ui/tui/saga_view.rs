@@ -19,8 +19,10 @@
 //! A world of one floor (one chip) draws as below, exactly as it did before
 //! the party. A world of two or more floors draws the party view
 //! (`saga_party.rs`): the title with `party of N`, a roster row when needed,
-//! a grid of tiles (one per floor, each a HUD row over that floor's map
-//! centred on its hero), the merged chronicle with a floor tag (`F3`, in the
+//! a grid of tiles (one per floor, each a HUD row over a window of that
+//! floor's map that follows its hero, drawn with less motion than one floor
+//! alone to keep the terminal traffic down), the merged chronicle with a
+//! floor tag (`F3`, in the
 //! floor's hue) on each member's line, and the status row for the focused
 //! floor's hero with the party's keys. `[` and `]` move the focus from floor
 //! to floor and `z` draws the focused floor alone, as below. See
@@ -249,6 +251,30 @@ pub const LIGHT_RX: i32 = 9;
 pub const LIGHT_RY: i32 = 4;
 /// Steps of the hero's trail.
 pub const TRAIL_LEN: usize = 12;
+/// Ticks in one batch of the party view's chronicle ([`chronicle_until`]):
+/// a line waits at most this long, about two seconds at the TUI's default
+/// pace of about one tick per update.
+const CHRONICLE_EVERY: u64 = 20;
+/// Ticks between two pictures of an unfocused party tile ([`Held`]). The
+/// TUI advances the story about one tick per update (ten a second by
+/// default), so such a tile changes about five times a second.
+const CALM_EVERY: u64 = 3;
+/// How far, in °C, a chip's temperature moves before its party tile's heat
+/// tint follows it (see `tile_heat` in [`SagaMemory`]). The tint moves 1.75
+/// percent of the way towards its warm hue per °C, so a 3 °C step is a small
+/// change of colour.
+const TILE_HEAT_STEP: f32 = 3.0;
+/// The dead zone of a party tile's window (see [`follow`]), on each axis:
+/// how far a hero may stand before its anchor (left of it, or above it) and
+/// after it (right of it, or below it) while the window stays put. A window
+/// of `view` cells centred on the anchor starts `view / 2` cells before it,
+/// and the smallest tile's map is 23 columns by 6 rows: 11 columns on each
+/// side, 3 rows above and 2 below. So the zone keeps the hero two columns
+/// inside the window's sides, and lets it reach the window's top and
+/// bottom rows, which gives five steps up or down between two moves of a
+/// six-row window.
+pub const ANCHOR_ZONE_X: (u8, u8) = (9, 9);
+pub const ANCHOR_ZONE_Y: (u8, u8) = (3, 2);
 /// The value of a lit cell at the edge of the light, in percent of a cell
 /// at the hero. Cells lit as part of the hero's room but outside the
 /// ellipse get this too.
@@ -415,6 +441,49 @@ pub struct SagaMemory {
     trails: Vec<Trail>,
     /// The floor's chip's temperature in °C, when known.
     heat: Option<f32>,
+    /// The temperature a party tile draws with: [`SagaMemory::heat`], held
+    /// until the reading moves [`TILE_HEAT_STEP`] or more from it. The
+    /// heat tints every floor cell of a tile, so a tile that followed each
+    /// small change of a reading was sent whole to the terminal at every
+    /// update. The single-floor view and the arcade panel use `heat`.
+    tile_heat: Option<f32>,
+    /// Where a party tile's window centres on this floor: a cell that
+    /// follows the floor's hero ([`floor_seat`]) only when the hero walks
+    /// out of a dead zone around it (see [`follow`]). `None` when no hero
+    /// stands on the floor. The single-floor view and the arcade panel
+    /// centre on the hero and never read it.
+    anchor: Option<(u8, u8)>,
+    /// The picture an unfocused party tile draws: this memory and the
+    /// floor's hero as they were at the start of the floor's current period
+    /// of [`CALM_EVERY`] ticks (see [`Held`]). `None` before the first
+    /// observation of a floor.
+    held: Option<Box<Held>>,
+}
+
+/// What an unfocused party tile draws ([`Motion::Calm`]), taken once every
+/// [`CALM_EVERY`] ticks: a copy of the floor's memory (its seen cells,
+/// trails and anchor) and where its hero and goal were. The tile is redrawn
+/// from it, so its hero moves in hops of up to [`CALM_EVERY`] steps, and a
+/// terminal is sent the changes of several steps at once. The floors take
+/// their pictures at staggered ticks (the period starts at a tick offset by
+/// the floor's index), so the tiles do not all change in the same frame.
+#[derive(Debug, Clone)]
+struct Held {
+    /// `(tick + floor) / CALM_EVERY` when the picture was taken.
+    period: u64,
+    /// The memory at that time, with no picture of its own.
+    memory: SagaMemory,
+    /// The floor's hero then, when it had one.
+    pose: Option<Pose>,
+}
+
+/// Where a floor's hero and its goal were, and whether its quest was a
+/// visit to a sage, for a held picture ([`Held`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Pose {
+    hero: (u8, u8),
+    goal: (u8, u8),
+    sage: bool,
 }
 
 /// One hero's newest steps on a floor.
@@ -436,6 +505,9 @@ static NO_MEMORY: SagaMemory = SagaMemory {
     seen: Vec::new(),
     trails: Vec::new(),
     heat: None,
+    tile_heat: None,
+    anchor: None,
+    held: None,
 };
 
 impl SagaMemory {
@@ -479,6 +551,7 @@ impl SagaMemory {
                 h,
                 seen: vec![false; w * h],
                 heat: self.heat,
+                tile_heat: self.tile_heat,
                 ..SagaMemory::default()
             };
         }
@@ -528,12 +601,46 @@ impl SagaMemory {
             }
             trail.steps.truncate(TRAIL_LEN + 1);
         }
+        // The tile's window follows the floor's seat hero, the first member
+        // standing on the floor, as `floor_seat` picks it.
+        let seat = (0..state.party.len()).find(|&m| member_floor(state, m) == Some(floor));
+        self.anchor = seat.map(|m| follow(self.anchor, state.party[m].hero.pos, (map.w, map.h)));
+        // A new picture for an unfocused tile at the start of each period.
+        let period = (state.tick + floor as u64) / CALM_EVERY;
+        let old = self.held.take();
+        let fresh = old
+            .as_ref()
+            .is_some_and(|h| h.period == period && h.memory.key == self.key);
+        self.held = if fresh {
+            old
+        } else {
+            let pose = seat.map(|m| {
+                let m = &state.party[m];
+                Pose {
+                    hero: m.hero.pos,
+                    goal: m.quest.goal,
+                    sage: m.quest.verb == Verb::VisitSage,
+                }
+            });
+            Some(Box::new(Held {
+                period,
+                memory: self.clone(),
+                pose,
+            }))
+        };
+    }
+
+    /// The held picture an unfocused party tile draws ([`Held`]): its
+    /// memory and its hero's pose. `None` before the first observation.
+    fn held(&self) -> Option<(&SagaMemory, Option<Pose>)> {
+        self.held.as_deref().map(|h| (&h.memory, h.pose))
     }
 
     /// Empties the memory and keeps its heat: there is no floor to follow.
     fn forget(&mut self) {
         *self = SagaMemory {
             heat: self.heat,
+            tile_heat: self.tile_heat,
             ..SagaMemory::default()
         };
     }
@@ -542,13 +649,19 @@ impl SagaMemory {
     /// See [`floor_chip`] for which chip that is.
     pub fn set_heat(&mut self, celsius: Option<f32>) {
         self.heat = celsius.filter(|c| c.is_finite());
+        self.tile_heat = match (self.tile_heat, self.heat) {
+            (Some(held), Some(c)) if (c - held).abs() < TILE_HEAT_STEP => Some(held),
+            (_, c) => c,
+        };
     }
 
     /// Makes this memory a copy of `other`, reusing this memory's buffers.
     /// The arcade's Saga panel keeps a copy of the TUI's memory and takes
     /// it once per update; after the first copy of a floor this allocates
     /// nothing (`Vec::clone_from` and `VecDeque::clone_from` keep their
-    /// capacity).
+    /// capacity). The held picture ([`Held`]) is not copied: only the party
+    /// view's unfocused tiles draw it, and the panel draws one floor with
+    /// everything moving.
     pub fn copy_from(&mut self, other: &SagaMemory) {
         self.key = other.key;
         self.w = other.w;
@@ -556,6 +669,9 @@ impl SagaMemory {
         self.seen.clone_from(&other.seen);
         self.trails.clone_from(&other.trails);
         self.heat = other.heat;
+        self.tile_heat = other.tile_heat;
+        self.anchor = other.anchor;
+        self.held = None;
     }
 
     /// Marks every cell of the memory's floor seen, so a test can draw every
@@ -755,6 +871,41 @@ fn light(floor: &Floor, from: (u8, u8)) -> Vec<u8> {
         }
     }
     out
+}
+
+/// The next anchor of a party tile's window (the dead zone), on a floor of
+/// `size` cells, for a hero now at `hero`. With no anchor yet the window
+/// centres on the hero. Otherwise the anchor stays put while the hero is
+/// inside the zone around it ([`ANCHOR_ZONE_X`], [`ANCHOR_ZONE_Y`]). When
+/// the hero steps out of the zone on an axis, the anchor moves so the hero
+/// stands at the zone's other end on that axis: a hero walking down
+/// reaches the bottom row and then stands on the top row of the new window,
+/// so it crosses the whole zone before the window moves again.
+///
+/// A terminal redraws every cell of a tile whose window moves, so the
+/// party view moves a window in a few large steps; a window that followed
+/// every step redrew all of the tile at every step (Task A.9 of the party
+/// plan measured this as most of the party view's terminal traffic).
+fn follow(anchor: Option<(u8, u8)>, hero: (u8, u8), size: (u8, u8)) -> (u8, u8) {
+    let Some(a) = anchor else {
+        return hero;
+    };
+    let axis = |a: u8, h: u8, (before, after): (u8, u8), len: u8| -> u8 {
+        let last = len.saturating_sub(1);
+        if h > a.saturating_add(after) {
+            // Past the zone's far end: the hero now stands at its near end.
+            h.saturating_add(before).min(last)
+        } else if h.saturating_add(before) < a {
+            // Before the zone's near end: the hero now stands at its far end.
+            h.saturating_sub(after)
+        } else {
+            a
+        }
+    };
+    (
+        axis(a.0, hero.0, ANCHOR_ZONE_X, size.0),
+        axis(a.1, hero.1, ANCHOR_ZONE_Y, size.1),
+    )
 }
 
 /// Whether no wall stands strictly between `a` and `b` on the straight
@@ -1087,6 +1238,17 @@ impl Look {
         Look::new(state.world.biome, heat)
     }
 
+    /// The look for a party tile of floor `floor`: [`Look::for_floor`], warmed
+    /// by the floor's held tile heat (`tile_heat` in [`SagaMemory`]).
+    fn for_tile(state: &SagaState, memory: &SagaMemory, floor: usize) -> Look {
+        let heat = if memory.fits_floor(state, floor) {
+            memory.tile_heat
+        } else {
+            None
+        };
+        Look::new(state.world.biome, heat)
+    }
+
     /// A beat's colour, `age` beats from the newest: older beats fade a
     /// little towards the base, at most a third of the way.
     fn tone(&self, tone: Tone, age: usize) -> Rgb {
@@ -1219,7 +1381,7 @@ fn render_floor(
     // larger ones give it a row of its own.
     let small = matches!(layout, Layout::TitleOnly | Layout::MapOnly);
     let mut out = vec![title_row(state, &look, w, flags.stopped && small, Some(seat.floor)).line()];
-    let map = |cols, rows| map_rows(state, memory, &look, seat, cols, rows, frame);
+    let map = |cols, rows| map_rows(state, memory, &look, seat, cols, rows, frame, Motion::Full);
     let floor = state.world.floors.get(seat.floor);
     match layout {
         Layout::Nothing | Layout::TitleOnly => {}
@@ -1238,7 +1400,7 @@ fn render_floor(
             let map_h = floor_h.min(body * 3 / 5).max(1).min(body - 3);
             out.extend(map(w, map_h).into_iter().map(Row::line));
             out.extend(
-                chronicle_rows(state, flags, &look, w, body - map_h, true, party)
+                chronicle_rows(state, flags, &look, w, body - map_h, true, party, None)
                     .into_iter()
                     .map(Row::line),
             );
@@ -1256,7 +1418,7 @@ fn render_floor(
             let map_w = (floor_w + 3).min(w * 3 / 5);
             let chron_w = w - map_w - 1;
             let maps = map(map_w, body);
-            let chron = chronicle_rows(state, flags, &look, chron_w, body, true, party);
+            let chron = chronicle_rows(state, flags, &look, chron_w, body, true, party, None);
             out.extend(maps.into_iter().zip(chron).map(|(m, c)| m.join(1, c)));
             out.push(status_row(state, memory, &look, w, seat, party).line());
         }
@@ -1276,6 +1438,10 @@ struct Seat {
     /// The cell the map's window is centred on: the hero's, or the floor's
     /// middle when it has no hero.
     centre: (usize, usize),
+    /// Where to draw the hero and its goal in place of where they stand
+    /// now: an unfocused party tile's held picture ([`Held`]). `None`
+    /// draws them where they stand.
+    pose: Option<Pose>,
 }
 
 /// The lead's seat: the lead's floor ([`hero_floor_index`], the first floor
@@ -1288,6 +1454,7 @@ fn lead_seat(state: &SagaState) -> Seat {
         floor: hero_floor_index(state).unwrap_or(0),
         member: Some(0),
         centre: (pos.0 as usize, pos.1 as usize),
+        pose: None,
     }
 }
 
@@ -1311,6 +1478,7 @@ fn floor_seat(state: &SagaState, floor: usize) -> Seat {
         floor,
         member,
         centre,
+        pose: None,
     }
 }
 
@@ -1515,11 +1683,55 @@ fn window(len: usize, view: usize, focus: usize, center: bool) -> (usize, usize)
     }
 }
 
+/// The window [`map_rows`] shows of `floor` in a pane of `cols` x `rows`:
+/// the first column, the blank columns before it, and the first row. It
+/// centres on the seat's centre, unless the hero (at `hero_at`) would then
+/// be off it (a party tile's anchor can lag the hero by more than a very
+/// small window holds); then it centres on the hero on that axis. In the
+/// single-floor view the centre is the hero, so this is the plain window.
+fn map_window(
+    floor: &Floor,
+    seat: Seat,
+    hero_at: Option<(u8, u8)>,
+    cols: usize,
+    rows: usize,
+) -> (usize, usize, usize) {
+    let axis = |len: usize, view: usize, centre: usize, hero: Option<usize>, pad_it: bool| {
+        let (o, pad) = window(len, view, centre, pad_it);
+        match hero {
+            Some(h) if len > view && (h < o || h >= o + view) => window(len, view, h, pad_it),
+            _ => (o, pad),
+        }
+    };
+    let (fw, fh) = (floor.w as usize, floor.h as usize);
+    let (x0, pad) = axis(
+        fw,
+        cols.saturating_sub(1),
+        seat.centre.0,
+        hero_at.map(|p| p.0 as usize),
+        true,
+    );
+    let (y0, _) = axis(
+        fh,
+        rows,
+        seat.centre.1,
+        hero_at.map(|p| p.1 as usize),
+        false,
+    );
+    (x0, pad, y0)
+}
+
 /// `rows` rows of the floor `seat` names, each at most `cols` wide, the
 /// last column always blank (see "Borders" in the module comment). The
-/// window follows the seat's centre; the light, the glow, the goal and the
-/// hero are the seat's member's, and the remembered cells and the trails
-/// come from `memory` when it is that floor's.
+/// window centres on the seat's centre, or on the hero when the hero would
+/// fall outside that window; the light, the glow, the goal and the hero are
+/// the seat's member's, and the remembered cells and the trails come from
+/// `memory` when it is that floor's.
+///
+/// `motion` says how much of the map moves (see [`Motion`]): all of it in
+/// the single-floor view and the arcade panel, less on the party view's
+/// tiles.
+#[allow(clippy::too_many_arguments)]
 fn map_rows(
     state: &SagaState,
     memory: &SagaMemory,
@@ -1528,7 +1740,10 @@ fn map_rows(
     cols: usize,
     rows: usize,
     frame: u64,
+    motion: Motion,
 ) -> Vec<Row> {
+    let calm = motion == Motion::Calm;
+    let banded = motion == Motion::Banded;
     let mut out: Vec<Row> = (0..rows).map(|_| Row::new(cols)).collect();
     let Some(floor) = state.world.floors.get(seat.floor) else {
         if let Some(row) = out.first_mut() {
@@ -1540,23 +1755,27 @@ fn map_rows(
     let base = look.p.base;
     let (fw, fh) = (floor.w as usize, floor.h as usize);
     let member = seat.member.and_then(|m| state.party.get(m));
-    let (hx, hy) = seat.centre;
     let draw_cols = cols.saturating_sub(1);
-    let (x0, pad) = window(fw, draw_cols, hx, true);
-    let (y0, _) = window(fh, rows, hy, false);
+    // A held picture (an unfocused party tile) puts the hero and its goal
+    // where they were when the picture was taken.
+    let hero_at = member.map(|m| seat.pose.map_or(m.hero.pos, |p| p.hero));
+    let (x0, pad, y0) = map_window(floor, seat, hero_at, cols, rows);
+    let (hx, hy) = hero_at.map_or(seat.centre, |p| (p.0 as usize, p.1 as usize));
     let hero = match member {
         Some(m) if m.hero.vitality < REST_BELOW => look.hero_weak,
         _ => look.hero_well,
     };
     // A floor with no hero has no light: only its memory shows.
-    let lit = match member {
-        Some(m) => light(floor, m.hero.pos),
+    let lit = match hero_at {
+        Some(at) => light(floor, at),
         None => vec![0; fw * fh],
     };
     let fits = memory.fits_floor(state, seat.floor);
-    let sage_quest = member.is_some_and(|m| m.quest.verb == Verb::VisitSage);
-    let hero_at = member.map(|m| m.hero.pos);
-    let goal_at = member.map(|m| m.quest.goal);
+    let sage_quest = member.is_some_and(|m| {
+        seat.pose
+            .map_or(m.quest.verb == Verb::VisitSage, |p| p.sage)
+    });
+    let goal_at = member.map(|m| seat.pose.map_or(m.quest.goal, |p| p.goal));
     for (r, row) in out.iter_mut().enumerate() {
         let y = y0 + r;
         if y >= fh {
@@ -1567,18 +1786,40 @@ fn map_rows(
             let at = (x as u8, y as u8);
             let light = lit[y * fw + x] as u32;
             let seen = light > 0 || (fits && memory.seen(x, y));
-            let near_hero = hero_at.is_some() && x.abs_diff(hx) <= 1 && y.abs_diff(hy) <= 1;
+            // A calm tile draws every cell it has seen at one level, lit
+            // or remembered, so a step changes only the cells seen for the
+            // first time.
+            let light = if calm && seen {
+                Calm::LIGHT
+            } else if banded {
+                band(light)
+            } else {
+                light
+            };
+            let near_hero =
+                !calm && hero_at.is_some() && x.abs_diff(hx) <= 1 && y.abs_diff(hy) <= 1;
             let (glyph, style) = if Some(at) == hero_at {
                 (glyphs.hero, hero)
             } else if Some(at) == goal_at {
-                // The goal shows through the dark.
+                // The goal shows through the dark. A calm tile holds the
+                // pulse still at its midpoint.
+                let frame = if calm { Calm::PULSE_FRAME } else { frame };
                 if sage_quest {
                     (glyphs.npc, sage_style(frame))
                 } else {
                     (goal_glyph(glyphs, frame), goal_style(frame))
                 }
             } else if !seen {
-                (' ', Style::default())
+                // On a calm tile a blank cell carries the tile's one colour:
+                // it looks the same, and a row of walls, floors and blanks
+                // is then one run of one colour, which the terminal is sent
+                // with one colour change.
+                let blank = if calm {
+                    look.floor.at(base, Calm::LIGHT)
+                } else {
+                    Style::default()
+                };
+                (' ', blank)
             } else {
                 let cell = floor.cell(at.0, at.1);
                 let (glyph, tint) = if at == floor.exit {
@@ -1590,14 +1831,44 @@ fn map_rows(
                         look.wall
                     };
                     (wall_glyph(glyphs, floor, x as i32, y as i32), tint)
+                } else if calm && cell == Cell::Portal {
+                    // No shimmer on a calm tile.
+                    (glyphs.cell(cell), look.portal_dim)
                 } else {
                     (glyphs.cell(cell), look.cell(cell, x, frame))
                 };
+                // A calm tile draws its walls, floors, doors and ruins in
+                // one colour, the floor's (warmed by the floor's heat), so a
+                // row of them is one run of one colour: when the tile's
+                // window moves, the terminal is sent the new glyphs and few
+                // colour changes. The gate, the vaults, the portals and the
+                // exit keep their own colours.
+                let tint = if calm
+                    && at != floor.exit
+                    && matches!(cell, Cell::Wall | Cell::Floor | Cell::Door | Cell::Ruin)
+                {
+                    look.floor
+                } else {
+                    tint
+                };
                 let mut style = tint.at(base, light);
-                // The trail: footprints on plain floor, fading with age.
+                // The trail: footprints on plain floor, fading with age. A
+                // calm tile draws its footprints in one colour and leaves
+                // the older half unmarked, so a step changes two cells: the
+                // newest footprint and the oldest.
                 if cell == Cell::Floor && at != floor.exit {
                     if let Some(age) = fits.then(|| memory.trail_age(at)).flatten() {
+                        if calm && age > TRAIL_LEN / 2 {
+                            row.put(glyph, halo(style, near_hero, cell, look));
+                            continue;
+                        }
                         let left = (TRAIL_LEN + 1 - age) as u32;
+                        let left = match motion {
+                            Motion::Full => left,
+                            // Three shades, each four steps long.
+                            Motion::Banded => (left - 1) / 4 * 4 + 4,
+                            Motion::Calm => Calm::TRAIL_LEFT,
+                        };
                         let warm = mix(base, look.p.yellow, 35 + left * 50 / TRAIL_LEN as u32);
                         style = fg(warm);
                         if age <= TRAIL_LEN / 2 {
@@ -1612,6 +1883,62 @@ fn map_rows(
         }
     }
     out
+}
+
+/// How much of a map moves from frame to frame ([`map_rows`]).
+///
+/// The single-floor view animates everything: the light falls off from the
+/// hero in fine steps, a glow ring sits around it, the trail fades step by
+/// step, the goal pulses and the portals shimmer. Each of those changes the
+/// colour of some cells at every step or frame, and the terminal is sent
+/// every changed cell with its colour (about 20 bytes a cell in truecolor).
+/// Fifteen tiles doing it at once sent several times the party view's
+/// 20 KB/s budget (Task A.9 of the party plan), so the party view's tiles
+/// move less.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Motion {
+    /// Everything moves: the single-floor view and the arcade panel.
+    Full,
+    /// The party view's focused tile: everything moves, but the light's
+    /// falloff and the trail's fade come in three shades each ([`band`]),
+    /// so a step recolours only the cells that cross from one shade to the
+    /// next.
+    Banded,
+    /// The party view's other tiles ([`Calm`]): only the hero, its trail
+    /// and the newly seen cells move.
+    Calm,
+}
+
+/// A light value (percent, see [`light`]) in one of three shades, for the
+/// party view's focused tile: 100 near the hero, the edge's value at the
+/// edge, and one between. 0 (dark) stays 0.
+fn band(light: u32) -> u32 {
+    let mid = (100 + LIGHT_EDGE) / 2;
+    match light {
+        0 => 0,
+        l if l >= 90 => 100,
+        l if l >= 70 => mid,
+        _ => LIGHT_EDGE,
+    }
+}
+
+/// How a party view's unfocused tile is drawn ([`Motion::Calm`]). It moves
+/// only where its hero moves: every cell it has seen is drawn at one light
+/// level, its walls, floors and doors in one colour, it has no glow ring,
+/// its footprints are one colour and only the newer half of the trail
+/// shows, and its goal, sage and portals hold still.
+struct Calm;
+
+impl Calm {
+    /// The level of every lit cell on a calm tile, in percent of a cell at
+    /// the hero: about the middle of the light's falloff.
+    const LIGHT: u32 = 50;
+    /// The pulse's frame a calm tile's goal and sage hold: the pulse's
+    /// midpoint on the way up.
+    const PULSE_FRAME: u64 = PULSE_FRAMES / 4;
+    /// The trail's colour on a calm tile, as the steps left of a footprint
+    /// in [`map_rows`]: the colour of the middle of the trail.
+    const TRAIL_LEFT: u32 = (TRAIL_LEN / 2) as u32 + 1;
 }
 
 /// `style` with the hero's glow behind it, for a walkable cell next to the
@@ -1633,7 +1960,10 @@ fn halo(style: Style, near_hero: bool, cell: Cell, look: &Look) -> Style {
 /// Exactly `rows` rows. `hint` puts the `y` key's hint on the header; the
 /// arcade panel, where `y` does nothing, leaves it off. `tags` puts each
 /// member's line's floor tag after its tone mark (see [`floor_tag`]); the
-/// full view sets it for a world of more than one floor.
+/// full view sets it for a world of more than one floor. `until` leaves out
+/// the beats written after that tick (the party view's batches, see
+/// [`chronicle_until`]); `None` shows every beat.
+#[allow(clippy::too_many_arguments)]
 fn chronicle_rows(
     state: &SagaState,
     flags: SagaFlags,
@@ -1642,6 +1972,7 @@ fn chronicle_rows(
     rows: usize,
     hint: bool,
     tags: bool,
+    until: Option<u64>,
 ) -> Vec<Row> {
     let mut out = Vec::with_capacity(rows);
     if rows == 0 {
@@ -1672,7 +2003,7 @@ fn chronicle_rows(
     // first rows.
     let mut blocks: Vec<Vec<Row>> = Vec::new();
     let mut have = 0;
-    for (age, beat) in newest_first(state, want).enumerate() {
+    for (age, beat) in newest_first(state, want, until).enumerate() {
         // With tags on, a member's line bolds its own hero's name.
         let tag = if tags { floor_tag(state, beat) } else { None };
         let hero = tag
@@ -1718,10 +2049,31 @@ fn chronicle_rows(
     out
 }
 
-/// The newest `n` beats, newest first.
-fn newest_first(state: &SagaState, n: usize) -> impl Iterator<Item = &Beat> {
-    let beats: Vec<&Beat> = state.chronicle.lines(n).collect();
+/// The newest `n` beats, newest first, leaving out those written after
+/// tick `until` when it is given.
+fn newest_first(state: &SagaState, n: usize, until: Option<u64>) -> impl Iterator<Item = &Beat> {
+    let beats: Vec<&Beat> = match until {
+        None => state.chronicle.lines(n).collect(),
+        Some(t) => {
+            let mut all: Vec<&Beat> = state
+                .chronicle
+                .lines(usize::MAX)
+                .filter(|b| b.tick <= t)
+                .collect();
+            all.drain(..all.len().saturating_sub(n));
+            all
+        }
+    };
     beats.into_iter().rev()
+}
+
+/// The party view's chronicle shows the beats up to the last tick that is
+/// a multiple of [`CHRONICLE_EVERY`], so its lines arrive in batches. Each
+/// new line scrolls the whole pane, and the terminal is sent every cell of
+/// it again (about 5 KB at 140 x 40), so the pane scrolls at most once a
+/// batch. A stopped story shows every beat: its tick no longer moves.
+fn chronicle_until(state: &SagaState, flags: SagaFlags) -> Option<u64> {
+    (!flags.stopped).then(|| state.tick / CHRONICLE_EVERY * CHRONICLE_EVERY)
 }
 
 /// A tone's mark, between a beat's tick and its text.
@@ -2267,7 +2619,7 @@ pub fn render_saga_panel(
         return out;
     }
     let seat = lead_seat(state);
-    let map = |cols, rows| map_rows(state, memory, &look, seat, cols, rows, frame);
+    let map = |cols, rows| map_rows(state, memory, &look, seat, cols, rows, frame, Motion::Full);
     let flags = SagaFlags {
         stopped,
         ..SagaFlags::default()
@@ -2280,7 +2632,7 @@ pub fn render_saga_panel(
         let map_w = (floor_w + 3).min(w * 3 / 5);
         let chron_w = w - map_w - 1;
         let maps = map(map_w, body);
-        let chron = chronicle_rows(state, flags, &look, chron_w, body, false, false);
+        let chron = chronicle_rows(state, flags, &look, chron_w, body, false, false, None);
         out.extend(maps.into_iter().zip(chron).map(|(m, c)| m.join(1, c)));
     } else if chronicle {
         // A third of the rows, and at least the header and three beats'
@@ -2288,7 +2640,7 @@ pub fn render_saga_panel(
         let chron_h = (body / 3).max(4).min(body - 1);
         out.extend(map(w, body - chron_h).into_iter().map(Row::line));
         out.extend(
-            chronicle_rows(state, flags, &look, w, chron_h, false, false)
+            chronicle_rows(state, flags, &look, w, chron_h, false, false, None)
                 .into_iter()
                 .map(Row::line),
         );

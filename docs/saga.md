@@ -106,10 +106,26 @@ on floor `i`. On a box with one chip, the view and the story are the same as bef
 ### The party view
 
 A world of two or more floors draws as a grid of tiles, one per floor. Each tile is a HUD row over
-a window of its floor's map, centred on its hero, with the same walls, fog, light, trail, glow and
-heat colour as the single-floor view. Under 100 columns the grid sits above the chronicle, which
-keeps its header and four lines; from 100 columns it takes up to three fifths of the width, left of
-the chronicle.
+a window of its floor's map, with the same walls, fog and trail as the single-floor view. Under 100
+columns the grid sits above the chronicle, which keeps its header and four lines; from 100 columns
+it takes up to three fifths of the width, left of the chronicle.
+
+The tiles move less than the single-floor view, so that the terminal is not sent more than the
+view's budget (20 KB/s at 140 x 40):
+
+* **A window moves in steps.** It stays put while the hero walks inside a dead zone around its
+  centre (9 columns to each side, 3 rows above and 2 below), and moves when the hero steps out of
+  it, so that the hero then stands at the zone's far side. The hero can stand on a tile's top or
+  bottom row.
+* **The focused tile** has the light, the glow around the hero, the trail, the pulsing goal and
+  the portals' shimmer, with the light's falloff and the trail's fade in three shades each.
+* **The other tiles are calm.** Everything they have seen is drawn in one colour (the floor's,
+  with its heat) at one light level, with no glow; the goal, the sage and the portals hold still;
+  and only the newer half of the trail shows, in one colour. Each draws a picture of its floor
+  taken every three ticks, so its hero hops up to three cells at a time.
+* **The heat tint** of a tile changes when its chip's temperature has moved 3 °C.
+* **The chronicle** shows the lines up to the last multiple of 20 ticks, so new lines arrive in a
+  batch about every two seconds. A stopped story shows every line.
 
 * **Tile HUD:** `▌F3`, the hero's name, a four-cell vitality bar (`▰▰▰▱`) and the quest (`explore`,
   `rest`, `visit` and the model's name). The band is tinted with the floor's hue, and the focused
@@ -365,9 +381,15 @@ saga's settings and every problem in the section.
 * On tiles 26 to 29 columns wide the HUD shows only the hero's first name, so two tiles can both
   say "Lark"; the floor tags tell them apart. Tiles are separated by one blank column, so the maps
   of neighbouring tiles can look joined.
-* The party view sends more to the terminal than one floor does, because every tile scrolls with
-  its hero. At 140 x 40 with `--mock 32` it measured about 156 KB/s (0.17.0, see AGENTS.md), over
-  the 20 KB/s budget the design sets for a quiet world. One chip measured about 15 KB/s.
+* Terminal traffic, measured with `python3 tools/party_traffic.py <binary> --runs 3 -- --mock N
+  --mode saga` (a 140 x 40 pty, bytes written from 20 s to 40 s of a 40 s run): `--mock 32` sends
+  about 18 KB/s (16.8, 17.6 and 19.7 KB/s in three runs), inside the 20 KB/s budget for a quiet
+  world; before the calmer tiles it sent about 185 KB/s. One chip sends about 16 KB/s (13.8, 17.5
+  and 17.6), as before. The margin is small: a busier story with more walking can pass 20 KB/s.
+  The test `the_party_view_stays_inside_its_traffic_budget` bounds the bytes a frame on the 32-chip
+  test log.
+* The calm tiles show no light around their heroes, so a hero on an unfocused tile is easiest to
+  find by its `@` and its trail.
 * Generated-name aliasing was checked on the busy fixture only.
 * A log directory reused by sessions with different seasons keeps the first segment's tag, so
   `--saga-digest` and `--replay` of the whole directory use the oldest session's season.

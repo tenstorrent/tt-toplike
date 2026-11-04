@@ -2193,7 +2193,7 @@ What it does:
   models, 64 named keys that are not kept chips; a world's chips are kept chips), 224 entities
   with the 32 heroes, under the spec's 500.
 * **The view** (`src/ui/tui/saga_party.rs`). A world of two or more floors draws a grid of
-  hero-centred tiles (`party_grid`; smallest tile 24 x 7), a roster row when the floors need more
+  tiles that follow their heroes (`party_grid`; smallest tile 24 x 7), a roster row when the floors need more
   than one page or chips have no floor (R34), floor tags in eight brand hues, and the focused
   hero's status row. `[` `]` move the focus and the page follows; `z` zooms to the focused floor.
   One floor draws exactly as before (the solo frames pinned in Task A.1 never moved). `PartyMemory`
@@ -2207,13 +2207,39 @@ What to know before changing it:
 * Grid sizes are pinned in `party_grid_gives_the_addendum_table` (the addendum's 5.2 table was
   corrected to these values in Task A.8): 80 x 23 gives 2 chips 39 x 16 and 4 chips 2 x 2 of
   39 x 8; 200 x 59 gives 2 chips 54 x 39 and 4 chips 2 x 2 of 54 x 28.
-* Terminal traffic: at 140 x 40, `tools/startup.py`'s pty method (bytes the TUI writes, counted
-  from 20 s to 40 s of a 40 s run) measured 0.17.0 with `--mock 32 --mode saga` at about 156 KB/s,
-  over the design's 20 KB/s quiet-world budget. Every tile's window re-centres on its hero at each
-  step, so the whole tile redraws; a build with the windows held still measured about 46 KB/s.
-  One chip measured about 15 KB/s (0.16.5 gave about 17 KB/s the same way). Not fixed in 0.17.0.
+* Terminal traffic (Task A.9). Measure it with `python3 tools/party_traffic.py <binary> --runs 3
+  -- --mock 32 --mode saga`: a 140 x 40 pty, `TERM=xterm-256color COLORTERM=truecolor`, the bytes
+  the TUI writes from 20 s to 40 s of a 40 s run, runs one after another. Set `XDG_CONFIG_HOME` to
+  an empty directory. The final 0.17.0 binary: `--mock 32` 16.8, 17.6 and 19.7 KB/s (mean 18.0),
+  inside the 20 KB/s budget; `--mock 1` 17.5, 13.8 and 17.6 (mean 16.3). The A.8 binary, by the
+  same tool on the same box: `--mock 32` 193.2, 192.0 and 168.5 (mean 184.6); `--mock 1` 13.8,
+  19.0 and 16.6 (mean 16.4). One chip's view did not change (its frames are pinned).
+* Where the bytes went, by `print_party_traffic` (an ignored lib test that renders consecutive
+  frames, diffs ratatui buffers and writes each source's changed cells through crossterm; set
+  `SAGA_TRAFFIC_LOG` to a `bus-N.jsonl` from `--record DIR` to run it on a real session). On the
+  32-chip log at 140 x 39 the old code sent 14,110 bytes a frame: tile windows scrolling 9,972,
+  the light's falloff moving 2,188, the glow ring 877, the chronicle 593, the trail 348. On a real
+  `--mock 32` run the chips' heat was a further large share: every small change of a reading
+  recoloured a whole tile (a build that held the heat went from 62.5 to 32.4 KB/s).
+* What fixed it, biggest first: the heat tint holds until a reading moves 3 °C (`tile_heat`); a
+  tile's window moves only when the hero leaves a dead zone (`follow`, `ANCHOR_ZONE_X` (9, 9),
+  `ANCHOR_ZONE_Y` (3, 2), the anchor kept in `SagaMemory`); unfocused tiles are drawn
+  `Motion::Calm` (one colour and one light level, blanks in that colour so a row is one run, no
+  glow, still goal and portals, one-colour half trail) from a picture held for `CALM_EVERY` (3)
+  ticks, staggered by floor; the focused tile is `Motion::Banded` (three shades of light and
+  trail); the chronicle shows beats up to the last multiple of `CHRONICLE_EVERY` (20) ticks. Now
+  1,654 bytes a frame on the 32-chip log; `the_party_view_stays_inside_its_traffic_budget`
+  bounds it at 1,800 (2,000 a frame at ten frames a second, less the app's status bar and the
+  heat, about 2 KB/s on a real run). Seen red with re-centring restored (4,338), every tile
+  animated (4,278) and no held picture (2,071).
+* What remains: the windows' steps (a tile's map is 6 rows at 140 x 40 with 32 chips, so a hero
+  walking up or down moves the window every 5 rows), the focused tile, the chronicle's batches and
+  the heroes' hops, in that order. The margin is about 2 KB/s; a story with more walking could
+  pass 20 KB/s. If it must shrink further: a longer `CALM_EVERY`, a longer `CHRONICLE_EVERY`, or
+  unfocused tiles drawn as a whole-floor minimap that never scrolls.
 * Known look: tiles 26 to 29 columns wide show first names only, so two tiles can share a name.
-  Tiles are one blank column apart, so neighbouring maps can look joined.
+  Tiles are one blank column apart, so neighbouring maps can look joined. A hero can stand on its
+  tile's top or bottom row (the dead zone reaches them). Unfocused tiles have no light pool.
 * `.target-*` build directories are not git-ignored: stage explicit paths only.
 
 ### Determinism rules the core keeps
@@ -2298,6 +2324,7 @@ moved it, and each diff is explained by that change:
 | `feat(saga): the party view, a tile per floor with a roster and focus keys` (party Task A.7, Nov 3 2026) | the view draws a world of two or more floors as a grid of tiles, each from its own floor's memory, with floor tags on the chronicle's member lines and the party's keys on the status row | no digest. The 8 busy view frames: the busy worlds have two floors, so each frame is now two tiles side by side (the frames are drawn from a `PartyMemory`, as the TUI draws them). New: the 8 party frames (`party_frames_are_pinned`, `party4.jsonl` and the 32-chip log at 80x23 and 140x39, why off and on). The solo frames, the story print and the four panel frames did not move. |
 | `fix(saga): the party keys show at 80 columns and only the focused tile marks a reached goal` (party Task A.7, fix round 1) | the status row puts the party's keys right after the quest (`[ ] z` when short), then the tick and the mapped share; only the focused tile's HUD shows `✓` | no digest. The 8 busy view frames and the 8 party frames: every status row moved, and the unfocused tiles lost their `✓`. The solo frames, the story print and the four panel frames did not move. |
 | `fix(saga): a world's birth opens the routine window again` (party Task A.8) | a birth clears the pace window's owner | nothing: no digest, story pin, busy, party, solo or panel frame moved. `routine_lines_come_from_one_floor_per_window` now keys windows by world. |
+| `fix(saga): the party view's tiles move less, inside the 20 KB/s budget` (party Task A.9) | calm unfocused tiles from a held picture, banded focused tile, dead-zone windows, held tile heat, chronicle batches of 20 ticks | no digest. The 8 party frames: the tiles and the chronicle's batches (with the batching undone they still differ from the old pins). The 8 busy view frames: the tiles alone (with the batching undone the hashes are the same). The solo frames, the story print and the four panel frames did not move. |
 
 Pinned now (digest version 2, with the party and its merged chronicle): `quiet.jsonl`
 0x6508927b58eeed16 (both modes), `bringup.jsonl` 0x88bb8d2b104511c3 (both), `busy.jsonl`

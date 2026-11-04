@@ -20,10 +20,14 @@ list is a summary and is not kept for every release.
 ### 0.17.0
 - Saga has a party: every chip's floor has its own hero, born with the world, and all of them quest
   at the same time. With more than one chip the view shows every floor at once as a grid of tiles,
-  each centred on its hero, with a one-row HUD (floor tag, name, vitality, quest). `[` and `]` move
+  each following its hero, with a one-row HUD (floor tag, name, vitality, quest). `[` and `]` move
   the focus from floor to floor, pages follow the focus, and `z` shows the focused floor alone. A
   roster row lists every hero and says how many chips have no floor (a box with more than 32 chips
   gets floors for the first 32).
+- The focused tile is drawn with its light, glow and trail; the other tiles are drawn calmer (one
+  colour, a still goal, a hero that hops a few cells at a time), each tile's window moves in steps,
+  and the chronicle's new lines arrive every two seconds. So 32 chips at 140x40 send the terminal
+  about 18 KB/s, inside the view's 20 KB/s budget.
 - One chronicle holds every floor's lines, each tagged with its floor (`F3`) in the floor's colour.
   To keep it readable, one floor's quest lines are written per second; a hero not heard for 300
   sweeps goes first. A party's birth writes one line for the whole party.

@@ -575,7 +575,16 @@ fn zoom_draws_the_focused_floor_like_today() {
                 // The zoomed map is the floor's own map, centred on its hero.
                 let look = Look::for_floor(state, party.floor(focus).unwrap(), focus);
                 assert!(hud_tags(&got).is_empty(), "no tiles when zoomed");
-                let map = map_rows(state, party.floor(focus).unwrap(), &look, seat, 10, 3, 5);
+                let map = map_rows(
+                    state,
+                    party.floor(focus).unwrap(),
+                    &look,
+                    seat,
+                    10,
+                    3,
+                    5,
+                    Motion::Full,
+                );
                 assert!(!map.is_empty());
             }
         }
@@ -848,15 +857,24 @@ fn party_frames() -> Vec<u64> {
 /// then the tick, then the mapped share; and only the focused tile marks a
 /// reached goal with `✓`. Every frame's status row moved, so all eight
 /// frames moved.
+///
+/// Re-pinned in Task A.9 (the party view's terminal traffic). All eight
+/// frames moved, for two reasons. The tiles: the unfocused tiles are drawn
+/// calm (one colour and one light level for what they have seen, no glow
+/// ring, a still goal, the held picture of their floor), the focused tile's
+/// light and trail come in three shades, and every tile's window centres on
+/// its floor's anchor (the dead zone). The chronicle: the party view shows
+/// the beats up to the last multiple of 20 ticks. With the batching undone
+/// the frames still differ from the old pins, so both changes move them.
 const PARTY_GOLDEN: [u64; 8] = [
-    3614256140615889751,
-    11966794677219134434,
-    18041497242185267759,
-    6459969602449022339,
-    5478636191933416064,
-    3638826738490286981,
-    11340108049813700508,
-    13181516461788390151,
+    16670488567720751540,
+    2450246809838595014,
+    3666371945581462181,
+    9177448197944020538,
+    5733235657069913877,
+    12252783220974592157,
+    8766439743158584739,
+    11791397437683790272,
 ];
 
 /// Prints the hashes for [`PARTY_GOLDEN`]. Run with
@@ -960,4 +978,428 @@ fn only_the_focused_tile_marks_a_reached_goal() {
         let want: Vec<bool> = (0..4).map(|i| i == focus).collect();
         assert_eq!(marked, want, "focus {focus}: {huds:?}");
     }
+}
+
+// ---- Terminal traffic ------------------------------------------------------------
+
+/// The 32-chip log's state at each tick, with the party memory that
+/// observed every record up to it: one entry per tick, taken right after
+/// the first record of the tick. The TUI advances the story one tick and
+/// draws one frame per update (`--interval`, 100 ms by default), so
+/// consecutive entries are consecutive frames.
+fn ticks_of(records: &[Record]) -> Vec<(SagaState, PartyMemory)> {
+    let mut saga = Saga::new(config(NameMode::Real));
+    let mut party = PartyMemory::new();
+    let mut out = Vec::new();
+    let mut last = u64::MAX;
+    for r in records {
+        saga.feed(r);
+        party.observe(saga.state());
+        if saga.state().tick != last {
+            last = saga.state().tick;
+            out.push((saga.state().clone(), party.clone()));
+        }
+    }
+    out
+}
+
+/// One frame drawn into a buffer of `w` x `h`, as `ui_saga` draws it.
+fn buffer_of(lines: Vec<Line<'static>>, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    use ratatui::widgets::{Paragraph, Widget};
+    let area = ratatui::layout::Rect::new(0, 0, w, h);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    Paragraph::new(lines)
+        .style(Style::default().bg(colors::canvas_bg()))
+        .render(area, &mut buf);
+    buf
+}
+
+/// The bytes a terminal is sent for `cells` (changed cells from
+/// `Buffer::diff`): crossterm's own writer, as the TUI's backend writes a
+/// frame (cursor moves, colour and modifier changes, the characters).
+fn bytes_of<'a>(cells: impl Iterator<Item = (u16, u16, &'a ratatui::buffer::Cell)>) -> usize {
+    use ratatui::backend::{Backend, CrosstermBackend};
+    let mut out: Vec<u8> = Vec::new();
+    {
+        let mut backend = CrosstermBackend::new(&mut out);
+        backend.draw(cells).expect("a Vec takes every byte");
+    }
+    out.len()
+}
+
+/// What made a changed cell change, for [`traffic_by_source`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Source {
+    Title,
+    Roster,
+    Hud,
+    /// The tile's window moved, so every cell of the tile's map may move.
+    Scroll,
+    /// Any other change on the focused tile's map, which animates fully.
+    Focused,
+    /// The hero's cell and the glow ring around it.
+    HeroGlow,
+    /// The goal beacon or the sage at the goal.
+    Goal,
+    Trail,
+    /// The light's falloff moved with the hero (the window did not).
+    Light,
+    /// A cell seen for the first time.
+    Fog,
+    /// Anything else on a map: the portals' shimmer, the heat tint.
+    OtherMap,
+    Chronicle,
+    Status,
+}
+
+/// The changed cells of each frame from `from` to `to` (tick indexes into
+/// [`ticks_of`] of the 32-chip log) at `w` x `h`, focus on floor 2, sorted
+/// by source: (source, changed cells, estimated bytes), summed over the
+/// frames. Each source's bytes are those crossterm writes for its cells
+/// alone, so the sum is close to the frame's total but not equal to it.
+fn traffic_by_source(
+    records: &[Record],
+    from: usize,
+    to: usize,
+    w: u16,
+    h: u16,
+) -> Vec<(Source, usize, usize)> {
+    use std::collections::BTreeMap;
+    let ticks = ticks_of(records);
+    let to = to.min(ticks.len());
+    let f = flags(1, false, false, false);
+    let mut sums: BTreeMap<Source, (usize, usize)> = BTreeMap::new();
+    tc(|| {
+        let mut prev: Option<(usize, ratatui::buffer::Buffer)> = None;
+        for i in from..to {
+            let (state, party) = &ticks[i];
+            let buf = buffer_of(render_saga(state, party, f, (w, h), i as u64), w, h);
+            if let Some((p, pbuf)) = &prev {
+                let diff = pbuf.diff(&buf);
+                let mut groups: BTreeMap<Source, Vec<(u16, u16, &ratatui::buffer::Cell)>> =
+                    BTreeMap::new();
+                for (x, y, c) in diff {
+                    let s = source_of(&ticks[*p], &ticks[i], f, (w, h), x as usize, y as usize);
+                    groups.entry(s).or_default().push((x, y, c));
+                }
+                for (s, cells) in groups {
+                    let e = sums.entry(s).or_default();
+                    e.0 += cells.len();
+                    e.1 += bytes_of(cells.into_iter());
+                }
+            }
+            prev = Some((i, buf));
+        }
+    });
+    sums.into_iter().map(|(s, (c, b))| (s, c, b)).collect()
+}
+
+/// The source of a change at `(x, y)` between two consecutive states (see
+/// [`Source`]), from the grid's geometry and the two states' heroes, goals,
+/// trails, light and memory.
+fn source_of(
+    a: &(SagaState, PartyMemory),
+    b: &(SagaState, PartyMemory),
+    f: SagaFlags,
+    (w, h): (u16, u16),
+    x: usize,
+    y: usize,
+) -> Source {
+    let (w, h) = (w as usize, h as usize);
+    let state = &b.0;
+    let n = state.world.floors.len();
+    let Some(grid) = party_grid(n, w, h) else {
+        return Source::OtherMap;
+    };
+    let roster = grid.per_page < n;
+    let top = 1 + usize::from(roster);
+    if y == 0 {
+        return Source::Title;
+    }
+    if roster && y == 1 {
+        return Source::Roster;
+    }
+    if y == h - 1 {
+        return Source::Status;
+    }
+    if x > grid.width() || y >= top + grid.height() {
+        return Source::Chronicle;
+    }
+    let (gx, col) = (x / (grid.tile_w + 1), x % (grid.tile_w + 1));
+    let (gy, row) = ((y - top) / grid.tile_h, (y - top) % grid.tile_h);
+    let floor = (f.focus / grid.per_page) * grid.per_page + gy * grid.cols + gx;
+    if row == 0 {
+        return Source::Hud;
+    }
+    if floor >= n || col >= grid.tile_w {
+        return Source::OtherMap;
+    }
+    let fl = &state.world.floors[floor];
+    let (fw, fh) = (fl.w as usize, fl.h as usize);
+    let focused = floor == f.focus;
+    let win = |(s, p): &(SagaState, PartyMemory)| {
+        let (_, seat) = tile_view(s, p.floor(floor).unwrap(), floor, focused);
+        let hero = seat
+            .member
+            .map(|m| seat.pose.map_or(s.party[m].hero.pos, |p| p.hero));
+        map_window(fl, seat, hero, grid.tile_w, grid.tile_h - 1)
+    };
+    let (x0, pad, y0) = win(b);
+    if a.0.world.id != state.world.id || win(a) != (x0, pad, y0) {
+        return Source::Scroll;
+    }
+    if floor == f.focus {
+        return Source::Focused;
+    }
+    if col < pad {
+        return Source::OtherMap;
+    }
+    let (fx, fy) = (x0 + col - pad, y0 + row - 1);
+    if fx >= fw || fy >= fh {
+        return Source::OtherMap;
+    }
+    let at = (fx as u8, fy as u8);
+    // The hero's and the goal's cells as each frame drew them, and the
+    // memory each frame drew from.
+    let drawn = |(s, p): &(SagaState, PartyMemory)| {
+        let (m, seat) = tile_view(s, p.floor(floor).unwrap(), floor, focused);
+        let pose = seat.member.map(|i| {
+            let live = &s.party[i];
+            seat.pose
+                .map_or((live.hero.pos, live.quest.goal), |p| (p.hero, p.goal))
+        });
+        (m.clone(), pose)
+    };
+    let ((ma, pa), (mb, pb)) = (drawn(a), drawn(b));
+    let near = |p: Option<((u8, u8), (u8, u8))>| {
+        p.is_some_and(|(h, _)| fx.abs_diff(h.0 as usize) <= 1 && fy.abs_diff(h.1 as usize) <= 1)
+    };
+    if near(pa) || near(pb) {
+        return Source::HeroGlow;
+    }
+    if pa.is_some_and(|(_, g)| g == at) || pb.is_some_and(|(_, g)| g == at) {
+        return Source::Goal;
+    }
+    if ma.trail_age(at) != mb.trail_age(at) {
+        return Source::Trail;
+    }
+    let lit = |p: Option<((u8, u8), (u8, u8))>| p.map_or(0, |(h, _)| light(fl, h)[fy * fw + fx]);
+    if lit(pa) != lit(pb) {
+        return Source::Light;
+    }
+    if ma.seen(fx, fy) != mb.seen(fx, fy) {
+        return Source::Fog;
+    }
+    Source::OtherMap
+}
+
+/// Prints the changed cells and estimated bytes per frame by source, for
+/// the 32-chip log at 140x39 and 80x23 over 100 consecutive frames of one
+/// world. Run with
+/// `cargo test --locked --lib --features tui print_party_traffic -- --ignored --nocapture`.
+///
+/// With `SAGA_TRAFFIC_LOG` set to a bus log file (one `bus-N.jsonl`, for
+/// example from `tt-toplike-tui --mock 32 --mode saga --record DIR`), it
+/// reads that log and prints ticks 170 to 340 (about 20 s to 40 s of a run).
+#[test]
+#[ignore = "prints the traffic per source"]
+fn print_party_traffic() {
+    let recorded = std::env::var_os("SAGA_TRAFFIC_LOG").map(|p| {
+        let read = read_segment(std::path::Path::new(&p)).expect("a bus log");
+        read.records
+    });
+    let (records, from, to) = match &recorded {
+        Some(r) => (r.as_slice(), 170, 340),
+        None => (log32(), 150, 250),
+    };
+    for (w, h) in [(140u16, 39u16), (80, 23)] {
+        let to = to.min(ticks_of(records).len());
+        let frames = (to - from - 1) as f64;
+        let rows = traffic_by_source(records, from, to, w, h);
+        let total: usize = rows.iter().map(|r| r.2).sum();
+        println!(
+            "{w}x{h}, ticks {from}..{to}: {:.0} bytes/frame",
+            total as f64 / frames
+        );
+        let mut rows = rows;
+        rows.sort_by_key(|r| std::cmp::Reverse(r.2));
+        for (s, c, b) in rows {
+            println!(
+                "  {s:?}: {:.1} cells/frame, {:.0} bytes/frame",
+                c as f64 / frames,
+                b as f64 / frames
+            );
+        }
+    }
+}
+
+/// The mean bytes per frame the terminal is sent for the party view of
+/// `records` from tick index `from` to `to` at `w` x `h`, focus on floor 2:
+/// each frame's `Buffer::diff` from the frame before, written by crossterm
+/// ([`bytes_of`]).
+fn party_bytes_per_frame(records: &[Record], from: usize, to: usize, w: u16, h: u16) -> usize {
+    let ticks = ticks_of(records);
+    let f = flags(1, false, false, false);
+    tc(|| {
+        let mut total = 0;
+        let mut prev: Option<ratatui::buffer::Buffer> = None;
+        for (i, (state, party)) in ticks.iter().enumerate().take(to).skip(from) {
+            let buf = buffer_of(render_saga(state, party, f, (w, h), i as u64), w, h);
+            if let Some(p) = &prev {
+                total += bytes_of(p.diff(&buf).into_iter());
+            }
+            prev = Some(buf);
+        }
+        total / (to - from - 1)
+    })
+}
+
+/// The party view's budget for a quiet world is 20 KB/s at 140 x 40 (the
+/// party plan, spec 9). The TUI draws Saga ten times a second, so that is
+/// 2,000 bytes a frame. The bound here is 1,800: the frames below lack the
+/// app's own status bar and the chips' heat, which `tools/party_traffic.py`
+/// measured at about 2 KB/s together on a real `--mock 32` run.
+const PARTY_BYTES_PER_FRAME: usize = 1_800;
+
+/// A hundred consecutive frames of the 32-chip log at 140x39 (a 140x40
+/// terminal less the status bar) stay inside the budget: 1,654 bytes a
+/// frame when this was written (Task A.9 of the party plan).
+///
+/// Seen red three ways, each restored: with every tile's window centred on
+/// its hero at every step (`tile_seat` ignoring the anchor), 4,338 bytes;
+/// with every tile animated as the focused one (`Motion::Banded` for all),
+/// 4,278; with the unfocused tiles drawn from the live state at every tick
+/// (no held picture), 2,071. The code before Task A.9 sent 14,110.
+#[test]
+fn the_party_view_stays_inside_its_traffic_budget() {
+    let per_frame = party_bytes_per_frame(log32(), 150, 250, 140, 39);
+    assert!(
+        per_frame <= PARTY_BYTES_PER_FRAME,
+        "{per_frame} bytes a frame, over {PARTY_BYTES_PER_FRAME}"
+    );
+    // The bound is not met by an empty screen: the frames do change.
+    assert!(per_frame > 500, "{per_frame} bytes a frame");
+}
+
+/// Every tile on the page shows its hero, though a tile's window moves only
+/// when the hero leaves its dead zone: at each of 100 consecutive frames of
+/// the 32-chip log and at the three sizes of the addendum's table, the grid
+/// holds one `@` per tile shown.
+///
+/// The zone fits the smallest tile, so `map_window`'s fallback (centre on
+/// the hero when it would be off the window) is not needed here. Seen red
+/// with the zone made taller than the smallest window (4 rows above and
+/// below) and the fallback removed: five heroes on a page of six at 80x23.
+#[test]
+fn every_tile_keeps_its_hero_in_its_window() {
+    let ticks = ticks_of(log32());
+    let hero = Pack::builtin().glyphs.hero;
+    tc(|| {
+        for (w, h) in TABLE_SIZES {
+            let grid = party_grid(32, w as usize, h as usize).expect("a grid");
+            for (i, (state, party)) in ticks.iter().enumerate().take(250).skip(150) {
+                let f = flags(1, false, false, false);
+                let lines = text(&render_saga(state, party, f, (w, h), i as u64));
+                // The grid's rows: after the title and the roster row.
+                let tiles: usize = lines[2..2 + grid.height()]
+                    .iter()
+                    .map(|l| {
+                        let grid_part: String = l.chars().take(grid.width()).collect();
+                        grid_part.chars().filter(|&c| c == hero).count()
+                    })
+                    .sum();
+                assert_eq!(tiles, grid.per_page, "{w}x{h} tick index {i}");
+            }
+        }
+    });
+}
+
+/// The dead zone (`follow`): the anchor holds while the hero stays within
+/// the zone, and moves so the hero stands at the zone's other end when it
+/// steps out, clamped to the floor.
+#[test]
+fn a_tiles_anchor_moves_only_when_the_hero_leaves_the_zone() {
+    let (bx, ax) = ANCHOR_ZONE_X;
+    let (by, ay) = ANCHOR_ZONE_Y;
+    let size = (60, 40);
+    assert_eq!(follow(None, (20, 20), size), (20, 20));
+    // Inside the zone, at each of its ends: no move.
+    for hero in [(20 + ax, 20), (20 - bx, 20), (20, 20 + ay), (20, 20 - by)] {
+        assert_eq!(follow(Some((20, 20)), hero, size), (20, 20), "{hero:?}");
+    }
+    // One step past the far end: the hero is now at the near end.
+    assert_eq!(
+        follow(Some((20, 20)), (21 + ax, 20), size),
+        (21 + ax + bx, 20)
+    );
+    assert_eq!(
+        follow(Some((20, 20)), (20, 21 + ay), size),
+        (20, 21 + ay + by)
+    );
+    // One step before the near end: the hero is now at the far end.
+    assert_eq!(
+        follow(Some((20, 20)), (19 - bx, 20), size),
+        (19 - bx - ax, 20)
+    );
+    assert_eq!(
+        follow(Some((20, 20)), (20, 19 - by), size),
+        (20, 19 - by - ay)
+    );
+    // Clamped to the floor.
+    assert_eq!(follow(Some((45, 20)), (59, 20), size).0, 59);
+    assert_eq!(follow(Some((10, 20)), (0, 20), size).0, 0);
+}
+
+/// A tile's heat tint holds until the chip's reading moves by
+/// `TILE_HEAT_STEP` or more; the single-floor view's heat follows every
+/// reading.
+#[test]
+fn a_tiles_heat_holds_through_small_changes() {
+    let mut m = SagaMemory::new();
+    m.set_heat(Some(60.0));
+    assert_eq!((m.heat, m.tile_heat), (Some(60.0), Some(60.0)));
+    m.set_heat(Some(60.0 + TILE_HEAT_STEP - 0.5));
+    assert_eq!((m.heat, m.tile_heat), (Some(62.5), Some(60.0)));
+    m.set_heat(Some(60.0 - TILE_HEAT_STEP + 0.5));
+    assert_eq!(m.tile_heat, Some(60.0));
+    m.set_heat(Some(60.0 + TILE_HEAT_STEP));
+    assert_eq!(m.tile_heat, Some(63.0));
+    m.set_heat(None);
+    assert_eq!(m.tile_heat, None);
+}
+
+/// An unfocused tile draws its floor's held picture, taken at the start of
+/// each period of `CALM_EVERY` ticks with the period offset by the floor's
+/// index; the focused tile draws the floor as it is now.
+#[test]
+fn an_unfocused_tile_draws_the_held_picture() {
+    let ticks = ticks_of(log32());
+    let (mut held_differs, mut checked) = (0, 0);
+    for (state, party) in ticks.iter().take(250).skip(150) {
+        for floor in 0..4 {
+            let memory = party.floor(floor).expect("a floor");
+            let (held, pose) = memory.held().expect("a picture");
+            let period = (state.tick + floor as u64) / CALM_EVERY;
+            assert_eq!(memory.held.as_ref().unwrap().period, period);
+            let (m, seat) = tile_view(state, memory, floor, false);
+            assert!(std::ptr::eq(m, held));
+            assert_eq!(seat.pose, pose);
+            let (m, seat) = tile_view(state, memory, floor, true);
+            assert!(std::ptr::eq(m, memory));
+            assert_eq!(seat.pose, None);
+            let live = state.party[floor_seat(state, floor).member.unwrap()]
+                .hero
+                .pos;
+            checked += 1;
+            if pose.map(|p| p.hero) != Some(live) {
+                held_differs += 1;
+            }
+        }
+    }
+    // The held hero is behind the live one at some ticks and level with it
+    // at others.
+    assert!(
+        held_differs > 0 && held_differs < checked,
+        "{held_differs} of {checked}"
+    );
 }

@@ -2,8 +2,10 @@ tt-toplike (0.17.0) noble; urgency=medium
 
   * Saga has a party: every chip's floor has its own hero, born with the
     world, and all of them quest at the same time. With more than one chip
-    the view shows every floor at once as a grid of tiles, each centred on
-    its hero under a one-row HUD (floor tag, name, vitality, quest).
+    the view shows every floor at once as a grid of tiles, each following
+    its hero under a one-row HUD (floor tag, name, vitality, quest). The
+    focused tile is drawn with its light and glow; the others are drawn
+    calmer, so 32 chips at 140x40 send the terminal about 18 KB/s.
   * In Saga, "[" and "]" move the focus from floor to floor, and the page
     follows the focus; "z" shows the focused floor alone. A roster row lists
     every hero and says how many chips have no floor. A box with more than
