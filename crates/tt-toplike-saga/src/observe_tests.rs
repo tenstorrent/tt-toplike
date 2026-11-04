@@ -101,28 +101,34 @@ fn renumbered_and_retimed_records_give_the_same_observations() {
     // Six records; the gap takes no ordinal.
     assert_eq!((n1, n2, n3), (5, 5, 5));
     // Flattening: three numeric pairs and one sample, text and NaN skipped,
-    // the event, and a tick after each pacemaker sweep.
+    // the event, and a tick after each pacemaker sweep. Whole numbers of 0
+    // or more also carry their exact bits; a negative `I64` and floats do
+    // not.
     let want = vec![
         Observation::Sample {
             entity: chip(1),
             signal: "a".into(),
             value: 1.5,
+            bits: None,
         },
         Observation::Sample {
             entity: chip(1),
             signal: "b".into(),
             value: 7.0,
+            bits: Some(7),
         },
         Observation::Sample {
             entity: chip(1),
             signal: "c".into(),
             value: -3.0,
+            bits: None,
         },
         Observation::Tick,
         Observation::Sample {
             entity: chip(2),
             signal: "s".into(),
             value: 9.0,
+            bits: Some(9),
         },
         Observation::Event(Event::ModelGone {
             model: EntityKey::model("m"),
@@ -131,6 +137,7 @@ fn renumbered_and_retimed_records_give_the_same_observations() {
             entity: chip(1),
             signal: "a".into(),
             value: 2.5,
+            bits: None,
         },
         Observation::Tick,
     ];
@@ -526,4 +533,36 @@ fn saga_signals_from_another_source_are_rejected() {
         sample(chip(1), "toplike.saga.x", Value::F64(1.0)),
     );
     assert_eq!((out.len(), feed.rejected()), (1, 0));
+}
+
+#[test]
+fn a_u64_register_keeps_every_bit() {
+    // 0xAAAA_AAAA_AAAA_AAAA is not exact as an f64; `bits` is.
+    let mut feed = Feed::new();
+    let mut out = Vec::new();
+    let mask = 0xAAAA_AAAA_AAAA_AAAA_u64;
+    feed.push(
+        &record(1, 1, "tt-smi", sample(chip(1), "m", Value::U64(mask))),
+        &mut out,
+    );
+    feed.push(
+        &record(
+            2,
+            2,
+            "tt-smi",
+            sweep(chip(1), vec![("m", Value::U64(mask))]),
+        ),
+        &mut out,
+    );
+    let bits: Vec<Option<u64>> = out
+        .iter()
+        .filter_map(|o| match o {
+            Observation::Sample { bits, .. } => Some(*bits),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(bits, [Some(mask), Some(mask)]);
+    assert_ne!(mask as f64 as u64, mask, "the f64 path loses bits");
+    assert_eq!(register_bits(mask as f64, Some(mask)), mask);
+    assert_eq!(register_bits(3.0, None), 3);
 }

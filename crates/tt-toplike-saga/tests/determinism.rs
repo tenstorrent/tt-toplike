@@ -267,10 +267,17 @@ fn one_temperature_bit_changes_the_first_world() {
 /// matched the version 2 pins, so no fixture's floors, walks or lines
 /// changed: `quiet` (mock chips) and the party logs are Blackhole-shaped,
 /// and no fixture has a generic chip with a known mask.
+///
+/// `quiet` was re-pinned once more in B.3's fix round: the saga now reads a
+/// register from its exact `U64` bits. Its three mock chips report the live
+/// mask 0xAAAA_AAAA_AAAA_AAAA, which as an f64 lost its low bits and gave
+/// each Blackhole floor one portal (port 11); exact, it gives six (ports 1,
+/// 3, 5, 7, 9 and 11), so the floors' cells and the walks change. The other
+/// fixtures' registers are below 2^53 and did not move.
 #[test]
 fn a_snapshot_of_the_digests_matches() {
     let golden: [(&str, u64, u64); 5] = [
-        ("quiet.jsonl", 0xb624ad206fc0b183, 0xb624ad206fc0b183),
+        ("quiet.jsonl", 0xd6e0200609dcd3eb, 0xd6e0200609dcd3eb),
         ("bringup.jsonl", 0xc9142f2256b8175a, 0xc9142f2256b8175a),
         ("busy.jsonl", 0x23a8d7bcf22b2d8b, 0xfd4e69d1d98aa692),
         ("solo.jsonl", 0xa2eadd2b95cffd79, 0x3abf9f424e37b575),

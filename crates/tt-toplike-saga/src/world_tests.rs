@@ -109,6 +109,7 @@ fn sample(entity: &str, signal: &str, value: f64) -> Observation {
         entity: chip(entity),
         signal: signal.into(),
         value,
+        bits: None,
     }
 }
 
@@ -117,6 +118,7 @@ fn train_step(step: u64) -> Observation {
         entity: EntityKey::training_run("r1"),
         signal: "toplike.train.step".into(),
         value: step as f64,
+        bits: None,
     }
 }
 
@@ -475,6 +477,7 @@ fn a_training_run_births_and_closes_a_forge() {
             entity: EntityKey::training_run("r1"),
             signal: "toplike.train.loss".into(),
             value: 2.0,
+            bits: None,
         };
         assert_eq!(run.feed(loss), vec![]);
         run.quiet_tick();

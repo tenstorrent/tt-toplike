@@ -551,3 +551,41 @@ pub fn flood_stream() -> Vec<Record> {
     }
     f.out
 }
+
+/// Chips the link prelude of [`flood_with_links`] names: as many as the
+/// saga's link table keeps.
+pub const FLOOD_LINK_CHIPS: usize = 64;
+
+/// A chip that only `LinkPeer` records name: no record samples it, so the
+/// saga never keeps it, and the link table holds its key on its own.
+pub fn flood_link_chip(i: usize) -> EntityKey {
+    EntityKey::chip(&format!("link-{i:03}"))
+}
+
+/// [`flood_stream`] after a prelude of `LinkPeer` records: every port 0 to
+/// 63 of [`FLOOD_LINK_CHIPS`] chips that no record samples, cabled to the
+/// next such chip, and then the same over 16 more made-up chips that the
+/// full table must refuse. It drives the link table to its worst case for
+/// the entity budget: 64 chip keys the saga does not keep.
+pub fn flood_with_links() -> Vec<Record> {
+    let mut f = Flood {
+        out: Vec::new(),
+        rng: Pcg32::new(0x11c5, 7),
+    };
+    for i in 0..FLOOD_LINK_CHIPS + 16 {
+        let a = flood_link_chip(i);
+        let b = flood_link_chip((i + 1) % (FLOOD_LINK_CHIPS + 16));
+        for port in 0..64u8 {
+            f.event(Event::LinkPeer {
+                port: EntityKey::eth_port(&a, port),
+                peer: EntityKey::eth_port(&b, 63 - port),
+            });
+        }
+    }
+    let mut out = f.out;
+    out.extend(flood_stream());
+    for (i, r) in out.iter_mut().enumerate() {
+        r.seq = i as u64 + 1;
+    }
+    out
+}

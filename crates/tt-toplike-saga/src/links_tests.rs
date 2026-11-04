@@ -217,6 +217,33 @@ fn the_link_table_is_bounded() {
     check_bounds(&links);
 }
 
+#[test]
+fn every_port_up_to_63_fits_and_64_does_not() {
+    // Chips 0 to 7 each cable every port 0 to 79 to the next chip's port
+    // 63 - p (ports 64 and up wrap to large numbers and are refused). A
+    // later chip's records recable its ports, so the last one's (chip 8's)
+    // whole range stays paired with chip 7: 64 peers, the per-chip cap.
+    let mut links = Links::new();
+    for c in 0..8u8 {
+        for p in 0..80u8 {
+            links.observe_peer(
+                &port(c, p),
+                &port(c + 1, 63u8.wrapping_sub(p)),
+                cause(p.into()),
+            );
+            check_bounds(&links);
+        }
+    }
+    assert_eq!(links.chips[&chip(8)].peers.len(), MAX_PORTS as usize);
+    assert_eq!(links.peer(&chip(7), 63), Some((chip(8), 0)));
+    assert_eq!(links.peer(&chip(8), 63), Some((chip(7), 0)));
+    assert_eq!(links.peer(&chip(7), 64), None);
+    // Masks: bit 63 counts, a port of 64 never does.
+    links.observe_mask(&chip(8), 1 << 63, cause(0));
+    assert!(links.live(&chip(8), 63));
+    assert!(!links.live(&chip(8), 64));
+}
+
 /// The table's caps and its mirror rule.
 fn check_bounds(links: &Links) {
     assert!(links.chips.len() <= MAX_CHIPS);

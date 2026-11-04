@@ -60,7 +60,9 @@ fn config(names: NameMode) -> SagaConfig {
 
 #[test]
 fn memory_stays_bounded() {
-    let records = gen::flood_stream();
+    // The flood, after a prelude that fills the link table with 64 chips
+    // the saga never keeps: the worst case of the entity budget.
+    let records = gen::flood_with_links();
     for names in [NameMode::Real, NameMode::Generated] {
         // `saga` is never drained. `twin` sees the same records and is
         // drained after every one, which counts every event raised.
@@ -248,6 +250,14 @@ fn memory_stays_bounded() {
         held.extend(saga.named_unseen.iter());
         held.extend(w.chips.iter());
         held.extend(saga.links.held_keys());
+        // The link prelude reached the table's cap with chips that are not
+        // kept, so the count above includes the link table's worst case.
+        let linked: BTreeSet<&EntityKey> = saga.links.held_keys().collect();
+        assert_eq!(linked.len(), RULED_CHIPS, "{at}: link table chips");
+        assert!(
+            linked.iter().all(|c| !saga.chips.contains_key(*c)),
+            "{at}: the link table shares keys with the kept chips"
+        );
         held.extend(
             saga.members
                 .iter()

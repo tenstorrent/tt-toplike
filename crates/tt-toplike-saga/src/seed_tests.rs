@@ -9,6 +9,7 @@ fn sample(entity: &str, signal: &str, value: f64) -> Observation {
         entity: EntityKey::chip(entity),
         signal: signal.into(),
         value,
+        bits: None,
     }
 }
 

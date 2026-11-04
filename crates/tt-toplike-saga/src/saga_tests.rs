@@ -1600,3 +1600,35 @@ fn the_saga_records_masks_and_peers_in_its_link_table() {
     let cause = saga.links().mask_cause(&chip_a()).cloned().unwrap();
     assert_eq!((cause.signal.as_str(), cause.ordinal), (ETH_LIVE_MASK, 4));
 }
+
+#[test]
+fn a_register_value_reaches_the_floor_and_the_link_table_exactly() {
+    // `--mock` reports the live mask 0xAAAA_AAAA_AAAA_AAAA as a `U64`. As
+    // an f64 it would round to 0xaaaa_aaaa_aaaa_a800 and lose ports 1, 3,
+    // 5, 7 and 9 (review of B.3, Important 1). The saga must keep the
+    // register's every bit.
+    const MASK: u64 = 0xAAAA_AAAA_AAAA_AAAA;
+    let mut saga = Saga::new(config(NameMode::Real, Label::Mock));
+    saga.feed(&sample(&chip_a(), ENABLED_TENSIX_COL, Value::U64(0x3fff)));
+    saga.feed(&sample(&chip_a(), ETH_LIVE_MASK, Value::U64(MASK)));
+    run_ticks(&mut saga, 5);
+    assert_eq!(saga.links().mask(&chip_a()), Some(MASK));
+    assert!(saga.links().live(&chip_a(), 1));
+    assert!(saga.links().live(&chip_a(), 11));
+    assert!(!saga.links().live(&chip_a(), 0));
+    let want = FloorSpec::for_chip(&chip_a(), None, Some(0x3fff), Some(MASK), Arch::Blackhole);
+    assert_eq!(saga.topo[0].portal_ports, want.portal_ports);
+    assert_eq!(saga.topo[0].portal_ports, [1, 3, 5, 7, 9, 11]);
+    let floor = &saga.state().world.floors[0];
+    let ports: Vec<u8> = floor.portals.iter().map(|&(p, _)| p).collect();
+    assert_eq!(ports, [1, 3, 5, 7, 9, 11], "the world's floor has them too");
+    // A Tensix mask with a high bit set keeps its low bits as well.
+    let mut saga = Saga::new(config(NameMode::Real, Label::Mock));
+    saga.feed(&sample(
+        &chip_a(),
+        ENABLED_TENSIX_COL,
+        Value::U64((1 << 63) | 0x3edf),
+    ));
+    run_ticks(&mut saga, 1);
+    assert_eq!(saga.topo[0].dead_cols, [6, 9]);
+}

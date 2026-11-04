@@ -76,7 +76,16 @@ pub enum Observation {
     Sample {
         entity: EntityKey,
         signal: String,
+        /// The reading as a number. Every rule that weighs a reading (the
+        /// trails, vitality, the seed pool) reads this.
         value: f64,
+        /// The reading's exact bits when it is a whole number on the bus:
+        /// a `U64`, or an `I64` of 0 or more. `None` for a float. An f64
+        /// holds integers exactly only up to 2^53, so a 64-bit register
+        /// such as the live-link mask 0xAAAA_AAAA_AAAA_AAAA would lose its
+        /// low bits in `value`. The saga reads registers (the topology and
+        /// the link table) from here (see [`register_bits`]).
+        bits: Option<u64>,
     },
     /// A bus event, passed through unchanged.
     Event(Event),
@@ -111,6 +120,25 @@ fn number(value: &Value) -> Option<f64> {
         Value::I64(x) => Some(*x as f64),
         Value::Text(_) => None,
     }
+}
+
+/// The exact bits of a whole-number bus value: a `U64` as it is, an `I64`
+/// of 0 or more as the same number. `None` for anything else.
+fn exact_bits(value: &Value) -> Option<u64> {
+    match value {
+        Value::U64(x) => Some(*x),
+        Value::I64(x) => u64::try_from(*x).ok(),
+        Value::F64(_) | Value::Text(_) => None,
+    }
+}
+
+/// A register reading as bits: the exact bits when the bus sent a whole
+/// number, else the float cast to `u64` (exact up to 2^53, saturating
+/// beyond, 0 for a negative value). A float register is what a writer that
+/// sends registers as floats gives; it was read this way before `bits`
+/// existed.
+pub fn register_bits(value: f64, bits: Option<u64>) -> u64 {
+    bits.unwrap_or(value as u64)
 }
 
 /// Whether `s` is at most [`MAX_ITEM_BYTES`] long.
@@ -254,16 +282,18 @@ impl Feed {
                         entity: s.entity.clone(),
                         signal: s.signal.clone(),
                         value,
+                        bits: exact_bits(&s.value),
                     });
                 }
             }
             Payload::Sweep(sweep) => {
-                for (signal, value) in sweep.signals.iter().zip(&sweep.values) {
-                    if let Some(value) = number(value) {
+                for (signal, raw) in sweep.signals.iter().zip(&sweep.values) {
+                    if let Some(value) = number(raw) {
                         out.push(Observation::Sample {
                             entity: sweep.entity.clone(),
                             signal: signal.clone(),
                             value,
+                            bits: exact_bits(raw),
                         });
                     }
                 }

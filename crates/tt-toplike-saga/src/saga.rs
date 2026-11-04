@@ -383,7 +383,7 @@ use crate::hero::{
 };
 use crate::links::Links;
 use crate::maze;
-use crate::observe::{Feed, Observation};
+use crate::observe::{register_bits, Feed, Observation};
 use crate::pack::Pack;
 use crate::quest::{plan, Hook, Quest, Verb, REST_BELOW};
 use crate::rng::Pcg32;
@@ -812,7 +812,8 @@ impl Saga {
                 entity,
                 signal,
                 value,
-            } => self.on_sample(entity, signal, *value, ordinal),
+                bits,
+            } => self.on_sample(entity, signal, *value, *bits, ordinal),
             Observation::Event(e) => self.on_event(e, ordinal),
             Observation::Tick => {
                 self.state.tick += 1;
@@ -884,7 +885,14 @@ impl Saga {
 
     /// A sample: chip readings, the link table's masks, trails and
     /// heartbeats.
-    fn on_sample(&mut self, entity: &EntityKey, signal: &str, value: f64, ordinal: u64) {
+    fn on_sample(
+        &mut self,
+        entity: &EntityKey,
+        signal: &str,
+        value: f64,
+        exact: Option<u64>,
+        ordinal: u64,
+    ) {
         let Some(chip) = entity.chip_owner() else {
             return;
         };
@@ -908,10 +916,12 @@ impl Saga {
         if !on_chip {
             return;
         }
-        // Registers arrive as whole numbers; the cast is exact up to 2^53
-        // and saturates beyond, which only matters for bits the floor
-        // ignores.
-        let bits = value as u64;
+        // A register (harvesting state, Tensix columns, the live-link mask)
+        // is read from its exact bits. The bus sends registers as `U64`,
+        // and the f64 `value` holds whole numbers exactly only up to 2^53:
+        // the mock's mask 0xAAAA_AAAA_AAAA_AAAA would lose ports 1 to 9
+        // through it. A register sent as a float is cast as before.
+        let bits = register_bits(value, exact);
         let changed = |slot: &mut Option<u64>| {
             let new = Some(bits);
             let differs = *slot != new;

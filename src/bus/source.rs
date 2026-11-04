@@ -719,6 +719,63 @@ mod tests {
     }
 
     #[test]
+    fn a_mock_runs_ring_links_all_bind_and_open_in_the_saga() {
+        // `--mock 4` end to end, without a bus: the mock backend through
+        // this source into a saga. Every chip's ring port (11) reaches the
+        // next chip's port 1, and the saga must see each link bound and
+        // open in both directions. This fails if the mask loses bits on
+        // its way into the saga, or if the ring leaves the low 12 ports.
+        use crate::backend::mock::MockBackend;
+        use tt_toplike_bus::Record;
+        use tt_toplike_saga::chronicle::NameMode;
+        use tt_toplike_saga::{Label, Saga, SagaConfig};
+        let n = 4u8;
+        let mut backend = MockBackend::new(usize::from(n));
+        backend.init().unwrap();
+        let mut src = BackendSource::new();
+        let mut saga = Saga::new(SagaConfig {
+            season_ticks: 12_000,
+            names: NameMode::Real,
+            label: Label::Mock,
+        });
+        for _ in 0..8 {
+            backend.update().unwrap();
+            for payload in poll_dyn(&mut src, &backend) {
+                saga.feed(&Record {
+                    seq: 0,
+                    t_mono_ns: 0,
+                    t_wall_ms: 0,
+                    source: "backend".to_string(),
+                    payload,
+                });
+            }
+        }
+        let state = saga.state();
+        assert!(state.has_world(), "a world after eight polls");
+        let world = &state.world;
+        assert_eq!(world.floors.len(), usize::from(n));
+        for i in 0..n {
+            let next = (i + 1) % n;
+            let ports: Vec<u8> = world.floors[usize::from(i)]
+                .portals
+                .iter()
+                .map(|&(p, _)| p)
+                .collect();
+            assert_eq!(ports, [1, 3, 5, 7, 9, 11], "floor {i}");
+            assert_eq!(
+                saga.links().open(world, i, 11),
+                Some((next, 1)),
+                "floor {i}"
+            );
+            assert_eq!(
+                saga.links().open(world, next, 1),
+                Some((i, 11)),
+                "floor {next}"
+            );
+        }
+    }
+
+    #[test]
     fn a_real_backend_emits_no_link_peer() {
         // A real backend reports a live mask and no peers (`None`). This
         // test guards the source: it must not invent peers from the live
