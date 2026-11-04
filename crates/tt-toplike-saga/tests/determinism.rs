@@ -22,6 +22,9 @@
 //!   generator. Their digests were first pinned on the single-chip code
 //!   before the party (0.16.4), then re-pinned with the others for digest
 //!   versions 2 and 3.
+//! * `cross4.jsonl`: the four-chip party log with a ring of Ethernet links
+//!   (`records_with_links` in the same generator), the log in which heroes
+//!   cross. Pinned by Task B.4 of the party plan.
 //!
 //! In generated-name mode the published beats carry aliased causes (ledger
 //! ruling R17), so the digests differ between the two name modes and every
@@ -33,13 +36,14 @@ use tt_toplike_bus::Record;
 use tt_toplike_saga::chronicle::NameMode;
 use tt_toplike_saga::{Label, Saga, SagaConfig};
 
-/// The five fixtures, by file name.
-const FIXTURES: [&str; 5] = [
+/// The six fixtures, by file name.
+const FIXTURES: [&str; 6] = [
     "quiet.jsonl",
     "bringup.jsonl",
     "busy.jsonl",
     "solo.jsonl",
     "party4.jsonl",
+    "cross4.jsonl",
 ];
 
 /// A season of 200 ticks (20 s at 10 Hz), short enough that the busy log's
@@ -274,14 +278,24 @@ fn one_temperature_bit_changes_the_first_world() {
 /// each Blackhole floor one portal (port 11); exact, it gives six (ports 1,
 /// 3, 5, 7, 9 and 11), so the floors' cells and the walks change. The other
 /// fixtures' registers are below 2^53 and did not move.
+///
+/// `cross4` was added by Task B.4 (the crossing quest), pinned on its first
+/// green run. It is the only fixture with `LinkPeer` events, so the only one
+/// in which heroes cross: its digest holds the `HeroCrossed` events (tag
+/// 0x07), the crossing lines and the members' changed floors. No hero is
+/// in transit on any of its links when one goes down, so it holds no
+/// `CrossingFailed`. The crossing added no item to a stream without a
+/// crossing (a member's transit bit in the end item is 0 off a crossing),
+/// so the other five rows did not move.
 #[test]
 fn a_snapshot_of_the_digests_matches() {
-    let golden: [(&str, u64, u64); 5] = [
+    let golden: [(&str, u64, u64); 6] = [
         ("quiet.jsonl", 0xd6e0200609dcd3eb, 0xd6e0200609dcd3eb),
         ("bringup.jsonl", 0xc9142f2256b8175a, 0xc9142f2256b8175a),
         ("busy.jsonl", 0x23a8d7bcf22b2d8b, 0xfd4e69d1d98aa692),
         ("solo.jsonl", 0xa2eadd2b95cffd79, 0x3abf9f424e37b575),
         ("party4.jsonl", 0x01b9f4175d5de836, 0x0976f42c301be352),
+        ("cross4.jsonl", 0x2a88827bd487ef7a, 0x34a41fcbacbba99c),
     ];
     let mut actual = Vec::new();
     for (name, _, _) in golden {

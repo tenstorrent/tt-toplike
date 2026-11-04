@@ -53,8 +53,9 @@
 //! # Determinism
 //!
 //! Every map is a `BTreeMap`, the table changes only in record order, and
-//! it reads no clock. It is not part of the digest: no rule of the story
-//! reads it yet (the crossing quest, task B.4, will).
+//! it reads no clock. It is not hashed into the digest itself; the
+//! crossing quest reads it (see "Crossing" in [`crate::saga`]), and the
+//! digest sees the crossings it allows.
 
 use std::collections::BTreeMap;
 

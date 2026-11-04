@@ -7,7 +7,8 @@
 //! The world events come from Task 1.8 and the hero and quest events
 //! (`HeroBorn`, `QuestStarted`, `QuestDone`) from Task 1.9. Later tasks add
 //! variants to the same enum: the chronicle's `Beat` (Task 1.10, now
-//! here), and monster and treasure events (phase 2). To add one, add a
+//! here), the crossing's `HeroCrossed` and `CrossingFailed` (Task B.4 of
+//! the party plan), and monster and treasure events (phase 2). To add one, add a
 //! variant with named fields, starting with `world: u64` so every event says
 //! which world it belongs to. The enum derives only `Debug`, `Clone` and
 //! `PartialEq`, so a later variant may carry an `f32` intensity without
@@ -83,6 +84,34 @@ pub enum SagaEvent {
         floor: Option<u8>,
         tone: Tone,
         text: String,
+        cause: Cause,
+    },
+    /// Member `member` stepped into the portal of port `from_port` on floor
+    /// `from_floor`, bound for the portal of port `to_port` on floor
+    /// `to_floor` (the party addendum, section 8.4). It is in transit now
+    /// and arrives [`crate::hero::TRANSIT_TICKS`] ticks later, unless the
+    /// link goes down first (then [`SagaEvent::CrossingFailed`] follows).
+    /// `cause` is the crossing quest's reason: a `ModelReady` or a
+    /// `LinkChanged`.
+    HeroCrossed {
+        world: u64,
+        member: u8,
+        from_floor: u8,
+        from_port: u8,
+        to_floor: u8,
+        to_port: u8,
+        cause: Cause,
+    },
+    /// A live bit of member `member`'s link cleared while it was in
+    /// transit, so it is back on the portal of port `port` on floor
+    /// `floor`, where it stepped in (the addendum, section 8.5). `cause` is
+    /// the record that cleared the bit: a `toplike.eth.live_mask` sample or
+    /// a `LinkChanged` event.
+    CrossingFailed {
+        world: u64,
+        member: u8,
+        floor: u8,
+        port: u8,
         cause: Cause,
     },
 }

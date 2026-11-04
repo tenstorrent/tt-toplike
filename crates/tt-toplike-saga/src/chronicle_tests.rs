@@ -37,6 +37,8 @@ fn ctx(name: Option<RealName>, tone: Tone, tick: u64) -> BeatCtx {
         cause: cause(tick),
         floor: Some(2),
         count: 4,
+        far: Some(4),
+        port: Some(11),
     }
 }
 
@@ -688,4 +690,26 @@ fn label_for_is_the_name_a_beat_writes() {
             .clone();
         assert_eq!(label, text);
     }
+}
+
+#[test]
+fn far_counts_floors_from_one_and_port_is_the_port_number() {
+    // `{far}` matches the view's floor tag: floor index 1 is `F2`, so it
+    // writes 2. Off a crossing both are unknown and write `?`.
+    let pack = one_line_pack("port {port} to floor {far}");
+    let mut rng = Pcg32::from_seed(1);
+    let mut chron = Chronicle::new();
+    let mut write = |far: Option<u8>, port: Option<u8>| {
+        let mut c = ctx(None, Tone::Calm, 1);
+        c.far = far;
+        c.port = port;
+        chron
+            .push_beat(BeatKind::CrossOut, &c, &pack, NameMode::Real, &mut rng)
+            .text
+            .clone()
+    };
+    assert_eq!(write(Some(1), Some(11)), "port 11 to floor 2");
+    assert_eq!(write(Some(0), Some(0)), "port 0 to floor 1");
+    assert_eq!(write(Some(31), Some(63)), "port 63 to floor 32");
+    assert_eq!(write(None, None), "port ? to floor ?");
 }

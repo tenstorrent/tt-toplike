@@ -11,8 +11,8 @@ use crate::quest::Verb;
 use crate::rng::Pcg32;
 
 /// The placeholders that take no tag.
-const PLAIN: [&str; 8] = [
-    "hero", "name", "world", "tick", "biome", "place", "adj", "count",
+const PLAIN: [&str; 10] = [
+    "hero", "name", "world", "tick", "biome", "place", "adj", "count", "far", "port",
 ];
 
 /// Every `{...}` in `text`, without the braces. Panics on an unclosed brace
@@ -199,7 +199,14 @@ fn every_kind_tone_verb_and_ending_has_a_template() {
         }
     }
     // Each phase-1 verb has its own start and done lines, and each ending
-    // its own line.
+    // its own line. A crossing quest has its own start line; it ends with
+    // a crossing beat and writes no quest-done line.
+    assert!(
+        pack.templates
+            .iter()
+            .any(|t| t.kind == BeatKind::QuestStarted && t.verb == Some(Verb::Cross)),
+        "no QuestStarted template for Cross"
+    );
     for verb in [Verb::Explore, Verb::Rest, Verb::VisitSage] {
         for kind in [BeatKind::QuestStarted, BeatKind::QuestDone] {
             assert!(

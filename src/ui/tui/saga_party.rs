@@ -498,6 +498,9 @@ fn quest_word(member: &Member, focused: bool) -> String {
         Verb::Escort => named("escort", "escort"),
         Verb::Cleanse => named("cleanse", "cleanse"),
         Verb::Rebuild => named("rebuild", "rebuild"),
+        // The target label is the far port's long key, so the tile says
+        // only what the hero is doing. Task B.5 draws the crossing itself.
+        Verb::Cross => "cross".to_string(),
     };
     if focused && q.verb != Verb::Rest && member.hero.pos == q.goal {
         text.push_str(" ✓");

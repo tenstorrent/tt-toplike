@@ -813,11 +813,16 @@ fn floor_key_at(state: &SagaState, i: usize) -> Option<((u64, u64, usize), &Floo
 
 /// The floor member `member`'s hero stands on: its own floor index, or 0
 /// when that index is past the end (the core plans on the first floor then,
-/// see [`hero_floor_index`]). `None` when there is no such member or the
-/// world has no floors.
+/// see [`hero_floor_index`]). `None` when there is no such member, the
+/// world has no floors, or the hero is in transit between two floors (it is
+/// on neither map, as the core's `SagaState::on_floor` says).
 fn member_floor(state: &SagaState, member: usize) -> Option<usize> {
     let n = state.world.floors.len();
-    let i = state.party.get(member)?.hero.floor as usize;
+    let hero = &state.party.get(member)?.hero;
+    if hero.transit.is_some() {
+        return None;
+    }
+    let i = hero.floor as usize;
     match n {
         0 => None,
         _ if i < n => Some(i),
@@ -2503,6 +2508,9 @@ fn quest_text(member: &Member) -> String {
         Verb::Escort => named("escorting", "escorting a traveller"),
         Verb::Cleanse => named("cleansing", "cleansing a vault"),
         Verb::Rebuild => named("rebuilding", "rebuilding a bridge"),
+        // The target label is the far port's long key, so the status row
+        // says only what the hero is doing. Task B.5 draws the crossing.
+        Verb::Cross => "crossing a portal".to_string(),
     };
     if q.verb != Verb::Rest && member.hero.pos == q.goal {
         text.push_str(" (done)");

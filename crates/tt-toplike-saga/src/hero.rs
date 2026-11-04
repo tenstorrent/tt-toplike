@@ -1,6 +1,7 @@
 //! The hero: where it stands, how healthy it is, and how it walks.
 //!
-//! A world has one hero (spec section 4). On autopilot the hero takes a
+//! A world has one hero per floor at its birth (spec section 4; the party
+//! addendum, section 3.1). On autopilot each hero takes a
 //! [`Quest`] from [`crate::quest::plan`] and walks towards the quest's goal,
 //! one cell per [`Hero::step`], along a path from [`astar`].
 //!
@@ -23,6 +24,15 @@
 //!   unreachable goal costs one search per twenty steps). [`StepResult::no_path`]
 //!   tells the caller that the goal cannot be reached now, so it can plan a
 //!   different quest.
+//!
+//! # Crossing
+//!
+//! A hero who steps into an open Ethernet portal is in transit for
+//! [`TRANSIT_TICKS`] ticks ([`Hero::transit`]): it is on neither floor's
+//! map. Its `floor` and `pos` stay those of the departure portal until it
+//! arrives, so a crossing that fails leaves it standing where it stepped
+//! in. On arrival, [`Hero::arrive`] puts it on the far floor's portal. The
+//! front door runs the rules (see "Crossing" in [`crate::saga`]).
 //!
 //! # Vitality
 //!
@@ -109,6 +119,27 @@ const RISE_LINE: f64 = 1.02;
 /// A fast mean 20% or more above the baseline gives no heat health.
 const RISE_TOP: f64 = 1.2;
 
+/// Ticks a crossing hero spends between two floors (the party addendum,
+/// section 8.4): it steps into the portal on one tick and stands on the far
+/// floor three ticks later.
+pub const TRANSIT_TICKS: u64 = 3;
+
+/// A crossing in progress: where the hero is going, and when it gets there.
+/// The departure floor is the hero's own `floor`, which does not change
+/// until it arrives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Transit {
+    /// The floor at the far end of the link.
+    pub to_floor: u8,
+    /// The far floor's portal port: the hero arrives on its cell.
+    pub to_port: u8,
+    /// The portal port the hero stepped into on its own floor.
+    pub from_port: u8,
+    /// The tick at which the hero arrives: the tick it stepped in, plus
+    /// [`TRANSIT_TICKS`].
+    pub until: u64,
+}
+
 /// Why something happened in the story: the entity, the bus signal, and the
 /// record's ordinal in the stream the core was fed (spec 3.5). Every quest
 /// and every chronicle beat carries one.
@@ -146,6 +177,10 @@ pub struct Hero {
     /// The tick at which the hero was born.
     pub born_tick: u64,
     pub name: String,
+    /// The crossing in progress, if the hero is between two floors. While
+    /// it is `Some`, the hero is on no map (see "Crossing" in the module
+    /// comment).
+    pub transit: Option<Transit>,
     /// The walk in progress.
     walk: Walk,
 }
@@ -174,8 +209,19 @@ impl Hero {
             vitality: 1.0,
             born_tick,
             name,
+            transit: None,
             walk: Walk::default(),
         }
+    }
+
+    /// Ends a crossing: the hero stands at `pos` on floor `floor`, out of
+    /// transit, with no walk in progress, so its next step searches from
+    /// there.
+    pub fn arrive(&mut self, floor: u8, pos: (u8, u8)) {
+        self.floor = floor;
+        self.pos = pos;
+        self.transit = None;
+        self.walk = Walk::default();
     }
 
     /// Takes one step towards `quest.goal` on `floor`. See the module comment

@@ -779,3 +779,97 @@ fn the_logs_without_peers_bind_no_portal() {
         }
     }
 }
+
+// ---- Crossing (Task B.4) --------------------------------------------------------
+
+/// The crossing events of a run: `(tick, event)` for every `HeroCrossed`
+/// and `CrossingFailed`.
+fn crossings(steps: &[Step]) -> Vec<(u64, SagaEvent)> {
+    steps
+        .iter()
+        .flat_map(|(tick, events)| events.iter().map(move |e| (*tick, e)))
+        .filter(|(_, e)| {
+            matches!(
+                e,
+                SagaEvent::HeroCrossed { .. } | SagaEvent::CrossingFailed { .. }
+            )
+        })
+        .map(|(t, e)| (t, e.clone()))
+        .collect()
+}
+
+#[test]
+fn the_cross_log_gives_the_same_digest_after_renumbering() {
+    // A replay host renumbers and retimes every record. The crossing reads
+    // neither, so the digest of the crossing log stays, in both modes. The
+    // log must really cross, or the test would check nothing new.
+    let records = support::read_fixture("cross4.jsonl");
+    let replayed = support::renumber(&records);
+    assert!(records
+        .iter()
+        .zip(&replayed)
+        .all(|(a, b)| a.seq != b.seq && a.t_mono_ns != b.t_mono_ns));
+    for names in [NameMode::Real, NameMode::Generated] {
+        let (a, steps) = run_log(&records, names);
+        let (b, _) = run_log(&replayed, names);
+        assert_eq!(
+            a.digest(),
+            b.digest(),
+            "{names:?}: a replay host's numbering changed the crossing saga"
+        );
+        let crossed = crossings(&steps);
+        assert!(
+            crossed
+                .iter()
+                .any(|(_, e)| matches!(e, SagaEvent::HeroCrossed { .. })),
+            "{names:?}: no hero crossed in the cross log"
+        );
+    }
+}
+
+#[test]
+fn the_cross_log_crosses_only_open_ring_links() {
+    // Every crossing in the cross log goes through a ring link, from its
+    // portal to the far end's portal, while the link is up.
+    let records = party::records_with_links(4, CROSS4_TICKS);
+    let (_, steps) = run_log(&records, NameMode::Real);
+    let crossed = crossings(&steps);
+    assert!(!crossed.is_empty());
+    for (tick, e) in &crossed {
+        if let SagaEvent::HeroCrossed {
+            from_floor,
+            from_port,
+            to_floor,
+            to_port,
+            ..
+        } = e
+        {
+            let k = CROSS4_RING
+                .iter()
+                .position(|&(f, p, g, q)| {
+                    (f, p, g, q) == (*from_floor, *from_port, *to_floor, *to_port)
+                        || (g, q, f, p) == (*from_floor, *from_port, *to_floor, *to_port)
+                })
+                .unwrap_or_else(|| panic!("tick {tick}: {e:?} is not a ring link"));
+            assert!(cross4_link_up(k, *tick), "tick {tick}: link {k} is down");
+        }
+    }
+}
+
+#[test]
+fn generated_mode_leaves_no_fixture_name_in_the_cross_log() {
+    // Crossing hooks take a model's `ModelReady` as their reason: in
+    // generated mode the crossing's event and line carry its alias.
+    let records = support::read_fixture("cross4.jsonl");
+    let shown = everything_shown(&records, NameMode::Generated);
+    for name in ["demo-sage", "demo-scribe", "demo-pair"] {
+        assert!(!shown.contains(name), "generated mode shows {name}");
+    }
+    // The control: in real mode a crossing's event names the pair's model.
+    let real = everything_shown(&records, NameMode::Real);
+    assert!(
+        real.lines()
+            .any(|l| l.starts_with("HeroCrossed") && l.contains("model:demo-pair")),
+        "no crossing for demo-pair in real mode"
+    );
+}

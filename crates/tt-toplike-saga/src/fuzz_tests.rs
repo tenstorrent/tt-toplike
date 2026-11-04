@@ -264,6 +264,12 @@ fn memory_stays_bounded() {
                 .flat_map(|m| &m.hooks)
                 .filter_map(|h| h.target.as_ref()),
         );
+        // Crossing hooks hold no target key (only their port); their
+        // reasons are ready models or kept chips, counted above.
+        for h in saga.cross_hooks.iter().flatten() {
+            assert!(h.target.is_none(), "{at}: a crossing hook holds a key");
+            held.insert(&h.reason.entity);
+        }
         assert!(
             held.len() + trailed <= SPEC_ENTITIES,
             "{at}: {} entities held, {trailed} trailed",

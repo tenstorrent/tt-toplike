@@ -203,6 +203,8 @@ fn a_birth_raises_world_hero_and_quest_events_in_order() {
             SagaEvent::QuestStarted { .. } => "QuestStarted",
             SagaEvent::QuestDone { .. } => "QuestDone",
             SagaEvent::Beat { .. } => "Beat",
+            SagaEvent::HeroCrossed { .. } => "HeroCrossed",
+            SagaEvent::CrossingFailed { .. } => "CrossingFailed",
         })
         .collect();
     assert_eq!(
@@ -628,6 +630,22 @@ fn one_of_each() -> Vec<SagaEvent> {
             floor: None,
             tone: Tone::Calm,
             text: "t".to_string(),
+            cause: cause.clone(),
+        },
+        SagaEvent::HeroCrossed {
+            world: 1,
+            member: 5,
+            from_floor: 2,
+            from_port: 11,
+            to_floor: 3,
+            to_port: 1,
+            cause: cause.clone(),
+        },
+        SagaEvent::CrossingFailed {
+            world: 1,
+            member: 5,
+            floor: 2,
+            port: 11,
             cause,
         },
     ]
@@ -645,13 +663,15 @@ fn every_event_variant_has_its_own_tag() {
             SagaEvent::QuestStarted { .. } => 0x04,
             SagaEvent::QuestDone { .. } => 0x05,
             SagaEvent::Beat { .. } => 0x06,
+            SagaEvent::HeroCrossed { .. } => 0x07,
+            SagaEvent::CrossingFailed { .. } => 0x08,
         };
         assert_eq!(event_tag(&ev), table, "{ev:?}");
         if !seen.contains(&table) {
             seen.push(table);
         }
     }
-    assert_eq!(seen.len(), 6, "two variants share a tag");
+    assert_eq!(seen.len(), 8, "two variants share a tag");
     for other in [TAG_VERSION, TAG_SEED, TAG_LINE, TAG_END] {
         assert!(!seen.contains(&other), "an event tag equals a stream tag");
     }
@@ -696,6 +716,11 @@ fn one_of_each_by_hand() -> Vec<Vec<u8>> {
         item(0x06, &[&[1, 4], &[0], &[1, 0, 0, 0, b't'], &cause]),
         // Beat: floor absent, tone Calm 0, text "t", the cause.
         item(0x06, &[&[0], &[0], &[1, 0, 0, 0, b't'], &cause]),
+        // HeroCrossed: member 5, from floor 2 port 11, to floor 3 port 1,
+        // the cause.
+        item(0x07, &[&[5, 2, 11, 3, 1], &cause]),
+        // CrossingFailed: member 5, floor 2, port 11, the cause.
+        item(0x08, &[&[5, 2, 11], &cause]),
     ]
 }
 
@@ -731,6 +756,10 @@ fn the_encoding_table_matches_the_code() {
     let mut encoded = Vec::new();
     encode_end(&mut encoded, 0x0102, &[(5, 6, 7)]);
     assert_eq!(encoded, [0x30, 2, 1, 0, 0, 0, 0, 0, 0, 1, 5, 6, 7]);
+    // A member in transit: its floor byte carries the transit bit 0x80.
+    assert_eq!(IN_TRANSIT, 0x80);
+    // The crossing verb's code.
+    assert_eq!(verb_code(Verb::Cross), 7);
     // The version item.
     assert_eq!((TAG_VERSION, DIGEST_VERSION), (0x00, 3));
 }
@@ -889,6 +918,9 @@ fn floor_after(ev: &SagaEvent) -> Option<u8> {
         | SagaEvent::QuestDone { floor, .. } => Some(*floor),
         SagaEvent::Beat { floor: None, .. } => None,
         SagaEvent::Beat { .. } => panic!("a member's beat followed by another beat"),
+        // A crossing's line is written on the floor the hero left.
+        SagaEvent::HeroCrossed { from_floor: f, .. }
+        | SagaEvent::CrossingFailed { floor: f, .. } => Some(*f),
     }
 }
 
@@ -1300,6 +1332,8 @@ fn shape(events: &[SagaEvent]) -> Vec<String> {
             SagaEvent::QuestDone { floor, .. } => format!("D{floor}"),
             SagaEvent::Beat { floor: None, .. } => "b".to_string(),
             SagaEvent::Beat { floor: Some(f), .. } => format!("b{f}"),
+            SagaEvent::HeroCrossed { from_floor, .. } => format!("X{from_floor}"),
+            SagaEvent::CrossingFailed { floor, .. } => format!("F{floor}"),
         })
         .collect()
 }
@@ -1631,4 +1665,576 @@ fn a_register_value_reaches_the_floor_and_the_link_table_exactly() {
     ));
     run_ticks(&mut saga, 1);
     assert_eq!(saga.topo[0].dead_cols, [6, 9]);
+}
+
+// ---- Crossing (Task B.4 of the party plan) ------------------------------------
+
+/// Ethernet port `port` of `chip`.
+fn eth(chip: &EntityKey, port: u8) -> EntityKey {
+    EntityKey::eth_port(chip, port)
+}
+
+/// A live-mask sample of `chip` with provenance `prov`.
+fn mask_sample(chip: &EntityKey, mask: u64, prov: Provenance) -> Record {
+    rec(Payload::Sample(Sample {
+        entity: chip.clone(),
+        signal: ETH_LIVE_MASK.to_string(),
+        value: Value::U64(mask),
+        prov,
+    }))
+}
+
+/// A mask change as the bus source writes it: the sample, then the
+/// `LinkChanged` with the low 16 bits.
+fn set_mask(saga: &mut Saga, chip: &EntityKey, mask: u64) {
+    saga.feed(&mask_sample(chip, mask, Provenance::Estimated));
+    saga.feed(&event(Event::LinkChanged {
+        chip: chip.clone(),
+        mask: mask as u16,
+    }));
+}
+
+/// Ports 0 and 1 live: the mask of both chips of [`pair_saga`].
+const PAIR_MASK: u64 = 0b11;
+
+/// Chips A and B, two Blackhole chips whose ports 0 and 1 are live, with
+/// A's port 1 cabled to B's port 0, in a dungeon born by tick 5 (world 1).
+/// Floor 0 (chip A) and floor 1 (chip B) each have portals on ports 0 and
+/// 1, and the link joins floor 0's port 1 to floor 1's port 0. With
+/// `model`, `demo-pair` then becomes ready on both chips, which births
+/// world 2, the world the test reads. The live masks carry `prov`.
+fn pair_saga(model: bool, prov: Provenance) -> Saga {
+    pair_saga_with(model, prov, &[(1, 0)])
+}
+
+/// [`pair_saga`] with the links `links`: each `(a, b)` cables chip A's
+/// port `a` to chip B's port `b`. The first link must be `(1, 0)`.
+fn pair_saga_with(model: bool, prov: Provenance, links: &[(u8, u8)]) -> Saga {
+    let mut saga = Saga::new(config(NameMode::Real, Label::Mock));
+    for c in [chip_a(), chip_b()] {
+        saga.feed(&sample(&c, ENABLED_TENSIX_COL, Value::U64(0x3fff)));
+        saga.feed(&mask_sample(&c, PAIR_MASK, prov));
+    }
+    for &(a, b) in links {
+        saga.feed(&event(Event::LinkPeer {
+            port: eth(&chip_a(), a),
+            peer: eth(&chip_b(), b),
+        }));
+    }
+    run_ticks(&mut saga, 5);
+    assert_eq!(saga.state.party.len(), 2);
+    assert_eq!(saga.links().open(&saga.state.world, 0, 1), Some((1, 0)));
+    if model {
+        saga.feed(&event(Event::ModelReady {
+            model: EntityKey::model("demo-pair"),
+            chips: vec![chip_a(), chip_b()],
+        }));
+        assert_eq!(saga.state.world.id, 2);
+    }
+    saga.drain_events();
+    saga
+}
+
+/// Runs ticks until one raises an event that `pred` accepts, at most `max`
+/// ticks. Returns that tick's events.
+fn tick_until(saga: &mut Saga, max: u64, pred: impl Fn(&SagaEvent) -> bool) -> Vec<SagaEvent> {
+    saga.drain_events();
+    for _ in 0..max {
+        run_ticks(saga, 1);
+        let events = saga.drain_events();
+        if events.iter().any(&pred) {
+            return events;
+        }
+    }
+    panic!("no such event in {max} ticks");
+}
+
+/// Whether `e` is member `m`'s `HeroCrossed`.
+fn crossed(m: u8) -> impl Fn(&SagaEvent) -> bool {
+    move |e| matches!(e, SagaEvent::HeroCrossed { member, .. } if *member == m)
+}
+
+/// The cell of the portal with port `port` on floor `floor`.
+fn portal_cell(saga: &Saga, floor: usize, port: u8) -> (u8, u8) {
+    saga.state.world.floors[floor]
+        .portals
+        .iter()
+        .find(|&&(p, _)| p == port)
+        .map(|&(_, c)| c)
+        .expect("the floor has that portal")
+}
+
+#[test]
+fn a_model_on_both_ends_sends_a_hero_across() {
+    // A model that names only one end offers no crossing.
+    let mut one_end = pair_saga(false, Provenance::Estimated);
+    one_end.feed(&event(Event::ModelReady {
+        model: EntityKey::model("demo-pair"),
+        chips: vec![chip_a()],
+    }));
+    assert!(one_end.cross_hooks.iter().all(Vec::is_empty));
+
+    // A model on both ends gives each floor one crossing hook through the
+    // link, with the model's `ModelReady` as its reason. A hook keeps its
+    // own port and no key: the far port's key is the quest's target, taken
+    // when the quest starts (see "Bounds" in the module comment).
+    let mut saga = pair_saga(true, Provenance::Estimated);
+    let hooks = saga.cross_hooks.clone();
+    assert_eq!(hooks.len(), 2);
+    for (floor, port) in [(0, 1), (1, 0)] {
+        assert_eq!(hooks[floor].len(), 1, "floor {floor}");
+        let h = &hooks[floor][0];
+        assert_eq!(
+            (h.verb, h.port, h.target.clone()),
+            (Verb::Cross, Some(port), None)
+        );
+        assert_eq!(h.reason.entity, EntityKey::model("demo-pair"));
+        assert_eq!(h.reason.signal, "ModelReady");
+    }
+    let reason = hooks[0][0].reason.clone();
+
+    // Member 0 walks to the portal and steps in.
+    let events = tick_until(&mut saga, 3000, crossed(0));
+    let ev = events.iter().find(|e| crossed(0)(e)).unwrap();
+    assert_eq!(
+        *ev,
+        SagaEvent::HeroCrossed {
+            world: 2,
+            member: 0,
+            from_floor: 0,
+            from_port: 1,
+            to_floor: 1,
+            to_port: 0,
+            cause: reason,
+        }
+    );
+    let m = &saga.state.party[0];
+    assert_eq!(m.quest.verb, Verb::Cross);
+    assert_eq!(m.quest.target, Some(eth(&chip_b(), 0)));
+    assert_eq!(m.hero.pos, portal_cell(&saga, 0, 1));
+    assert!(
+        saga.cross_hooks[0].is_empty(),
+        "the crossing dropped its hook"
+    );
+    // Three ticks later it stands on floor 1's portal of port 0.
+    run_ticks(&mut saga, TRANSIT_TICKS);
+    let hero = &saga.state.party[0].hero;
+    assert_eq!(hero.floor, 1);
+    assert_eq!(hero.pos, portal_cell(&saga, 1, 0));
+    assert_eq!(hero.transit, None);
+}
+
+#[test]
+fn a_link_coming_up_offers_one_crossing() {
+    // The plain dungeon offers no crossing: no model runs on the link.
+    let mut saga = pair_saga(false, Provenance::Estimated);
+    assert!(saga.cross_hooks.iter().all(Vec::is_empty));
+    // Chip A's port 1 goes down, then comes up. The sample that brings it
+    // back offers nothing; the `LinkChanged` after it offers floor 0 one
+    // crossing through it, with that event as its reason.
+    set_mask(&mut saga, &chip_a(), 0b01);
+    assert!(saga.cross_hooks.iter().all(Vec::is_empty));
+    saga.feed(&mask_sample(&chip_a(), PAIR_MASK, Provenance::Estimated));
+    assert!(saga.cross_hooks.iter().all(Vec::is_empty), "a sample alone");
+    saga.feed(&event(Event::LinkChanged {
+        chip: chip_a(),
+        mask: PAIR_MASK as u16,
+    }));
+    let ordinal = saga.feed.ordinal();
+    assert_eq!(saga.cross_hooks[0].len(), 1);
+    assert!(saga.cross_hooks[1].is_empty(), "chip B's bit never fell");
+    let h = &saga.cross_hooks[0][0];
+    assert_eq!((h.verb, h.port), (Verb::Cross, Some(1)));
+    assert_eq!(
+        (&h.reason.entity, h.reason.signal.as_str(), h.reason.ordinal),
+        (&chip_a(), "LinkChanged", ordinal)
+    );
+    // The hero takes it and crosses for that reason.
+    let events = tick_until(&mut saga, 3000, crossed(0));
+    let cause = events.iter().find_map(|e| match e {
+        SagaEvent::HeroCrossed { cause, .. } => Some(cause.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        cause.map(|c| (c.signal, c.ordinal)),
+        Some(("LinkChanged".to_string(), ordinal))
+    );
+}
+
+#[test]
+fn a_crossing_writes_a_line_on_each_floor() {
+    let mut saga = pair_saga(true, Provenance::Estimated);
+    let name = saga.state.party[0].hero.name.clone();
+    // On the departure floor, the step into the portal: a beat on floor 0,
+    // right after the event, with the quest's reason as its cause.
+    let events = tick_until(&mut saga, 3000, crossed(0));
+    let entered = saga.state.tick;
+    let at = events.iter().position(|e| crossed(0)(e)).unwrap();
+    let SagaEvent::Beat {
+        floor, text, cause, ..
+    } = &events[at + 1]
+    else {
+        panic!("no beat after the crossing: {:?}", events.get(at + 1));
+    };
+    assert_eq!(*floor, Some(0));
+    assert!(text.contains(&name), "{text}");
+    assert!(
+        text.contains("floor 2"),
+        "names the far floor as its tag F2: {text}"
+    );
+    assert_eq!(cause.signal, "ModelReady");
+    // On the arrival floor, three ticks later, the step out: a beat on
+    // floor 1.
+    run_ticks(&mut saga, TRANSIT_TICKS - 1);
+    assert!(saga.state.party[0].hero.transit.is_some());
+    saga.drain_events();
+    run_ticks(&mut saga, 1);
+    let lines: Vec<(Option<u8>, String)> = saga
+        .drain_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            SagaEvent::Beat { floor, text, .. } if text.contains(&name) => Some((floor, text)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert_eq!(lines[0].0, Some(1));
+    assert!(
+        lines[0].1.contains("floor 1"),
+        "names the floor it came from: {}",
+        lines[0].1
+    );
+    // Both lines are in the chronicle, and both carry the `~` mark: the
+    // live masks behind them are estimated (spec 3.9). (The crossing
+    // quest's own start line, before them, names the portal too.)
+    let both: Vec<&Beat> = saga
+        .state
+        .chronicle
+        .lines(CAPACITY)
+        .filter(|b| b.tick >= entered && b.text.contains(&name) && b.text.contains("portal"))
+        .collect();
+    assert_eq!(both.len(), 2);
+    assert!(both.iter().all(|b| b.text.ends_with(" ~")), "{both:?}");
+}
+
+#[test]
+fn a_crossing_on_measured_links_has_no_tilde_mark() {
+    let mut saga = pair_saga(true, Provenance::Measured);
+    let events = tick_until(&mut saga, 3000, crossed(0));
+    let at = events.iter().position(|e| crossed(0)(e)).unwrap();
+    let SagaEvent::Beat { text, .. } = &events[at + 1] else {
+        panic!("no beat after the crossing");
+    };
+    assert!(!text.contains('~'), "{text}");
+    // One end estimated is enough for the mark.
+    let mut saga = pair_saga(true, Provenance::Measured);
+    saga.feed(&mask_sample(&chip_b(), PAIR_MASK, Provenance::Estimated));
+    let events = tick_until(&mut saga, 3000, crossed(0));
+    let at = events.iter().position(|e| crossed(0)(e)).unwrap();
+    let SagaEvent::Beat { text, .. } = &events[at + 1] else {
+        panic!("no beat after the crossing");
+    };
+    assert!(text.ends_with(" ~"), "{text}");
+}
+
+#[test]
+fn a_hero_in_transit_is_on_no_map_for_three_ticks() {
+    assert_eq!(TRANSIT_TICKS, 3);
+    let mut saga = pair_saga(true, Provenance::Estimated);
+    tick_until(&mut saga, 3000, crossed(0));
+    let entered = saga.state.tick;
+    let on = |saga: &Saga, floor: u8| saga.state.on_floor(floor).any(|(i, _)| i == 0);
+    let mut away = 0;
+    loop {
+        let t = saga.state.party[0].hero.transit.clone();
+        if t.is_none() {
+            break;
+        }
+        let t = t.unwrap();
+        assert_eq!(
+            t,
+            Transit {
+                to_floor: 1,
+                to_port: 0,
+                from_port: 1,
+                until: entered + TRANSIT_TICKS,
+            }
+        );
+        assert!(!on(&saga, 0) && !on(&saga, 1), "tick {}", saga.state.tick);
+        away += 1;
+        run_ticks(&mut saga, 1);
+    }
+    assert_eq!(away, 3, "in transit for three ticks");
+    assert_eq!(saga.state.tick, entered + TRANSIT_TICKS);
+    assert!(on(&saga, 1) && !on(&saga, 0));
+    // In transit the end item marks the member; on the floor it does not.
+    let mut saga = pair_saga(true, Provenance::Estimated);
+    tick_until(&mut saga, 3000, crossed(0));
+    let d_transit = saga.digest();
+    saga.state.party[0].hero.transit = None;
+    assert_ne!(saga.digest(), d_transit, "transit is part of the digest");
+}
+
+#[test]
+fn a_link_down_in_transit_throws_the_hero_back() {
+    let mut saga = pair_saga(true, Provenance::Estimated);
+    tick_until(&mut saga, 3000, crossed(0));
+    let entered = saga.state.tick;
+    let cell = saga.state.party[0].hero.pos;
+    // The far end's port goes down and comes back up before the next tick.
+    // It went down while the hero was in transit, so the crossing fails.
+    saga.feed(&mask_sample(&chip_b(), 0b10, Provenance::Estimated));
+    let down = saga.feed.ordinal();
+    saga.feed(&event(Event::LinkChanged {
+        chip: chip_b(),
+        mask: 0b10,
+    }));
+    set_mask(&mut saga, &chip_b(), PAIR_MASK);
+    saga.drain_events();
+    run_ticks(&mut saga, 1);
+    let events = saga.drain_events();
+    let failed = events
+        .iter()
+        .position(|e| matches!(e, SagaEvent::CrossingFailed { .. }));
+    let Some(at) = failed else {
+        panic!("no CrossingFailed: {events:?}");
+    };
+    assert_eq!(
+        events[at],
+        SagaEvent::CrossingFailed {
+            world: 2,
+            member: 0,
+            floor: 0,
+            port: 1,
+            cause: Cause {
+                entity: chip_b(),
+                signal: ETH_LIVE_MASK.to_string(),
+                ordinal: down,
+            },
+        }
+    );
+    // A tense line on the departure floor.
+    let SagaEvent::Beat { floor, tone, .. } = &events[at + 1] else {
+        panic!("no beat after the failure");
+    };
+    assert_eq!((*floor, *tone), (Some(0), Tone::Tense));
+    // The hero is back on its portal on floor 0, and stays on floor 0.
+    let hero = &saga.state.party[0].hero;
+    assert_eq!(
+        (hero.floor, hero.pos, hero.transit.clone()),
+        (0, cell, None)
+    );
+    assert_eq!(saga.state.tick, entered + 1);
+    run_ticks(&mut saga, TRANSIT_TICKS + 2);
+    assert_eq!(saga.state.party[0].hero.floor, 0);
+    assert!(saga.drain_events().iter().all(|e| !crossed(0)(e)));
+}
+
+#[test]
+fn a_dark_portal_drops_the_hook_and_replans() {
+    // Two links join A and B: A's port 1 to B's port 0, and A's port 0 to
+    // B's port 1. The model on both offers floor 0 two crossings, one per
+    // portal.
+    let mut saga = pair_saga_with(true, Provenance::Estimated, &[(1, 0), (0, 1)]);
+    assert_eq!(saga.cross_hooks[0].len(), 2);
+    // Run until member 0 sets out for a portal.
+    tick_until(&mut saga, 3000, |e| {
+        matches!(
+            e,
+            SagaEvent::QuestStarted {
+                floor: 0,
+                verb: Verb::Cross,
+                ..
+            }
+        )
+    });
+    let goal = saga.state.party[0].quest.goal;
+    let port = portal_at(&saga.state.world, 0, goal).expect("the goal is a portal");
+    // Both of chip A's ports go down while it walks.
+    set_mask(&mut saga, &chip_a(), 0);
+    let name = saga.state.party[0].hero.name.clone();
+    saga.drain_events();
+    let mut events = Vec::new();
+    while saga.state.party[0].hero.pos != goal {
+        run_ticks(&mut saga, 1);
+        events = saga.drain_events();
+        assert!(saga.state.tick < 3000, "the hero never reached the portal");
+    }
+    // A tense line on floor 0 says the portal is dark; no crossing.
+    assert!(events.iter().all(|e| !crossed(0)(e)), "{events:?}");
+    let dark = events.iter().position(|e| {
+        matches!(e, SagaEvent::Beat { floor: Some(0), tone: Tone::Tense, text, .. }
+            if text.contains(&name) && text.contains("dark"))
+    });
+    let Some(at) = dark else {
+        panic!("no dark line: {events:?}");
+    };
+    // The portal's hook is gone; the other portal's hook stays.
+    let left: Vec<Option<u8>> = saga.cross_hooks[0].iter().map(|h| h.port).collect();
+    assert_eq!(left, [Some(1 - port)]);
+    // The hero planned again at once. The plan after a dark portal takes
+    // no crossing, though one is on offer: a hero cannot walk from one
+    // dark portal straight to the next and fill the chronicle with dark
+    // lines.
+    let next = events[at..].iter().find_map(|e| match e {
+        SagaEvent::QuestStarted { floor: 0, verb, .. } => Some(*verb),
+        _ => None,
+    });
+    assert!(
+        matches!(next, Some(v) if v != Verb::Cross),
+        "next quest: {next:?}"
+    );
+    assert_eq!(saga.state.party[0].hero.floor, 0);
+}
+
+#[test]
+fn a_flapping_link_adds_one_hook_per_rise() {
+    let mut saga = pair_saga(false, Provenance::Estimated);
+    let count = |saga: &Saga| saga.cross_hooks[0].len();
+    // One rise, one hook. A second report of the same mask is no rise.
+    set_mask(&mut saga, &chip_a(), 0b01);
+    set_mask(&mut saga, &chip_a(), PAIR_MASK);
+    assert_eq!(count(&saga), 1);
+    saga.feed(&event(Event::LinkChanged {
+        chip: chip_a(),
+        mask: PAIR_MASK as u16,
+    }));
+    assert_eq!(count(&saga), 1);
+    // With the hook taken away, the repeated report still adds none: only
+    // a rise does.
+    saga.cross_hooks[0].clear();
+    saga.feed(&event(Event::LinkChanged {
+        chip: chip_a(),
+        mask: PAIR_MASK as u16,
+    }));
+    assert_eq!(count(&saga), 0, "a report with no rise added a hook");
+    // Each rise adds one, and a floor never holds two for one port.
+    set_mask(&mut saga, &chip_a(), 0b01);
+    set_mask(&mut saga, &chip_a(), PAIR_MASK);
+    assert_eq!(count(&saga), 1);
+    set_mask(&mut saga, &chip_a(), 0b01);
+    set_mask(&mut saga, &chip_a(), PAIR_MASK);
+    assert_eq!(count(&saga), 1, "two rises, one port: one hook");
+
+    // Now the link flaps every other tick for 3,000 ticks. Hooks stay at
+    // one per port, every crossing has a rise behind it, and the
+    // chronicle is not flooded: each member writes at most two crossing
+    // lines (in and out, or out and back) per crossing, and a crossing
+    // takes a walk, three ticks of transit and a 30-tick dwell.
+    let (mut rises, mut crossings, mut lines) = (1u64, 0u64, 0u64);
+    let mut per_window: BTreeMap<u64, u64> = BTreeMap::new();
+    let start = saga.state.tick;
+    saga.drain_events();
+    for k in 0..3000u64 {
+        if k % 2 == 0 {
+            let mask = if k % 4 == 0 { 0b01 } else { PAIR_MASK };
+            set_mask(&mut saga, &chip_a(), mask);
+            rises += u64::from(mask == PAIR_MASK);
+        }
+        run_ticks(&mut saga, 1);
+        assert!(saga.cross_hooks.iter().all(|h| h.len() <= 1));
+        for e in saga.drain_events() {
+            match e {
+                SagaEvent::HeroCrossed { .. } => crossings += 1,
+                SagaEvent::Beat { .. } => {
+                    lines += 1;
+                    *per_window.entry(saga.state.tick / 30).or_default() += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(crossings > 0, "the flapping link was never crossed");
+    assert!(crossings <= rises);
+    let ticks = saga.state.tick - start;
+    // Two members; the busiest 30-tick window and the whole run.
+    let worst = per_window.values().copied().max().unwrap_or(0);
+    assert!(worst <= 8, "{worst} lines in one 30-tick window");
+    assert!(lines <= ticks / 5, "{lines} lines in {ticks} ticks");
+}
+
+#[test]
+fn a_crossed_hero_takes_its_vitality_from_the_far_chip() {
+    let mut saga = pair_saga(true, Provenance::Estimated);
+    // Chip A's heartbeat ticks on; chip B's stalls after one beat, so B's
+    // vitality drains.
+    saga.feed(&sample(&chip_b(), HEARTBEAT, Value::U64(1)));
+    let mut beat = 0u64;
+    let mut step = |saga: &mut Saga| {
+        beat += 1;
+        saga.feed(&sample(&chip_a(), HEARTBEAT, Value::U64(beat)));
+        run_ticks(saga, 1);
+        saga.drain_events()
+    };
+    loop {
+        if step(&mut saga).iter().any(crossed(0)) {
+            break;
+        }
+        assert!(saga.state.tick < 3000, "no crossing");
+    }
+    for _ in 0..TRANSIT_TICKS + 1 {
+        step(&mut saga);
+    }
+    let hero = &saga.state.party[0].hero;
+    assert_eq!(hero.floor, 1);
+    let (a, b) = (
+        vitality(&saga.trails, &chip_a()),
+        vitality(&saga.trails, &chip_b()),
+    );
+    assert!(
+        b < 0.5 && a > 0.9,
+        "the test needs two vitalities: A {a}, B {b}"
+    );
+    assert_eq!(hero.vitality, b);
+}
+
+#[test]
+fn crossing_beats_skip_the_routine_budget() {
+    let mut saga = pair_saga(true, Provenance::Estimated);
+    // Every window belongs to a floor that does not exist, so no routine
+    // line of either member is written.
+    let mut events = Vec::new();
+    for _ in 0..3000 {
+        let window = (saga.state.tick + 1) / ROUTINE_WINDOW_TICKS;
+        saga.window_owner = Some((window, 99));
+        run_ticks(&mut saga, 1);
+        events.extend(saga.drain_events());
+        if events.iter().any(crossed(0)) {
+            break;
+        }
+    }
+    let at = events.iter().position(crossed(0)).expect("a crossing");
+    // No routine line was written, yet the crossing's line was.
+    assert!(saga.state.party[0].unwritten > 0);
+    assert!(matches!(
+        &events[at + 1],
+        SagaEvent::Beat { floor: Some(0), .. }
+    ));
+    let name = &saga.state.party[0].hero.name;
+    let last = saga.state.chronicle.lines(1).next().unwrap();
+    assert!(last.text.contains(name.as_str()), "{}", last.text);
+}
+
+#[test]
+fn a_model_gone_takes_its_crossing_hooks_with_it() {
+    let mut saga = pair_saga(true, Provenance::Estimated);
+    // A second model, ready on both chips, births world 3 with the same
+    // hooks (one per port: the first model in key order gives the reason).
+    saga.feed(&event(Event::ModelReady {
+        model: EntityKey::model("demo-zpair"),
+        chips: vec![chip_a(), chip_b()],
+    }));
+    assert_eq!(saga.state.world.id, 3);
+    assert_eq!(saga.cross_hooks[0].len(), 1);
+    assert_eq!(
+        saga.cross_hooks[0][0].reason.entity,
+        EntityKey::model("demo-pair")
+    );
+    // demo-pair did not make world 3, so it goes away without ending it,
+    // and its crossing hooks leave with it.
+    saga.feed(&event(Event::ModelGone {
+        model: EntityKey::model("demo-pair"),
+    }));
+    assert_eq!(saga.state.world.id, 3);
+    assert!(saga.cross_hooks.iter().all(Vec::is_empty));
 }

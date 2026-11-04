@@ -14,6 +14,18 @@
 //! * **Rest** ([`Verb::Rest`]): always available. The goal is the centre of
 //!   the room nearest the hero.
 //!
+//! # The crossing hook
+//!
+//! * **Cross** ([`Verb::Cross`]): step through an Ethernet portal into the
+//!   floor of the chip at the other end of the link (the party addendum,
+//!   section 8.3). The hook's [`Hook::port`] is the portal's port on the
+//!   hero's floor, its target is the far port's key
+//!   (`eth:chip:.../n`), and its reason is the `ModelReady` of a model
+//!   that runs on both chips, or the `LinkChanged` that brought the link
+//!   up. The goal is the portal's cell. The front door offers these hooks
+//!   and decides what happens at the portal (see "Crossing" in
+//!   [`crate::saga`]); `plan` only walks the hero there.
+//!
 //! Phase 2 adds slay, escort, cleanse and rebuild hooks, which carry a
 //! target entity (a monster, a request stream, a vault, a link). The verbs
 //! exist now so the enum does not change shape later. [`plan`] passes over
@@ -23,10 +35,13 @@
 //!
 //! 1. The first visit-the-sage hook, unless the hero already stands at the
 //!    sage (then it moves on).
-//! 2. If the hero's vitality is below [`REST_BELOW`], the first rest hook.
-//! 3. The first explore hook.
-//! 4. The first rest hook.
-//! 5. With none of these, the hero rests where it stands, and the quest's
+//! 2. The first crossing hook whose port has a portal on the hero's floor
+//!    (the addendum, section 8.3: after a visit to the sage and before
+//!    rest).
+//! 3. If the hero's vitality is below [`REST_BELOW`], the first rest hook.
+//! 4. The first explore hook.
+//! 5. The first rest hook.
+//! 6. With none of these, the hero rests where it stands, and the quest's
 //!    cause names the floor's chip with an empty signal, because no signal
 //!    asked for it.
 //!
@@ -61,6 +76,9 @@ pub enum Verb {
     Cleanse,
     /// Phase 2: repair a severed bridge.
     Rebuild,
+    /// Walk to an Ethernet portal and step through it into the floor of the
+    /// chip at the other end of the link (the party addendum, section 8).
+    Cross,
 }
 
 /// Something a world offers as a quest. Phase 1 hooks are visit-the-sage,
@@ -74,6 +92,9 @@ pub struct Hook {
     pub target: Option<EntityKey>,
     /// The signal that raised the hook.
     pub reason: Cause,
+    /// For a [`Verb::Cross`] hook, the Ethernet port of the portal on the
+    /// hero's floor that the quest walks to. `None` for every other verb.
+    pub port: Option<u8>,
 }
 
 /// A quest: a verb, the entity it is about, the signal behind it, and the
@@ -118,6 +139,23 @@ pub fn plan(world: &World, hero: &Hero, hooks: &[Hook], rng: &mut Pcg32) -> Ques
             if hero.pos != floor.exit {
                 return quest(sage, floor.exit);
             }
+        }
+        // A crossing walks to its portal's cell. A hook whose port has no
+        // portal on this floor is passed over.
+        let portal = |h: &Hook| {
+            let port = h.port?;
+            floor
+                .portals
+                .iter()
+                .find(|&&(p, _)| p == port)
+                .map(|&(_, cell)| cell)
+        };
+        if let Some((hook, cell)) = hooks
+            .iter()
+            .filter(|h| h.verb == Verb::Cross)
+            .find_map(|h| portal(h).map(|c| (h, c)))
+        {
+            return quest(hook, cell);
         }
         let rest = first(Verb::Rest);
         if hero.vitality < REST_BELOW {

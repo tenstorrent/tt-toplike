@@ -2312,3 +2312,51 @@ fn a_party_memory_of_one_equals_a_saga_memory() {
         assert!(fresh.lead(&empty).key.is_none());
     });
 }
+
+// ---- Crossing (Task B.4 of the party plan) ----------------------------------
+
+/// A hero in transit stands on no floor in the view, as in the core
+/// (`SagaState::on_floor`): its departure tile no longer seats it, and
+/// once it arrives the far floor's tile does. Task B.5 draws the crossing
+/// itself; this only keeps the view from drawing the hero on a map it has
+/// left.
+#[test]
+fn a_hero_in_transit_is_on_no_tile() {
+    use tt_toplike_saga::SagaEvent;
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/tt-toplike-saga/tests/fixtures/cross4.jsonl");
+    let read = read_segment(&path).expect("cross4.jsonl is committed");
+    let mut saga = Saga::new(config(NameMode::Real, Label::Mock));
+    let mut records = read.records.iter();
+    // Up to the first crossing.
+    let (member, from, to) = loop {
+        let r = records.next().expect("the cross log has a crossing");
+        saga.feed(r);
+        let crossed = saga.drain_events().into_iter().find_map(|e| match e {
+            SagaEvent::HeroCrossed {
+                member,
+                from_floor,
+                to_floor,
+                ..
+            } => Some((member as usize, from_floor as usize, to_floor as usize)),
+            _ => None,
+        });
+        if let Some(c) = crossed {
+            break c;
+        }
+    };
+    let state = saga.state();
+    assert!(state.party[member].hero.transit.is_some());
+    assert_eq!(member_floor(state, member), None);
+    assert_ne!(floor_seat(state, from).member, Some(member));
+    // After the transit ticks it stands on the far floor's tile.
+    let tick = state.tick;
+    for r in records {
+        saga.feed(r);
+        if saga.state().tick > tick + 3 {
+            break;
+        }
+    }
+    let state = saga.state();
+    assert_eq!(member_floor(state, member), Some(to));
+}

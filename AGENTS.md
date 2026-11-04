@@ -2327,12 +2327,13 @@ moved it, and each diff is explained by that change:
 | `fix(saga): the party view's tiles move less, inside the 20 KB/s budget` (party Task A.9) | calm unfocused tiles from a held picture, banded focused tile, dead-zone windows, held tile heat, chronicle batches of 20 ticks | no digest. The 8 party frames: the tiles and the chronicle's batches (with the batching undone they still differ from the old pins). The 8 busy view frames: the tiles alone (with the batching undone the hashes are the same). The solo frames, the story print and the four panel frames did not move. |
 | `feat(saga): portals know their Ethernet port, and a link table from the bus (digest version 3)` (party Task B.3, Nov 4 2026) | `DIGEST_VERSION` 3 (only the version byte; the items are version 2's); each portal is bound to an Ethernet port; a generic floor's portal count follows its known live mask | every row, both modes, by the version byte alone: with the version set back to 2 on the B.3 code every row matched the version 2 pins, so no fixture's floor changed (the fixtures' chips are Blackhole-shaped or have no mask). No view frame, story print or panel frame moved. New: `a_blackhole_floor_keeps_its_cells`, a hash of 500 Blackhole floors pinned on 0.17.0's code before the change. |
 | `fix(saga): registers reach the floor and the link table with every bit` (party Task B.3, fix round 1) | a sample's `U64` register (live mask, Tensix columns, harvesting) is read from its exact bits; before, it went through an f64 | `quiet.jsonl` (both modes) only: its mock chips' mask 0xAAAA_AAAA_AAAA_AAAA lost its low bits as an f64 (one portal, port 11); exact, each floor has six portals (ports 1 to 11, odd). The other fixtures' registers are below 2^53. No view frame, story print or panel frame moved. |
+| `feat(saga): heroes cross Ethernet portals into the linked chip's floor` (party Task B.4, Nov 4 2026) | the crossing quest: `Verb::Cross` (code 7), `HeroCrossed` (tag 0x07) and `CrossingFailed` (tag 0x08), four crossing beat kinds, and the transit bit 0x80 on a member's floor byte in the end item | nothing moved: the five fixtures hold no `LinkPeer`, so no portal is bound, no hero crosses, and every member's transit bit is 0. New: `cross4.jsonl` 0x2a88827bd487ef7a (real) and 0x34a41fcbacbba99c (generated). No view frame, story print or panel frame moved. |
 
-Pinned now (digest version 3, with the party, its merged chronicle and bound portals):
+Pinned now (digest version 3, with the party, its merged chronicle, bound portals and crossings):
 `quiet.jsonl` 0xd6e0200609dcd3eb (both modes), `bringup.jsonl` 0xc9142f2256b8175a (both),
 `busy.jsonl` 0x23a8d7bcf22b2d8b (real) and 0xfd4e69d1d98aa692 (generated), `solo.jsonl`
 0xa2eadd2b95cffd79 and 0x3abf9f424e37b575, `party4.jsonl` 0x01b9f4175d5de836 and
-0x0976f42c301be352.
+0x0976f42c301be352, `cross4.jsonl` 0x2a88827bd487ef7a and 0x34a41fcbacbba99c.
 
 ### Checking the contract with the binary
 

@@ -19,11 +19,16 @@
 //! | `{world}` | [`BeatCtx::world`], in decimal |
 //! | `{tick}` | [`BeatCtx::tick`], in decimal |
 //! | `{count}` | [`BeatCtx::count`]: in words from zero to twelve ("four"), in digits above ("32") |
+//! | `{far}` | [`BeatCtx::far`], the floor at the other end of a crossing, counted from 1 so it matches the view's floor tag (`2` for floor index 1, tag `F2`) |
+//! | `{port}` | [`BeatCtx::port`], the Ethernet port of the portal on the beat's own floor, in decimal |
 //! | `{biome}` | `dungeon`, `forge` or `dream` |
 //! | `{place}` | a composed name from the biome's place tag ([`place_tag`]) |
 //! | `{adj}` | one word from the tone's adjective tag ([`adjective_tag`]), in lower case |
 //! | `{w:TAG}` | one word from lexicon group `TAG` |
 //! | `{n:TAG}` | a composed name from group `TAG` ([`crate::pack::Lexicon::compose`]) |
+//!
+//! `{far}` and `{port}` are set only on crossing beats and on a crossing
+//! quest's lines; on any other beat they become `?`.
 //!
 //! An article "a" written just before a placeholder becomes "an" when the
 //! value starts with a vowel. An unknown placeholder, or a tag with no
@@ -144,11 +149,28 @@ pub enum BeatKind {
     /// A party of two or more heroes woke in a new world. Set
     /// [`BeatCtx::count`] to the number of heroes.
     PartyBorn,
+    /// A hero stepped into a portal ([`SagaEvent::HeroCrossed`]). Written
+    /// on the departure floor. Set [`BeatCtx::port`] to the portal's port
+    /// and [`BeatCtx::far`] to the floor it leads to.
+    CrossOut,
+    /// A crossing hero stepped out of the far portal. Written on the
+    /// arrival floor. Set [`BeatCtx::port`] to that portal's port and
+    /// [`BeatCtx::far`] to the floor the hero came from.
+    CrossIn,
+    /// A hero reached its portal and found it closed, so it did not cross.
+    /// Written on the hero's floor. Set [`BeatCtx::port`] and
+    /// [`BeatCtx::far`] as for [`BeatKind::CrossOut`].
+    CrossDark,
+    /// The link went down while a hero was in transit, and the hero is back
+    /// on its own portal ([`SagaEvent::CrossingFailed`]). Written on the
+    /// departure floor. Set [`BeatCtx::port`] and [`BeatCtx::far`] as for
+    /// [`BeatKind::CrossOut`].
+    CrossFailed,
 }
 
 impl BeatKind {
     /// Every kind, in declaration order.
-    pub const ALL: [BeatKind; 8] = [
+    pub const ALL: [BeatKind; 12] = [
         BeatKind::WorldBorn,
         BeatKind::WorldEnded,
         BeatKind::HeroBorn,
@@ -157,6 +179,10 @@ impl BeatKind {
         BeatKind::Rest,
         BeatKind::Ambient,
         BeatKind::PartyBorn,
+        BeatKind::CrossOut,
+        BeatKind::CrossIn,
+        BeatKind::CrossDark,
+        BeatKind::CrossFailed,
     ];
 }
 
@@ -248,6 +274,13 @@ pub struct BeatCtx {
     /// How many heroes the party has, for [`BeatKind::PartyBorn`]. The
     /// front door sets it on every beat; only `{count}` reads it.
     pub count: u8,
+    /// For a crossing's beat or quest: the floor index at the other end of
+    /// the link. `{far}` writes it counted from 1. `None` on every other
+    /// beat.
+    pub far: Option<u8>,
+    /// For a crossing's beat or quest: the Ethernet port of the portal on
+    /// the beat's own floor. `None` on every other beat.
+    pub port: Option<u8>,
 }
 
 /// One line of the chronicle.
@@ -439,6 +472,11 @@ impl Chronicle {
                 "world" => ctx.world.to_string(),
                 "tick" => ctx.tick.to_string(),
                 "count" => count_words(ctx.count),
+                // Counted from 1, as the view's floor tag counts (`F2`).
+                "far" => ctx
+                    .far
+                    .map_or_else(|| "?".to_string(), |f| (u32::from(f) + 1).to_string()),
+                "port" => ctx.port.map_or_else(|| "?".to_string(), |p| p.to_string()),
                 "biome" => biome_word(ctx.biome).to_string(),
                 "place" => lex.compose(place_tag(ctx.biome), ctx.tone, rng),
                 // Mid-sentence, an adjective is lower case ("a quiet

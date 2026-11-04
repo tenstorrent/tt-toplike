@@ -32,7 +32,9 @@
 //! 3. An event updates the list of ready models (a `ModelReady` adds one
 //!    while fewer than [`MAX_READY_MODELS`] are listed, a `ModelGone` removes
 //!    it) and the link table (a `LinkChanged` on a kept chip, a `LinkPeer`;
-//!    see "Links"). A tick counts one more tick.
+//!    see "Links"). A `LinkChanged` that reports a link coming up offers a
+//!    crossing, and any change of a live mask can break a crossing in
+//!    progress (see "Crossing"). A tick counts one more tick.
 //! 4. On a tick, every chip that has ever reported a heartbeat gets one push
 //!    of the [`HEARTBEAT_ALIVE`] series: 1.0 if its heartbeat advanced within
 //!    the last [`HEARTBEAT_GRACE_TICKS`] ticks (the tick of the change and
@@ -66,9 +68,9 @@
 //! chips: the bus source writes a chip's peers right after that chip's own
 //! readings, before the next chip's first one. For a world, a portal is
 //! bound when its port's peer has a portal on another floor of that world,
-//! and open while both ends are live ([`Links::open`]). No rule of the story
-//! reads the table yet (the crossing quest will), so it moves no event and
-//! is not part of the digest.
+//! and open while both ends are live ([`Links::open`]). The crossing quest
+//! reads the table (see "Crossing"). The table itself is not hashed: what
+//! the digest sees of it is the crossings it allows.
 //!
 //! # Worlds, the party and quests
 //!
@@ -110,8 +112,9 @@
 //! birth that follows it: `WorldEnded`, its `Beat`.
 //!
 //! On each tick in a world, each member in index order reads its vitality
-//! from the trails of its floor's chip and takes one step. A member's step
-//! reads only its own floor, quest, hooks and generator. Then:
+//! from the trails of its floor's chip and takes one step (a member in
+//! transit takes none, see "Crossing"). A member's step reads only its own
+//! floor, quest, hooks and generator, and its floor's crossing hooks. Then:
 //!
 //! * **Arrived.** `QuestDone` and, when the pace writes it, a beat. A sage
 //!   hook is dropped, for this
@@ -125,6 +128,83 @@
 //!   it does not retry one unreachable goal forever, and it plans again at
 //!   once (ruling R15). The explore hook is never dropped: each plan draws a
 //!   new room, so the next one may be reachable.
+//! * **At a portal.** A crossing quest ends at its portal (see "Crossing").
+//!
+//! # Crossing
+//!
+//! A hero can step through an Ethernet portal into the floor of the chip at
+//! the other end of the link (the party addendum, sections 8.3 to 8.6). A
+//! hero who crosses leaves its home floor, so a floor can have no hero and
+//! another several (ledger ruling R29: heroes cross freely).
+//!
+//! **Hooks.** Crossing hooks belong to floors, in `cross_hooks`: at most one
+//! per portal, each holding its portal's port and its reason. A hook holds
+//! no entity key; the quest's target, the far port's key
+//! (`eth:chip:.../n`), is read from the link table when the quest starts.
+//! Two signals offer one:
+//!
+//! * **A model on both ends.** At a world's birth, for each ready model in
+//!   key order, each open link whose two chips the model named gives each
+//!   of its two floors a hook, with the model's `ModelReady` as its reason.
+//!   A `ModelReady` that births no world (the current world's model, ready
+//!   again) offers its crossings in the current world. A model that named
+//!   no chips offers none: nothing says it runs on both ends.
+//! * **A link coming up.** A `LinkChanged` gives the floor of its chip one
+//!   hook through each portal whose live bit rose and that is open now,
+//!   with the event as its reason. The bus source writes the mask's sample
+//!   before the `LinkChanged`, so the sample usually makes the rise: each
+//!   chip keeps the bits that rose and that no `LinkChanged` has reported
+//!   yet, and the next `LinkChanged` reports them (its 16 bits). A bit that
+//!   falls first is not reported. A second report of a mask with no new
+//!   rise offers nothing, so a link that flaps offers one hook per rise,
+//!   and a floor never holds two for one portal.
+//!
+//! A `ModelGone` takes the model's crossing hooks away; a member already
+//! walking to the portal keeps its quest. [`plan`] takes a crossing after a
+//! visit to the sage and before rest.
+//!
+//! **At the portal.** The floor's hook for the portal is dropped. If the
+//! portal is open ([`Links::open`]), the hero steps in: `HeroCrossed` with
+//! the quest's reason as its cause, and a notable line on its floor
+//! ([`BeatKind::CrossOut`]). Its `transit` is set for [`TRANSIT_TICKS`]
+//! ticks. If the portal is closed, a notable, tense line says it is dark
+//! ([`BeatKind::CrossDark`]), and the hero plans again at once. That one
+//! plan leaves the floor's crossing hooks out, so a hero cannot go from one
+//! dark portal straight to the next: it takes another quest, which ends in
+//! a dwell. A crossing quest raises no `QuestDone`.
+//!
+//! **In transit** the hero is on no floor ([`SagaState::on_floor`]); its
+//! `floor` and `pos` stay those of the portal it stepped into. Every record
+//! that changes a live mask checks each crossing in progress: one whose link
+//! is no longer open is broken by that record, even if the link comes back
+//! before the next tick. On the member's next tick:
+//!
+//! * **Broken.** `CrossingFailed`, whose cause is the record that closed
+//!   the link (a `toplike.eth.live_mask` sample or a `LinkChanged`), and a
+//!   notable, tense line on the departure floor
+//!   ([`BeatKind::CrossFailed`]). The hero is out of transit, on the portal
+//!   it stepped into, and dwells [`DWELL_TICKS`] ticks.
+//! * **Arrived** (at the transit's `until` tick). The hero stands on the far
+//!   floor's portal of the far port, and a notable line is written on that
+//!   floor ([`BeatKind::CrossIn`]). Its hooks become the far floor's (the
+//!   sages standing there, explore and rest); its vitality comes from the
+//!   far chip from now on; it dwells [`DWELL_TICKS`] ticks and then plans
+//!   with the far floor's crossing hooks.
+//!
+//! **Lines.** Each crossing line names the portal's port and the floor at
+//! the other end, counted from 1 as the view's floor tags count (`{port}`,
+//! `{far}` in [`crate::chronicle`]). A line ends in the `~` mark
+//! ([`ESTIMATED_MARK`], spec 3.9) when the last live-mask sample of either
+//! chip of the link was `Estimated`, as every `--mock` reading is. The
+//! sample's provenance is read for this mark alone.
+//!
+//! **Pace.** Crossing lines are notable: the routine budget never drops
+//! them. Each crossing needs a hook (one per rise or per ready model), a
+//! walk, three ticks in transit and a 30-tick dwell, and a dark portal is
+//! followed by another quest and its dwell, so a member writes at most
+//! about two crossing lines per 34 ticks however fast a link flaps
+//! (`a_flapping_link_adds_one_hook_per_rise` drives one that flaps every
+//! two ticks).
 //!
 //! # Pace
 //!
@@ -132,8 +212,8 @@
 //! chronicle one or two lines a tick, too fast to read. So a member's
 //! routine lines share one budget (the party addendum, section 3.5). The
 //! routine kinds are `QuestStarted`, `QuestDone`, `Rest` and `Ambient`; a
-//! world's line (born, ended, the party's birth) and a hero's birth line are
-//! notable and always written.
+//! world's line (born, ended, the party's birth), a hero's birth line and a
+//! crossing's lines are notable and always written.
 //!
 //! * Ticks fall into windows of [`ROUTINE_WINDOW_TICKS`] (10, one second at
 //!   10 Hz): window `k` is ticks `10k` to `10k + 9`.
@@ -243,6 +323,8 @@
 //! | party members | one per floor of the world, so at most [`crate::world::MAX_FLOORS`] (32) | here |
 //! | the link table | [`MAX_CHIPS`] (64) chips, 64 ports each: at most 4,096 peers | [`crate::links`] |
 //! | a member's hooks | [`MAX_READY_MODELS`] sage hooks (they come from the ready list), plus explore and rest | here |
+//! | a floor's crossing hooks | one per portal of the floor (at most 16), holding a port and a reason and no target key | here |
+//! | heroes in transit | one transit per member: at most 32 | [`crate::hero`] |
 //! | undrained events | [`MAX_PENDING_EVENTS`] (4096); the oldest is dropped and counted in [`Saga::dropped_events`] | here |
 //! | chronicle lines | [`CAPACITY`] (500) | [`crate::chronicle`] |
 //! | generated names | [`crate::chronicle::ALIAS_LIMIT`] (256) | [`crate::chronicle`] |
@@ -274,9 +356,11 @@
 //! sage on that chip's floor, even if the chip is kept later. A key leaves
 //! the set when no ready model names it any more. The link table holds at
 //! most [`MAX_CHIPS`] chip keys of its own, which can be chips the saga
-//! does not keep (a `LinkPeer` names both ends), and no port keys. So the
-//! saga holds at most 128 + 64 + 64 = 256 entity keys, and 288 entities
-//! with the 32 heroes.
+//! does not keep (a `LinkPeer` names both ends), and no port keys. A
+//! crossing hook holds no key of its own: its reason is a ready model's or
+//! a kept chip's. A member's crossing quest holds the far port's key, one
+//! per member at most. So the saga holds at most 128 + 64 + 64 = 256 entity
+//! keys besides the members' quests, and 288 entities with the 32 heroes.
 //!
 //! **Cost of one record.** At most one world is born per record: an event
 //! births at most once, and a sweep's samples can start one training run,
@@ -331,23 +415,32 @@
 //! | `0x04` | `QuestStarted` event | tick, world, floor, verb, target, reason |
 //! | `0x05` | `QuestDone` event | tick, world, floor, verb |
 //! | `0x06` | `Beat` event | tick, world, floor option, tone, text, cause |
+//! | `0x07` | `HeroCrossed` event | tick, world, member, from floor, from port, to floor, to port, cause |
+//! | `0x08` | `CrossingFailed` event | tick, world, member, floor, port, cause |
 //! | `0x10` | a world's seed, at its birth (before its `WorldBorn`) | seed |
 //! | `0x20` | one chronicle line, oldest first (only in [`Saga::digest`]) | floor option, text |
 //! | `0x30` | the end (only in [`Saga::digest`]) | current world seed, member count, then floor, x and y for each member in index order |
 //!
 //! The end item's count is the party's size: 1 for a one-chip world and
-//! before the first world. Version 3 has the items of version 2. Its
-//! version byte moved when portals were bound to Ethernet ports, so the
-//! digests that task moved are kept apart from the digests the crossing
-//! quest will move when it adds its events. Version 1 (0.16.x) had no version
-//! item, no floors on quest events, beats or lines, and the hero's floor, x
-//! and y in place of the count and triples.
+//! before the first world. A member in transit has bit 0x80 set in its
+//! floor byte (a floor index is below 32, so the bit is free). Version 3
+//! has the items of version 2, plus the crossing's two events, its verb
+//! code and the transit bit. A saga in which no hero crosses writes none of
+//! them, so its stream is the same as before the crossing: the version
+//! byte moved when portals were bound to Ethernet ports (Task B.3), before
+//! the crossing existed, so that task's digest changes stand apart. The
+//! party addendum (section 8.6) asks for one byte per member in the end
+//! item, 0 on a floor and 1 in transit; that byte would have moved every
+//! pinned digest with no crossing in it, so the transit mark is a bit of
+//! the floor byte. Version 1 (0.16.x) had no version item, no floors on
+//! quest events, beats or lines, and the hero's floor, x and y in place of
+//! the count and triples.
 //!
 //! Field encodings:
 //!
 //! * `tick`, `world`, `seed` and ordinals: `u64`, 8 bytes little-endian.
-//! * the version, `floor`, the member count, and a member's x and y: one
-//!   byte.
+//! * the version, `floor`, the member count, a member index, a port, and a
+//!   member's x and y: one byte.
 //! * strings and entity keys: the UTF-8 length as a `u32`, 4 bytes
 //!   little-endian, then the UTF-8 bytes.
 //! * an `Option`: one presence byte (0 absent, 1 present), then the value
@@ -360,7 +453,7 @@
 //!   little-endian.
 //! * enums, one byte: biome Dungeon 0, Forge 1, Dream 2; why ModelDown 0,
 //!   Reset 1, Season 2, HeroDied 3, Superseded 4, RunEnded 5; verb Explore 0,
-//!   Rest 1, VisitSage 2, Slay 3, Escort 4, Cleanse 5, Rebuild 6; tone Calm 0,
+//!   Rest 1, VisitSage 2, Slay 3, Escort 4, Cleanse 5, Rebuild 6, Cross 7; tone Calm 0,
 //!   Tense 1, Triumphant 2.
 //!
 //! The tags and codes are part of the golden digests: change one only on
@@ -371,15 +464,15 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
-use tt_toplike_bus::{EntityKey, Event, Payload, Record};
+use tt_toplike_bus::{EntityKey, Event, Payload, Provenance, Record};
 
 use crate::chronicle::{
     Beat, BeatCtx, BeatKind, Chronicle, NameMode, NameRole, RealName, Tone, CAPACITY,
 };
 use crate::event::{Biome, EndWhy, SagaEvent};
 use crate::hero::{
-    push_temperature, vitality, Cause, Hero, ASIC_TEMPERATURE, HEARTBEAT_ALIVE,
-    HEARTBEAT_GRACE_TICKS, VITALITY_SIGNALS,
+    push_temperature, vitality, Cause, Hero, Transit, ASIC_TEMPERATURE, HEARTBEAT_ALIVE,
+    HEARTBEAT_GRACE_TICKS, TRANSIT_TICKS, VITALITY_SIGNALS,
 };
 use crate::links::Links;
 use crate::maze;
@@ -413,6 +506,15 @@ pub fn plan_stream(i: usize) -> u64 {
 
 /// Stream selector of the chronicle's own generator (ruling R16).
 pub const CHRONICLE_STREAM: u64 = 2;
+
+/// The mark a crossing line carries when a live mask behind it was
+/// estimated (spec 3.9): every crossing under `--mock`.
+pub const ESTIMATED_MARK: &str = "~";
+
+/// The bit the end item sets in a member's floor byte while it is in
+/// transit (see "The digest" in the module comment). A floor index is
+/// below [`crate::world::MAX_FLOORS`] (32), so the bit is free.
+const IN_TRANSIT: u8 = 0x80;
 
 /// Ticks a member waits after finishing a quest before it plans the next
 /// one (3 s at 10 Hz).
@@ -550,12 +652,14 @@ impl SagaState {
     }
 
     /// The members whose hero stands on `floor`, with their indices, in
-    /// index order. In the party stage that is member `floor` alone.
+    /// index order. Before any crossing that is member `floor` alone. A
+    /// hero in transit stands on no floor, so it is in no floor's list (see
+    /// "Crossing" in the module comment).
     pub fn on_floor(&self, floor: u8) -> impl Iterator<Item = (usize, &Member)> {
         self.party
             .iter()
             .enumerate()
-            .filter(move |(_, m)| m.hero.floor == floor)
+            .filter(move |(_, m)| m.hero.floor == floor && m.hero.transit.is_none())
     }
 }
 
@@ -573,6 +677,10 @@ struct MemberCore {
     /// The tick of the member's last written routine line, or of its birth
     /// before its first (see "Pace" in the module comment).
     heard: u64,
+    /// Set while the member is in transit, by the first record that closes
+    /// its link: that record's cause. The member's next tick throws it back
+    /// (see "Crossing" in the module comment).
+    broken: Option<Cause>,
 }
 
 /// A ready model: the cause of its `ModelReady` and the chips it named.
@@ -601,6 +709,14 @@ struct ChipSeen {
     harvesting: Option<u64>,
     tensix_cols: Option<u64>,
     eth_live_mask: Option<u64>,
+    /// Whether the last `toplike.eth.live_mask` sample was marked
+    /// `Estimated` (every `--mock` reading is). A crossing through this
+    /// chip's port then carries the `~` mark (spec 3.9).
+    mask_estimated: bool,
+    /// Live bits that rose (by a sample or a `LinkChanged`) and that no
+    /// `LinkChanged` has reported yet. A bit that falls leaves it. See
+    /// "Crossing" in the module comment.
+    unreported_rise: u64,
     /// The last heartbeat value and the tick at which it last changed.
     heartbeat: Option<(f64, u64)>,
 }
@@ -627,6 +743,12 @@ pub struct Saga {
     named_unseen: BTreeSet<EntityKey>,
     /// One per member of the party, index aligned with `state.party`.
     members: Vec<MemberCore>,
+    /// Each floor's crossing hooks in the current world, index aligned
+    /// with the world's floors: at most one per portal (see "Crossing").
+    cross_hooks: Vec<Vec<Hook>>,
+    /// The cause of the current world's birth: the reason of the explore
+    /// and rest hooks a member gets on each floor it reaches.
+    born_cause: Cause,
     /// The chronicle's own stream, shared by every member. Reseeded at each
     /// birth.
     story_rng: Pcg32,
@@ -701,7 +823,10 @@ impl Saga {
                 plan_rng: Pcg32::new(0, PLAN_STREAM),
                 dwell_until: None,
                 heard: 0,
+                broken: None,
             }],
+            cross_hooks: vec![Vec::new()],
+            born_cause: rest_at(pos, chip.clone()).reason,
             story_rng: Pcg32::new(0, CHRONICLE_STREAM),
             window_owner: None,
             wrote_first: false,
@@ -798,7 +923,14 @@ impl Saga {
             .state
             .party
             .iter()
-            .map(|m| (m.hero.floor, m.hero.pos.0, m.hero.pos.1))
+            .map(|m| {
+                let away = if m.hero.transit.is_some() {
+                    IN_TRANSIT
+                } else {
+                    0
+                };
+                (m.hero.floor | away, m.hero.pos.0, m.hero.pos.1)
+            })
             .collect();
         encode_end(&mut buf, self.state.world.seed, &members);
         fnv1a64_extend(h, &buf)
@@ -813,7 +945,17 @@ impl Saga {
                 signal,
                 value,
                 bits,
-            } => self.on_sample(entity, signal, *value, *bits, ordinal),
+            } => {
+                // The provenance is read only to mark a crossing over an
+                // estimated link (spec 3.9). It is part of the record's
+                // content, so the determinism contract holds.
+                let estimated = match &rec.payload {
+                    Payload::Sample(s) => s.prov == Provenance::Estimated,
+                    Payload::Sweep(s) => s.prov == Provenance::Estimated,
+                    _ => false,
+                };
+                self.on_sample(entity, signal, *value, *bits, estimated, ordinal)
+            }
             Observation::Event(e) => self.on_event(e, ordinal),
             Observation::Tick => {
                 self.state.tick += 1;
@@ -862,6 +1004,15 @@ impl Saga {
         }
         self.world_events = wev;
 
+        // A model ready again on the current world's model (no birth)
+        // offers its crossings now. A birth already offered every ready
+        // model's crossings.
+        if let Observation::Event(Event::ModelReady { model, .. }) = o {
+            if !born && self.state.world.id > 0 {
+                self.offer_model_crossings(model);
+            }
+        }
+
         // Every member walking to a sage that just went away plans again at
         // once, in index order. When the model's own dungeon ended, the new
         // world already planned.
@@ -891,6 +1042,7 @@ impl Saga {
         signal: &str,
         value: f64,
         exact: Option<u64>,
+        estimated: bool,
         ordinal: u64,
     ) {
         let Some(chip) = entity.chip_owner() else {
@@ -933,12 +1085,16 @@ impl Saga {
             ENABLED_TENSIX_COL => self.topo_dirty |= changed(&mut seen.tensix_cols),
             ETH_LIVE_MASK => {
                 self.topo_dirty |= changed(&mut seen.eth_live_mask);
+                seen.mask_estimated = estimated;
                 let cause = Cause {
                     entity: chip.clone(),
                     signal: ETH_LIVE_MASK.to_string(),
                     ordinal,
                 };
+                let old = self.links.mask(&chip);
                 self.links.observe_mask(&chip, bits, cause);
+                note_rise(seen, old, bits);
+                self.check_transits(&chip);
             }
             HEARTBEAT => {
                 let advanced = seen.heartbeat.is_none_or(|(last, _)| last != value);
@@ -964,15 +1120,28 @@ impl Saga {
                 // Only a kept chip's mask is kept, as with the sample. The
                 // event carries the low 16 bits: they replace the same
                 // bits of the mask, and the rest stays.
-                if self.chips.contains_key(chip) {
-                    let old = self.links.mask(chip).unwrap_or(0);
-                    let merged = (old & !0xffff) | u64::from(*mask);
+                if let Some(seen) = self.chips.get_mut(chip) {
+                    let old = self.links.mask(chip);
+                    let merged = (old.unwrap_or(0) & !0xffff) | u64::from(*mask);
                     let cause = Cause {
                         entity: chip.clone(),
                         signal: "LinkChanged".to_string(),
                         ordinal,
                     };
-                    self.links.observe_mask(chip, merged, cause);
+                    self.links.observe_mask(chip, merged, cause.clone());
+                    note_rise(seen, old, merged);
+                    // The event reports every rise among its 16 bits that
+                    // no earlier `LinkChanged` reported: the bus source
+                    // writes the sample first, so the rise is usually the
+                    // sample's (see "Crossing" in the module comment).
+                    let reported = seen.unreported_rise & 0xffff;
+                    seen.unreported_rise &= !0xffff;
+                    self.check_transits(chip);
+                    for port in 0..16u8 {
+                        if reported & (1 << port) != 0 {
+                            self.offer_link_crossing(chip, port, &cause);
+                        }
+                    }
                 }
             }
             Event::LinkPeer { port, peer } => {
@@ -1027,6 +1196,12 @@ impl Saga {
                 }
                 for core in &mut self.members {
                     core.hooks.retain(|h| h.target.as_ref() != Some(model));
+                }
+                // The crossings it offered leave with it: no work of its
+                // crosses the link any more. A member already walking to
+                // the portal keeps its quest.
+                for hooks in &mut self.cross_hooks {
+                    hooks.retain(|h| h.reason.entity != *model);
                 }
             }
             _ => {}
@@ -1158,29 +1333,14 @@ impl Saga {
         // world that owned the current window does not silence the new
         // party for the rest of it.
         self.window_owner = None;
+        self.born_cause = moment.cause.clone();
         let mut names: Vec<String> = Vec::with_capacity(world.floors.len());
         for (i, floor) in world.floors.iter().enumerate() {
             let chip = &world.chips[i];
             let mut plan_rng = Pcg32::new(world.seed, plan_stream(i));
             // Hooks: the sages standing on this floor first, then explore
             // and rest.
-            let mut hooks: Vec<Hook> = self
-                .ready
-                .iter()
-                .filter(|(_, r)| r.stands_on(chip))
-                .map(|(model, r)| Hook {
-                    verb: Verb::VisitSage,
-                    target: Some(model.clone()),
-                    reason: r.cause.clone(),
-                })
-                .collect();
-            for verb in [Verb::Explore, Verb::Rest] {
-                hooks.push(Hook {
-                    verb,
-                    target: None,
-                    reason: moment.cause.clone(),
-                });
-            }
+            let hooks = self.hooks_for(chip);
             let name = Pack::builtin().hero_name_unique(&mut plan_rng, &names);
             names.push(name.clone());
             let hero = Hero::new(name, i as u8, floor.entrance, world.born_tick);
@@ -1196,10 +1356,18 @@ impl Saga {
                 plan_rng,
                 dwell_until: None,
                 heard: self.state.tick,
+                broken: None,
             });
         }
         let (id, biome) = (world.id, world.biome);
         self.state.world = world;
+        // Each floor's crossings: one per open link whose two chips a ready
+        // model runs on, the first model in key order giving the reason.
+        self.cross_hooks = vec![Vec::new(); self.state.world.floors.len()];
+        let models: Vec<EntityKey> = self.ready.keys().cloned().collect();
+        for model in &models {
+            self.offer_model_crossings(model);
+        }
         // The sage's floors are the floors whose member got the model's
         // hook: the lifecycle's list, read again through the saga's own
         // list of the model's chips, which can hold fewer (see "Bounds").
@@ -1280,13 +1448,42 @@ impl Saga {
 
     /// Plans member `i`'s next quest and raises `QuestStarted` and its beat.
     fn start_quest(&mut self, i: usize, collapse: bool) {
+        self.start_quest_with(i, collapse, true);
+    }
+
+    /// [`Saga::start_quest`], with the hero's floor's crossing hooks
+    /// offered to the plan only when `cross` is set. After a dark portal
+    /// the member plans once without them (see "Crossing" in the module
+    /// comment).
+    fn start_quest_with(&mut self, i: usize, collapse: bool, cross: bool) {
+        let at = self.state.party[i].hero.floor as usize;
         let core = &mut self.members[i];
-        let quest = plan(
+        let mut hooks = core.hooks.clone();
+        if cross {
+            if let Some(more) = self.cross_hooks.get(at) {
+                hooks.extend(more.iter().cloned());
+            }
+        }
+        let mut quest = plan(
             &self.state.world,
             &self.state.party[i].hero,
-            &core.hooks,
+            &hooks,
             &mut core.plan_rng,
         );
+        // A crossing's hook keeps only its own port. The quest's target is
+        // the far port's key, read from the link table now; `None` when
+        // the link is no longer bound, and the portal is then dark when
+        // the hero gets there.
+        let mut crossing = (None, None);
+        if quest.verb == Verb::Cross {
+            let port = portal_at(&self.state.world, at, quest.goal);
+            let far = port.and_then(|p| self.links.bound(&self.state.world, at as u8, p));
+            quest.target = far.and_then(|(g, q)| {
+                let chip = self.state.world.chips.get(g as usize)?;
+                Some(EntityKey::eth_port(chip, q))
+            });
+            crossing = (far.map(|(g, _)| g), port);
+        }
         let name = match quest.verb {
             Verb::VisitSage => quest.target.as_ref().and_then(real_name),
             _ => None,
@@ -1297,7 +1494,7 @@ impl Saga {
             NameRole::Service
         };
         let tone = self.tone(collapse, false, self.state.party[i].hero.vitality);
-        let ctx = self.ctx(
+        let mut ctx = self.ctx(
             Some(i),
             tone,
             name,
@@ -1306,6 +1503,7 @@ impl Saga {
             None,
             &quest.reason,
         );
+        (ctx.far, ctx.port) = crossing;
         let stored = self.routine_beat(i, BeatKind::QuestStarted, &ctx);
 
         // In generated mode the event takes the beat's cleaned cause, or for
@@ -1344,7 +1542,6 @@ impl Saga {
         if let Some(stored) = stored {
             self.emit(stored);
         }
-        let mut quest = quest;
         quest.target_label = self.target_label(&quest);
         self.state.party[i].quest = quest;
     }
@@ -1385,6 +1582,10 @@ impl Saga {
         if let Some(chip) = self.state.world.chips.get(floor_at) {
             self.state.party[i].hero.vitality = vitality(&self.trails, chip);
         }
+        if let Some(t) = self.state.party[i].hero.transit.clone() {
+            self.transit_tick(i, t);
+            return;
+        }
         if let Some(until) = self.members[i].dwell_until {
             if self.state.tick < until {
                 return;
@@ -1399,7 +1600,12 @@ impl Saga {
         };
         let member = &mut state.party[i];
         let r = member.hero.step(floor, &member.quest);
-        if r.arrived {
+        if r.arrived && member.quest.verb == Verb::Cross {
+            // A crossing ends at its portal, with a crossing beat and no
+            // `QuestDone`.
+            let quest = member.quest.clone();
+            self.at_portal(i, &quest);
+        } else if r.arrived {
             let quest = member.quest.clone();
             let (vitality, on) = (member.hero.vitality, member.hero.floor);
             if quest.verb == Verb::VisitSage {
@@ -1434,10 +1640,297 @@ impl Saga {
     }
 
     /// Removes the hook member `i`'s quest came from, for that member only.
+    /// A crossing's hook belongs to the floor: it leaves the floor's list.
     fn drop_hook(&mut self, i: usize, quest: &Quest) {
+        if quest.verb == Verb::Cross {
+            let at = self.state.party[i].hero.floor as usize;
+            if let Some(port) = portal_at(&self.state.world, at, quest.goal) {
+                self.drop_cross_hook(at, port);
+            }
+            return;
+        }
         self.members[i]
             .hooks
             .retain(|h| !(h.verb == quest.verb && h.target == quest.target));
+    }
+
+    /// The hooks a member has on the floor of `chip` when it arrives there:
+    /// the sages standing on that floor, in model key order, then explore
+    /// and rest for the world's birth. A member gets them at the world's
+    /// birth, and again after each crossing, for the floor it reached.
+    fn hooks_for(&self, chip: &EntityKey) -> Vec<Hook> {
+        let mut hooks: Vec<Hook> = self
+            .ready
+            .iter()
+            .filter(|(_, r)| r.stands_on(chip))
+            .map(|(model, r)| Hook {
+                verb: Verb::VisitSage,
+                target: Some(model.clone()),
+                reason: r.cause.clone(),
+                port: None,
+            })
+            .collect();
+        for verb in [Verb::Explore, Verb::Rest] {
+            hooks.push(Hook {
+                verb,
+                target: None,
+                reason: self.born_cause.clone(),
+                port: None,
+            });
+        }
+        hooks
+    }
+
+    // ---- Crossing (see "Crossing" in the module comment) ----
+
+    /// Adds one crossing hook through port `port` of floor `floor`, unless
+    /// the floor already holds one for that port.
+    fn add_cross_hook(&mut self, floor: usize, port: u8, reason: &Cause) {
+        let Some(hooks) = self.cross_hooks.get_mut(floor) else {
+            return;
+        };
+        if hooks.iter().any(|h| h.port == Some(port)) {
+            return;
+        }
+        hooks.push(Hook {
+            verb: Verb::Cross,
+            target: None,
+            reason: reason.clone(),
+            port: Some(port),
+        });
+    }
+
+    /// Removes floor `floor`'s crossing hook through port `port`.
+    fn drop_cross_hook(&mut self, floor: usize, port: u8) {
+        if let Some(hooks) = self.cross_hooks.get_mut(floor) {
+            hooks.retain(|h| h.port != Some(port));
+        }
+    }
+
+    /// The crossings ready model `model` offers in the current world: for
+    /// each open link whose two chips the model named, one hook on each of
+    /// the two floors, with the model's `ModelReady` as its reason. A model
+    /// that named no chips offers none: nothing says it runs on both ends.
+    fn offer_model_crossings(&mut self, model: &EntityKey) {
+        let Some(r) = self.ready.get(model) else {
+            return;
+        };
+        if r.anywhere || self.state.world.id == 0 {
+            return;
+        }
+        let world = &self.state.world;
+        let mut offers = Vec::new();
+        for (f, floor) in world.floors.iter().enumerate() {
+            if !r.stands_on(&world.chips[f]) {
+                continue;
+            }
+            for &(port, _) in &floor.portals {
+                let Some((g, _)) = self.links.open(world, f as u8, port) else {
+                    continue;
+                };
+                if r.stands_on(&world.chips[g as usize]) {
+                    offers.push((f, port));
+                }
+            }
+        }
+        let reason = r.cause.clone();
+        for (f, port) in offers {
+            self.add_cross_hook(f, port, &reason);
+        }
+    }
+
+    /// A `LinkChanged` reported that port `port` of `chip` came up: the
+    /// chip's floor offers one crossing through that portal, when the
+    /// portal is open now. `reason` is the event.
+    fn offer_link_crossing(&mut self, chip: &EntityKey, port: u8, reason: &Cause) {
+        let world = &self.state.world;
+        if world.id == 0 {
+            return;
+        }
+        let Some(f) = world.chips.iter().position(|c| c == chip) else {
+            return;
+        };
+        if self.links.open(world, f as u8, port).is_some() {
+            self.add_cross_hook(f, port, reason);
+        }
+    }
+
+    /// After `chip`'s live mask changed: every member in transit whose link
+    /// is no longer open has its crossing broken by this record. Its next
+    /// tick throws it back. A link that comes up again before that tick
+    /// does not save it: the bit cleared while it was in transit.
+    fn check_transits(&mut self, chip: &EntityKey) {
+        let world = &self.state.world;
+        if world.id == 0 {
+            return;
+        }
+        let cause = self.links.mask_cause(chip);
+        for (m, core) in self.state.party.iter().zip(self.members.iter_mut()) {
+            let Some(t) = &m.hero.transit else { continue };
+            if core.broken.is_none() && self.links.open(world, m.hero.floor, t.from_port).is_none()
+            {
+                core.broken = cause.cloned();
+            }
+        }
+    }
+
+    /// Whether a crossing between floors `a` and `b` rests on an estimated
+    /// reading: the last live-mask sample of either chip was `Estimated`.
+    fn crossing_estimated(&self, a: u8, b: Option<u8>) -> bool {
+        let est = |f: u8| {
+            self.state
+                .world
+                .chips
+                .get(f as usize)
+                .and_then(|c| self.chips.get(c))
+                .is_some_and(|s| s.mask_estimated)
+        };
+        est(a) || b.is_some_and(est)
+    }
+
+    /// A crossing beat's context for member `i`: its floor, `tone`, the
+    /// portal's `port` and the `far` floor, caused by `cause`.
+    fn crossing_ctx(
+        &self,
+        i: usize,
+        tone: Tone,
+        port: u8,
+        far: Option<u8>,
+        cause: &Cause,
+    ) -> BeatCtx {
+        let mut ctx = self.ctx(
+            Some(i),
+            tone,
+            None,
+            NameRole::Service,
+            Some(Verb::Cross),
+            None,
+            cause,
+        );
+        ctx.port = Some(port);
+        ctx.far = far;
+        ctx
+    }
+
+    /// Member `i` reached the portal of its crossing quest. If the portal
+    /// is open it steps in: `HeroCrossed` and a notable line on its floor.
+    /// If not, a tense line says the portal is dark, and it plans again
+    /// without crossing hooks. Either way the floor's hook for the portal is
+    /// dropped.
+    fn at_portal(&mut self, i: usize, quest: &Quest) {
+        let hero = &self.state.party[i].hero;
+        let (from, vit) = (hero.floor, hero.vitality);
+        let Some(port) = portal_at(&self.state.world, from as usize, quest.goal) else {
+            // The goal is always a portal's cell; plan again if not.
+            self.start_quest(i, false);
+            return;
+        };
+        self.drop_cross_hook(from as usize, port);
+        match self.links.open(&self.state.world, from, port) {
+            Some((to, to_port)) => {
+                self.state.party[i].hero.transit = Some(Transit {
+                    to_floor: to,
+                    to_port,
+                    from_port: port,
+                    until: self.state.tick + TRANSIT_TICKS,
+                });
+                let tone = self.tone(false, false, vit);
+                let ctx = self.crossing_ctx(i, tone, port, Some(to), &quest.reason);
+                let mark = self.crossing_estimated(from, Some(to));
+                let beat = self.write_beat_marked(BeatKind::CrossOut, &ctx, mark);
+                // The event takes the beat's cause: aliased in generated
+                // mode, as a `QuestStarted` does.
+                let SagaEvent::Beat { cause, .. } = &beat else {
+                    unreachable!("write_beat returns a Beat");
+                };
+                self.emit(SagaEvent::HeroCrossed {
+                    world: self.state.world.id,
+                    member: i as u8,
+                    from_floor: from,
+                    from_port: port,
+                    to_floor: to,
+                    to_port,
+                    cause: cause.clone(),
+                });
+                self.emit(beat);
+            }
+            None => {
+                let far = self
+                    .links
+                    .bound(&self.state.world, from, port)
+                    .map(|(g, _)| g);
+                let ctx = self.crossing_ctx(i, Tone::Tense, port, far, &quest.reason);
+                let mark = self.crossing_estimated(from, far);
+                let beat = self.write_beat_marked(BeatKind::CrossDark, &ctx, mark);
+                self.emit(beat);
+                self.start_quest_with(i, false, false);
+            }
+        }
+    }
+
+    /// Member `i`'s tick while in transit `t`. A broken crossing throws the
+    /// hero back: `CrossingFailed`, a tense line on its floor, and a dwell
+    /// on its own portal. Otherwise, once `t.until` comes, the hero stands
+    /// on the far portal: a notable line on the far floor, the far floor's
+    /// hooks, the far chip's vitality, and a dwell.
+    fn transit_tick(&mut self, i: usize, t: Transit) {
+        let tick = self.state.tick;
+        if let Some(cause) = self.members[i].broken.take() {
+            let hero = &mut self.state.party[i].hero;
+            hero.transit = None;
+            let from = hero.floor;
+            let ctx = self.crossing_ctx(i, Tone::Tense, t.from_port, Some(t.to_floor), &cause);
+            let mark = self.crossing_estimated(from, Some(t.to_floor));
+            let beat = self.write_beat_marked(BeatKind::CrossFailed, &ctx, mark);
+            let SagaEvent::Beat { cause, .. } = &beat else {
+                unreachable!("write_beat returns a Beat");
+            };
+            self.emit(SagaEvent::CrossingFailed {
+                world: self.state.world.id,
+                member: i as u8,
+                floor: from,
+                port: t.from_port,
+                cause: cause.clone(),
+            });
+            self.emit(beat);
+            self.members[i].dwell_until = Some(tick + DWELL_TICKS);
+            return;
+        }
+        if tick < t.until {
+            return;
+        }
+        let from = self.state.party[i].hero.floor;
+        let world = &self.state.world;
+        let to = t.to_floor as usize;
+        // The far portal's cell; a bound link always has one (see
+        // `Links::bound`), and the floor's gate stands in if not.
+        let cell = world.floors.get(to).map(|f| {
+            f.portals
+                .iter()
+                .find(|&&(p, _)| p == t.to_port)
+                .map_or(f.entrance, |&(_, c)| c)
+        });
+        let (Some(cell), Some(chip)) = (cell, world.chips.get(to).cloned()) else {
+            self.state.party[i].hero.transit = None;
+            return;
+        };
+        let vit = vitality(&self.trails, &chip);
+        let hero = &mut self.state.party[i].hero;
+        hero.arrive(t.to_floor, cell);
+        hero.vitality = vit;
+        self.members[i].hooks = self.hooks_for(&chip);
+        let tone = self.tone(false, false, vit);
+        let ctx = self.crossing_ctx(
+            i,
+            tone,
+            t.to_port,
+            Some(from),
+            &self.state.party[i].quest.reason,
+        );
+        let mark = self.crossing_estimated(t.to_floor, Some(from));
+        let beat = self.write_beat_marked(BeatKind::CrossIn, &ctx, mark);
+        self.emit(beat);
+        self.members[i].dwell_until = Some(tick + DWELL_TICKS);
     }
 
     /// The lowest vitality in the party: the vitality a world's beat uses.
@@ -1495,6 +1988,9 @@ impl Saga {
             floor: who.map(|_| hero.floor),
             // At most MAX_FLOORS (32) members, so the count fits a byte.
             count: u8::try_from(self.state.party.len()).unwrap_or(u8::MAX),
+            // Set by the crossing's beats and quests only.
+            far: None,
+            port: None,
         }
     }
 
@@ -1544,6 +2040,13 @@ impl Saga {
     /// Writes a beat to the chronicle, marking the first line of a mock or
     /// replay saga, and returns its event without raising it.
     fn write_beat(&mut self, kind: BeatKind, ctx: &BeatCtx) -> SagaEvent {
+        self.write_beat_marked(kind, ctx, false)
+    }
+
+    /// [`Saga::write_beat`], with the `~` mark of an estimated reading
+    /// appended to the line when `estimated` is set (spec 3.9; a crossing
+    /// over a `--mock` link carries it).
+    fn write_beat_marked(&mut self, kind: BeatKind, ctx: &BeatCtx, estimated: bool) -> SagaEvent {
         let chronicle = &mut self.state.chronicle;
         chronicle.push_beat(
             kind,
@@ -1552,6 +2055,9 @@ impl Saga {
             self.cfg.names,
             &mut self.story_rng,
         );
+        if estimated {
+            chronicle.append_to_last(ESTIMATED_MARK);
+        }
         if !self.wrote_first {
             self.wrote_first = true;
             if let Some(mark) = self.cfg.label.mark() {
@@ -1580,6 +2086,26 @@ impl Saga {
         }
         self.events.push_back(ev);
     }
+}
+
+/// The port of the portal at `cell` on floor `floor` of `world`, if a
+/// portal stands there.
+fn portal_at(world: &World, floor: usize, cell: (u8, u8)) -> Option<u8> {
+    world
+        .floors
+        .get(floor)?
+        .portals
+        .iter()
+        .find(|&&(_, c)| c == cell)
+        .map(|&(p, _)| p)
+}
+
+/// Notes a mask change of a chip from `old` to `new` in its unreported
+/// rises: bits that rose join them, bits that are clear now leave them. A
+/// first mask (`old` is `None`) is a first sight, and nothing rose.
+fn note_rise(seen: &mut ChipSeen, old: Option<u64>, new: u64) {
+    let rose = old.map_or(0, |o| new & !o);
+    seen.unreported_rise = (seen.unreported_rise | rose) & new;
 }
 
 /// A rest where the hero stands, caused by `chip` with an empty signal: the
@@ -1632,6 +2158,7 @@ impl Saga {
                     signal: "ModelReady".to_string(),
                     ordinal: 0,
                 },
+                port: None,
             },
         );
         let (x, y) = floor.exit;
@@ -1647,8 +2174,10 @@ impl Saga {
 // ---------------------------------------------------------------------------
 
 /// The version of the digest's byte encoding, hashed first by every saga.
-/// Version 3 (task B.3 of the party plan) has the items of version 2; it
-/// marks the saga whose portals know their Ethernet ports. Version 2 added
+/// Version 3 (task B.3 of the party plan) marks the saga whose portals know
+/// their Ethernet ports. It has the items of version 2, and the crossing's
+/// (task B.4): `HeroCrossed`, `CrossingFailed`, the verb code of `Cross`
+/// and the transit bit, which a saga with no crossing never writes. Version 2 added
 /// the version item itself and a floor on every quest event, beat and
 /// chronicle line, and gave the end item one triple per member (the
 /// addendum, section 3.6). Version 1, the encoding of 0.16.x, had no
@@ -1672,6 +2201,8 @@ fn event_tag(ev: &SagaEvent) -> u8 {
         SagaEvent::QuestStarted { .. } => 0x04,
         SagaEvent::QuestDone { .. } => 0x05,
         SagaEvent::Beat { .. } => 0x06,
+        SagaEvent::HeroCrossed { .. } => 0x07,
+        SagaEvent::CrossingFailed { .. } => 0x08,
     }
 }
 
@@ -1729,6 +2260,30 @@ fn encode_event(out: &mut Vec<u8>, tick: u64, ev: &SagaEvent) {
             put_opt_u8(out, *floor);
             out.push(tone_code(*tone));
             put_str(out, text);
+            put_cause(out, cause);
+        }
+        SagaEvent::HeroCrossed {
+            world,
+            member,
+            from_floor,
+            from_port,
+            to_floor,
+            to_port,
+            cause,
+        } => {
+            put_u64(out, *world);
+            out.extend_from_slice(&[*member, *from_floor, *from_port, *to_floor, *to_port]);
+            put_cause(out, cause);
+        }
+        SagaEvent::CrossingFailed {
+            world,
+            member,
+            floor,
+            port,
+            cause,
+        } => {
+            put_u64(out, *world);
+            out.extend_from_slice(&[*member, *floor, *port]);
             put_cause(out, cause);
         }
     }
@@ -1817,6 +2372,7 @@ fn verb_code(v: Verb) -> u8 {
         Verb::Escort => 4,
         Verb::Cleanse => 5,
         Verb::Rebuild => 6,
+        Verb::Cross => 7,
     }
 }
 

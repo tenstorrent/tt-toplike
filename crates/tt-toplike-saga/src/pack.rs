@@ -1490,7 +1490,8 @@ const fn ending(why: EndWhy, text: &'static str) -> Template {
 }
 
 use BeatKind::{
-    Ambient, HeroBorn, PartyBorn, QuestDone, QuestStarted, Rest, WorldBorn, WorldEnded,
+    Ambient, CrossDark, CrossFailed, CrossIn, CrossOut, HeroBorn, PartyBorn, QuestDone,
+    QuestStarted, Rest, WorldBorn, WorldEnded,
 };
 use Tone::{Calm, Tense, Triumphant};
 
@@ -1695,6 +1696,19 @@ static TEMPLATES: &[Template] = &[
         Verb::Rest,
         "{hero} heads for a {adj} corner to rest.",
     ),
+    // A crossing quest: the walk to a portal. `{port}` is the portal's
+    // Ethernet port on this floor, `{far}` the floor it leads to, counted
+    // from 1 like the view's floor tags.
+    quest(
+        QuestStarted,
+        Verb::Cross,
+        "{hero} heads for the portal on port {port}, the way to floor {far}.",
+    ),
+    quest(
+        QuestStarted,
+        Verb::Cross,
+        "{hero} sets out to cross to floor {far} through the portal on port {port}.",
+    ),
     quest(
         QuestStarted,
         Verb::Rest,
@@ -1773,6 +1787,41 @@ static TEMPLATES: &[Template] = &[
     any(
         Rest,
         "{hero} polishes a {n:item:kernel} while the {w:npc:service} keeps watch.",
+    ),
+    // A crossing (the party addendum, section 8.4). Each line names the
+    // portal's port and the floor at the other end, so a reader can follow
+    // the hero from one floor's lines to the other's.
+    any(
+        CrossOut,
+        "{hero} steps into the portal on port {port} and heads for floor {far}.",
+    ),
+    any(
+        CrossOut,
+        "{hero} walks through the portal on port {port}, bound for floor {far}.",
+    ),
+    any(
+        CrossIn,
+        "{hero} steps out of the portal on port {port}, arriving from floor {far}.",
+    ),
+    any(
+        CrossIn,
+        "{hero} arrives from floor {far} through the portal on port {port}.",
+    ),
+    any(
+        CrossDark,
+        "{hero} reaches the portal on port {port}, but it has gone dark. The way to floor {far} is closed.",
+    ),
+    any(
+        CrossDark,
+        "The portal on port {port} is dark when {hero} gets there. Floor {far} will have to wait.",
+    ),
+    any(
+        CrossFailed,
+        "The link to floor {far} fails mid-crossing, and {hero} is thrown back out of the portal on port {port}.",
+    ),
+    any(
+        CrossFailed,
+        "The bridge to floor {far} gives way under {hero}, who lands back at the portal on port {port}.",
     ),
     // Ambient lines, for quiet stretches.
     toned(

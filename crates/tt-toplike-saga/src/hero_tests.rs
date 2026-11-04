@@ -453,11 +453,13 @@ fn everyday_hooks() -> [Hook; 2] {
             verb: Verb::Explore,
             target: None,
             reason: cause(),
+            port: None,
         },
         Hook {
             verb: Verb::Rest,
             target: None,
             reason: cause(),
+            port: None,
         },
     ]
 }
@@ -561,16 +563,19 @@ fn plan_visits_the_sage_then_explores_or_rests() {
         verb: Verb::VisitSage,
         target: Some(EntityKey::model("llama")),
         reason: cause(),
+        port: None,
     };
     let explore = Hook {
         verb: Verb::Explore,
         target: None,
         reason: cause(),
+        port: None,
     };
     let rest = Hook {
         verb: Verb::Rest,
         target: None,
         reason: cause(),
+        port: None,
     };
     let hooks = [explore.clone(), rest.clone(), sage.clone()];
     let mut hero = Hero::new("Tensix".to_string(), 0, floor.entrance, 5);
@@ -614,4 +619,62 @@ fn plan_visits_the_sage_then_explores_or_rests() {
     let q = plan(&world, &hero, &[], &mut rng);
     assert_eq!(q.verb, Verb::Rest);
     assert_eq!(q.goal, hero.pos);
+}
+
+#[test]
+fn plan_takes_a_crossing_after_the_sage_and_before_rest() {
+    // The party addendum, section 8.3: a crossing hook comes after a visit
+    // to the sage and before rest (and so before explore). Its goal is the
+    // cell of the portal with the hook's port.
+    let floor = generate(
+        &FloorSpec::for_chip(&chip(), None, Some(0x3fff), Some(0b1010), Arch::Blackhole),
+        7,
+        0.0,
+    );
+    let ports: Vec<u8> = floor.portals.iter().map(|&(p, _)| p).collect();
+    assert_eq!(ports, [1, 3]);
+    let world = World {
+        id: 1,
+        seed: 9,
+        born_tick: 5,
+        chips: vec![chip()],
+        floors: vec![floor.clone()].into(),
+        biome: Biome::Dungeon,
+        sage_chips: Vec::new(),
+    };
+    let far = EntityKey::eth_port(&EntityKey::chip("0000:02:00.0"), 0);
+    let cross = |port: u8| Hook {
+        verb: Verb::Cross,
+        target: Some(far.clone()),
+        reason: cause(),
+        port: Some(port),
+    };
+    let sage = Hook {
+        verb: Verb::VisitSage,
+        target: Some(EntityKey::model("demo-sage")),
+        reason: cause(),
+        port: None,
+    };
+    let [explore, rest] = everyday_hooks();
+    let mut hero = Hero::new("Tensix".to_string(), 0, floor.entrance, 5);
+    let mut rng = Pcg32::from_seed(1);
+
+    // The sage first.
+    let hooks = [explore.clone(), cross(3), rest.clone(), sage];
+    assert_eq!(plan(&world, &hero, &hooks, &mut rng).verb, Verb::VisitSage);
+    // At the sage, the crossing: its goal is port 3's portal.
+    hero.pos = floor.exit;
+    let q = plan(&world, &hero, &hooks, &mut rng);
+    assert_eq!(q.verb, Verb::Cross);
+    assert_eq!(q.target, Some(far.clone()));
+    assert_eq!(q.goal, floor.portals[1].1, "port 3 is the second portal");
+    // A tired hero still crosses before it rests.
+    hero.vitality = REST_BELOW / 2.0;
+    assert_eq!(plan(&world, &hero, &hooks, &mut rng).verb, Verb::Cross);
+    // A hook whose port has no portal on this floor is passed over, for
+    // the next crossing hook or, with none, for rest.
+    let q = plan(&world, &hero, &[cross(2), cross(1), rest.clone()], &mut rng);
+    assert_eq!(q.goal, floor.portals[0].1, "port 1 is the first portal");
+    let q = plan(&world, &hero, &[cross(2), rest, explore], &mut rng);
+    assert_eq!(q.verb, Verb::Rest);
 }
