@@ -145,6 +145,7 @@ fn fits(payload: &Payload) -> bool {
             }
             Event::Reset { chips } => short_keys(chips),
             Event::LinkChanged { chip, .. } => short_key(chip),
+            Event::LinkPeer { port, peer } => short_key(port) && short_key(peer),
             Event::LeaseGranted { lease, chips } => short_key(lease) && short_keys(chips),
             Event::LeaseReleased { lease, chips } => short_key(lease) && short_keys(chips),
             Event::EccTick { chip, .. } => short_key(chip),

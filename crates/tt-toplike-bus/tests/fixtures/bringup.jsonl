@@ -1,4 +1,4 @@
-{"schema":1,"kind":"Live","tool_versions":{"tt-toplike-bus":"0.1.0"}}
+{"schema":1,"kind":"Live","tool_versions":{"tt-toplike-bus":"0.2.0"}}
 {"q":1,"m":0,"w":1790000000000,"s":"sysfs","p":{"k":"sample","e":"chip:0000:01:00.0","n":"chip.temp_c","v":{"f":42.0},"r":"measured"}}
 {"q":2,"m":0,"w":1790000000000,"s":"sysfs","p":{"k":"sample","e":"chip:0000:01:00.0","n":"chip.power_w","v":{"f":14.0},"r":"measured"}}
 {"q":3,"m":0,"w":1790000000000,"s":"sysfs","p":{"k":"sample","e":"chip:0000:02:00.0","n":"chip.temp_c","v":{"f":43.0},"r":"measured"}}

@@ -2045,7 +2045,7 @@ review, and most tasks needed one to three fix rounds.
 
 ### Layout
 
-* `crates/tt-toplike-bus/` (library, 0.1.0): record types (`record.rs`), entity keys,
+* `crates/tt-toplike-bus/` (library, 0.2.0): record types (`record.rs`), entity keys,
   the log and its writer thread (`log.rs`, `segment.rs`), the `World` reducer (`world.rs`),
   `Replay` and `inspect`, the Unix socket server and client (`socket.rs`, `client.rs`), the
   serialisable `WorldSummary` (`summary.rs`) and the `WorldRead` trait views use (`read.rs`).

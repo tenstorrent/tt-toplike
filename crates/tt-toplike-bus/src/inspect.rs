@@ -93,6 +93,7 @@ pub(crate) fn event_entities(e: &Event) -> Vec<&EntityKey> {
         Event::LeaseGranted { lease, chips } | Event::LeaseReleased { lease, chips } => {
             std::iter::once(lease).chain(chips).collect()
         }
+        Event::LinkPeer { port, peer } => vec![port, peer],
         Event::ViewChanged { .. } => Vec::new(),
     }
 }
@@ -357,6 +358,19 @@ pub fn inspect_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `LinkPeer` names both of its ports, so `inspect --entity` finds the
+    /// event from either end of the link.
+    #[test]
+    fn link_peer_names_both_ports_as_entities() {
+        let port = EntityKey::eth_port(&EntityKey::chip("0000:01:00.0"), 11);
+        let peer = EntityKey::eth_port(&EntityKey::chip("0000:02:00.0"), 0);
+        let ev = Event::LinkPeer {
+            port: port.clone(),
+            peer: peer.clone(),
+        };
+        assert_eq!(event_entities(&ev), vec![&port, &peer]);
+    }
     use std::path::Path;
 
     const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/bringup.jsonl");

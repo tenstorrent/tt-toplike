@@ -200,6 +200,11 @@ impl ReadView {
             | Event::LeaseReleased { chips, .. } => list(chips),
             Event::KernelCompiled { chip, .. } | Event::Spark { chip, .. } => one(chip),
             Event::LinkChanged { chip, .. } | Event::EccTick { chip, .. } => self.knows(chip),
+            // A link peer is kept when the port's chip is known here. A key
+            // with no chip owner (not a real port key) is dropped, since
+            // nothing here could place it. The far end may be on an unknown
+            // chip; the event still names a known near port, so it stays.
+            Event::LinkPeer { port, .. } => port.chip_owner().is_some_and(|c| self.knows(&c)),
             Event::ModelGone { .. }
             | Event::RequestsCompleted { .. }
             | Event::ViewChanged { .. } => true,

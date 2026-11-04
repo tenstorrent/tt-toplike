@@ -163,6 +163,19 @@ pub enum Event {
         chip: Option<EntityKey>,
         kind: String,
     },
+    /// One Ethernet port reports which port sits at the other end of its
+    /// link. Both keys are `EntityKind::EthPort` (`eth:<chip>/<n>`).
+    ///
+    /// Added in bus 0.2.0. A reader built before it does not know the tag
+    /// `"LinkPeer"`, skips such a line and counts it as a bad line (see
+    /// `tests/unknown_event.rs`), so old readers keep working on new logs.
+    /// A source emits it once per link when it learns the peer, and again
+    /// when the peer changes. It says nothing about whether the link is up;
+    /// `LinkChanged` and the live-link mask do that.
+    LinkPeer {
+        port: EntityKey,
+        peer: EntityKey,
+    },
 }
 
 /// A verbatim snapshot from a source (the tt-smi JSON), kept so a replay can
@@ -292,6 +305,33 @@ mod tests {
 
     fn chip() -> EntityKey {
         EntityKey::chip("0000:03:00.0")
+    }
+
+    /// `LinkPeer` encodes under the tag `"LinkPeer"` and decodes from that
+    /// exact line. The literal line matters: a round trip alone would still
+    /// pass if the tag were renamed, but a log written by another build
+    /// (or by 0.2.0 itself, later) would no longer read.
+    #[test]
+    fn link_peer_round_trips() {
+        let a = EntityKey::eth_port(&EntityKey::chip("0000:01:00.0"), 11);
+        let b = EntityKey::eth_port(&EntityKey::chip("0000:02:00.0"), 0);
+        let ev = Event::LinkPeer {
+            port: a.clone(),
+            peer: b.clone(),
+        };
+        let rec = Record {
+            seq: 7,
+            t_mono_ns: 1,
+            t_wall_ms: 2,
+            source: "mock".into(),
+            payload: Payload::Event(ev.clone()),
+        };
+        // Round trip through a line.
+        assert_eq!(Record::from_line(&rec.to_line()).unwrap(), rec);
+        // The wire form is pinned by a literal line.
+        let line = r#"{"q":7,"m":1,"w":2,"s":"mock","p":{"k":"event","t":"LinkPeer","port":"eth:chip:0000:01:00.0/11","peer":"eth:chip:0000:02:00.0/0"}}"#;
+        assert_eq!(rec.to_line(), line);
+        assert_eq!(Record::from_line(line).unwrap().payload, Payload::Event(ev));
     }
 
     /// A float read back from a line is the float that was written, to the

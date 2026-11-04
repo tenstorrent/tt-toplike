@@ -1771,6 +1771,7 @@ fn event_cause(e: &Event) -> (Option<EntityKey>, &'static str) {
         Event::LeaseReleased { lease, .. } => (Some(lease.clone()), "LeaseReleased"),
         Event::EccTick { chip, .. } => (Some(chip.clone()), "EccTick"),
         Event::ViewChanged { .. } => (None, "ViewChanged"),
+        Event::LinkPeer { port, .. } => (Some(port.clone()), "LinkPeer"),
         Event::Spark { chip, .. } => (chip.clone(), "Spark"),
     }
 }
