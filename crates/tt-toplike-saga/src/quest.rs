@@ -19,10 +19,11 @@
 //! * **Cross** ([`Verb::Cross`]): step through an Ethernet portal into the
 //!   floor of the chip at the other end of the link (the party addendum,
 //!   section 8.3). The hook's [`Hook::port`] is the portal's port on the
-//!   hero's floor, its target is the far port's key
-//!   (`eth:chip:.../n`), and its reason is the `ModelReady` of a model
-//!   that runs on both chips, or the `LinkChanged` that brought the link
-//!   up. The goal is the portal's cell. The front door offers these hooks
+//!   hero's floor, and its reason is the `ModelReady` of a model that runs
+//!   on both chips, or the `LinkChanged` that brought the link up. The
+//!   hook holds no far key: its target is `None`. The quest's target, the
+//!   far port's key (`eth:chip:.../n`), is read from the link table when
+//!   the quest starts. The goal is the portal's cell. The front door offers these hooks
 //!   and decides what happens at the portal (see "Crossing" in
 //!   [`crate::saga`]); `plan` only walks the hero there.
 //!
@@ -88,7 +89,8 @@ pub enum Verb {
 pub struct Hook {
     pub verb: Verb,
     /// The entity the quest is about, for example the ready model a sage is
-    /// named after. `None` for explore and rest.
+    /// named after. `None` for explore, rest and cross (a crossing quest
+    /// takes its target, the far port's key, when it starts).
     pub target: Option<EntityKey>,
     /// The signal that raised the hook.
     pub reason: Cause,

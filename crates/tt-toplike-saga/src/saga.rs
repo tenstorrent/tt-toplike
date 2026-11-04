@@ -166,8 +166,11 @@
 //!   and a floor never holds two for one portal.
 //!
 //! A `ModelGone` takes the model's crossing hooks away; a member already
-//! walking to the portal keeps its quest. [`plan`] takes a crossing after a
-//! visit to the sage and before rest.
+//! walking to the portal keeps its quest. Every other ready model then
+//! offers its crossings again, in key order: a floor holds one hook per
+//! portal, so a second model on the same link had its offer refused while
+//! the first model's hook stood. [`plan`] takes a crossing after a visit to
+//! the sage and before rest.
 //!
 //! **At the portal.** The floor's hook for the portal is dropped. If the
 //! portal is open ([`Links::open`]), the hero steps in: `HeroCrossed` with
@@ -196,6 +199,17 @@
 //!   sages standing there, explore and rest); its vitality comes from the
 //!   far chip from now on; it dwells [`DWELL_TICKS`] ticks and then plans
 //!   with the far floor's crossing hooks.
+//!
+//! **Known limit: a peer record during a transit.** Only a record that
+//! changes a live mask checks the crossings in progress. A `LinkPeer` that
+//! recables the portal's port while a hero is in transit is not checked:
+//! the hero still arrives at the far end stored in its `transit`, and a
+//! later mask change on any chip re-checks the transit against the new
+//! cable and can break it with that unrelated chip's mask as the cause.
+//! This cannot happen today: real backends send no `LinkPeer`, and the
+//! mock's cables never change. When a real peer source lands, a `LinkPeer`
+//! should break every transit whose port it rebinds, with the `LinkPeer`
+//! as the cause.
 //!
 //! **Lines.** Each crossing line names the portal's port and the floor at
 //! the other end, counted from 1 as the view's floor tags count (`{port}`,
@@ -1062,6 +1076,14 @@ impl Saga {
                         self.start_quest(i, false);
                     }
                 }
+                // The gone model's crossing hooks left with it. A floor
+                // holds one hook per port, so another ready model on the
+                // same link had its offer refused; it offers again now, in
+                // key order. Hooks still on a floor stay as they are.
+                let others: Vec<EntityKey> = self.ready.keys().cloned().collect();
+                for other in &others {
+                    self.offer_model_crossings(other);
+                }
             }
         }
 
@@ -1221,6 +1243,12 @@ impl Saga {
                     signal: "LinkPeer".to_string(),
                     ordinal,
                 };
+                // Known limit (see "Crossing" in the module comment): a
+                // peer record that recables a port while a hero crosses it
+                // does not check the transit. Real backends send no
+                // `LinkPeer` and the mock's cables are fixed, so it cannot
+                // happen today; a real peer source should break such a
+                // transit here, with this record as the cause.
                 self.links.observe_peer(port, peer, cause);
                 self.portals_dirty = true;
             }

@@ -47,8 +47,10 @@
 //! the table with made-up chips first leaves the real ones without links;
 //! memory stays bounded either way.
 //!
-//! Records that name no Ethernet port, a port number of 64 or more, or the
-//! same port at both ends are ignored.
+//! Records that name no Ethernet port, a port number of 64 or more, a port
+//! number spelled other than in plain decimal digits (`/+5`, `/05`), or
+//! two ports of the same chip are ignored. A link always joins two chips,
+//! so a floor is never bound to itself.
 //!
 //! # Determinism
 //!
@@ -97,12 +99,22 @@ pub struct Links {
 /// The chip and port number of an Ethernet port key
 /// (`eth:chip:.../n`), or `None` for any other key and for a port of
 /// [`MAX_PORTS`] or more.
+///
+/// The number must be spelled the way [`EntityKey::eth_port`] writes it:
+/// ASCII digits only, with no leading zero unless the port is `0`. So
+/// `/+5` and `/05` name no port. Rust's integer parse alone would read
+/// both as port 5, and the table would then bind a port under a key that
+/// no view prints.
 fn split_port(key: &EntityKey) -> Option<(EntityKey, u8)> {
     if key.kind() != EntityKind::EthPort {
         return None;
     }
     let chip = key.chip_owner()?;
     let (_, n) = key.as_str().rsplit_once('/')?;
+    if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) || (n.len() > 1 && n.starts_with('0'))
+    {
+        return None;
+    }
     let port: u8 = n.parse().ok()?;
     (port < MAX_PORTS).then_some((chip, port))
 }
@@ -149,7 +161,10 @@ impl Links {
         let (Some((a, pa)), Some((b, pb))) = (split_port(port), split_port(peer)) else {
             return;
         };
-        if (&a, pa) == (&b, pb) || !self.has_room_for(&[&a, &b]) {
+        // A cable between two ports of one chip (or a port and itself)
+        // would bind a floor to itself; no hardware wires one, so the
+        // record is ignored whole.
+        if a == b || !self.has_room_for(&[&a, &b]) {
             return;
         }
         // Unlink each end's old far end, if it still points back.

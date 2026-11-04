@@ -615,7 +615,7 @@ fn push_value(out: &mut String, value: &str) {
 /// through per-kind constructors, and a process key takes numbers, so this
 /// goes through the key's serde form (a bare string), which accepts any
 /// text.
-fn entity_key(text: &str) -> EntityKey {
+pub(crate) fn entity_key(text: &str) -> EntityKey {
     use serde::de::value::{Error, StrDeserializer};
     use serde::de::IntoDeserializer;
     use serde::Deserialize;

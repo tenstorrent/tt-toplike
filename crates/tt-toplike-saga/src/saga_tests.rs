@@ -2236,5 +2236,42 @@ fn a_model_gone_takes_its_crossing_hooks_with_it() {
         model: EntityKey::model("demo-pair"),
     }));
     assert_eq!(saga.state.world.id, 3);
+    // demo-zpair still runs on both chips, so it offers the crossing
+    // again: one hook on each floor, with its own `ModelReady` as the
+    // reason.
+    for floor in 0..2 {
+        let hooks = &saga.cross_hooks[floor];
+        assert_eq!(hooks.len(), 1, "floor {floor}: {hooks:?}");
+        assert_eq!(hooks[0].reason.entity, EntityKey::model("demo-zpair"));
+    }
+    // When demo-zpair goes too, no ready model is left on the link.
+    saga.feed(&event(Event::ModelGone {
+        model: EntityKey::model("demo-zpair"),
+    }));
     assert!(saga.cross_hooks.iter().all(Vec::is_empty));
+}
+
+#[test]
+fn a_model_ready_that_births_no_world_offers_its_crossing() {
+    let mut saga = pair_saga(true, Provenance::Estimated);
+    assert_eq!(saga.cross_hooks[0].len(), 1);
+    // The heroes used the hooks up.
+    for hooks in &mut saga.cross_hooks {
+        hooks.clear();
+    }
+    // The world's own model is ready again: no new world, and the
+    // crossing is offered again on both floors.
+    let ordinal = saga.feed.ordinal() + 1;
+    saga.feed(&event(Event::ModelReady {
+        model: EntityKey::model("demo-pair"),
+        chips: vec![chip_a(), chip_b()],
+    }));
+    assert_eq!(saga.state.world.id, 2, "no birth");
+    for floor in 0..2 {
+        let hooks = &saga.cross_hooks[floor];
+        assert_eq!(hooks.len(), 1, "floor {floor}: {hooks:?}");
+        assert_eq!(hooks[0].verb, Verb::Cross);
+        assert_eq!(hooks[0].reason.entity, EntityKey::model("demo-pair"));
+        assert_eq!(hooks[0].reason.ordinal, ordinal, "the new record");
+    }
 }

@@ -1563,8 +1563,8 @@ struct Seat {
 /// draw it. While the lead is in transit the seat has no member: the map
 /// shows the floor the lead left, centred on the portal it stepped into,
 /// with no hero on it, and the status row says where the lead is going.
-/// A world of one floor has no link to cross, so its seat always has the
-/// lead.
+/// A world of one floor has no link to cross (the link table ignores a
+/// cable between two ports of one chip), so its seat always has the lead.
 fn lead_seat(state: &SagaState) -> Seat {
     let lead = &state.lead().hero;
     let pos = lead.pos;

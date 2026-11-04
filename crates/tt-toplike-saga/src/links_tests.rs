@@ -2,6 +2,7 @@
 //! of those are open.
 
 use super::*;
+use crate::chronicle::entity_key;
 use crate::event::Biome;
 use crate::maze;
 use crate::rng::Pcg32;
@@ -178,6 +179,73 @@ fn records_that_name_no_port_are_ignored() {
     assert_eq!(links.chips.len(), 0, "{links:?}");
     assert!(!links.live(&chip(0), 64));
     assert_eq!(links.peer(&chip(0), 1), None);
+}
+
+#[test]
+fn a_port_number_is_plain_decimal_digits() {
+    // A hand-written log can spell a port in ways the bus never writes.
+    // Only the spelling `EntityKey::eth_port` writes is read: plain digits,
+    // and no leading zero except for port 0 itself.
+    let chip_text = chip(0).as_str().to_string();
+    let key = |n: &str| entity_key(&format!("eth:{chip_text}/{n}"));
+    assert_eq!(key("5"), port(0, 5), "the test builds real keys");
+    for bad in [
+        "+5", "05", "00", "-1", " 5", "5 ", "", "5a", "0x5", "\u{0665}",
+    ] {
+        let mut links = Links::new();
+        links.observe_peer(&key(bad), &port(1, 1), cause(1));
+        links.observe_peer(&port(1, 2), &key(bad), cause(2));
+        assert_eq!(links.chips.len(), 0, "port {bad:?} was read: {links:?}");
+    }
+    let mut links = Links::new();
+    links.observe_peer(&key("0"), &key_on(1, "10"), cause(1));
+    assert_eq!(links.peer(&chip(0), 0), Some((chip(1), 10)));
+    assert_eq!(links.peer(&chip(1), 10), Some((chip(0), 0)));
+}
+
+/// The Ethernet port key `eth:<chip i>/<n>`, with `n` spelled as given.
+fn key_on(i: u8, n: &str) -> EntityKey {
+    entity_key(&format!("eth:{}/{n}", chip(i).as_str()))
+}
+
+#[test]
+fn a_repeated_record_and_a_cable_named_from_both_ends_give_one_entry() {
+    // One record, once.
+    let mut once = Links::new();
+    once.observe_peer(&port(0, 11), &port(1, 1), cause(1));
+    // The same record twice (the bus source sends every peer again on each
+    // full resend).
+    let mut twice = once.clone();
+    twice.observe_peer(&port(0, 11), &port(1, 1), cause(2));
+    assert_eq!(twice, once);
+    // The same cable announced from the far end, after the near one.
+    let mut both = once.clone();
+    both.observe_peer(&port(1, 1), &port(0, 11), cause(3));
+    assert_eq!(both, once);
+    // Only from the far end.
+    let mut far = Links::new();
+    far.observe_peer(&port(1, 1), &port(0, 11), cause(1));
+    assert_eq!(far, once);
+    // One symmetric entry: chip 0 port 11 and chip 1 port 1, nothing else.
+    check_bounds(&once);
+    assert_eq!(once.chips.len(), 2);
+    assert_eq!(once.chips[&chip(0)].peers.len(), 1);
+    assert_eq!(once.chips[&chip(1)].peers.len(), 1);
+}
+
+#[test]
+fn a_cable_between_two_ports_of_one_chip_is_ignored() {
+    // Such a record would bind a floor to itself. It is ignored whole: it
+    // adds no entry and unlinks nothing.
+    let mut links = Links::new();
+    links.observe_peer(&port(0, 1), &port(0, 2), cause(1));
+    assert_eq!(links.chips.len(), 0, "{links:?}");
+    links.observe_peer(&port(0, 1), &port(1, 2), cause(2));
+    let before = links.clone();
+    links.observe_peer(&port(0, 1), &port(0, 3), cause(3));
+    links.observe_peer(&port(1, 2), &port(1, 4), cause(4));
+    assert_eq!(links, before);
+    assert_eq!(links.peer(&chip(0), 1), Some((chip(1), 2)));
 }
 
 #[test]
