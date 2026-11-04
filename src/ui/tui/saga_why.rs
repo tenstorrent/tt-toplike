@@ -48,6 +48,7 @@ fn happened(signal: &str) -> Option<&'static str> {
         "tt_asic_temperature_celsius" => "reporting a new temperature",
         "tt_ai_clock_mhz" => "reporting a new clock speed",
         "toplike.heartbeat" => "beating its heart",
+        "toplike.eth.live_mask" => "changing which of its links are live",
         "toplike.train.step" => "finishing a training step",
         _ => return None,
     })
@@ -118,6 +119,18 @@ mod tests {
             )),
             "why: this goes back to chip 0000:01:00.0 reporting a new temperature (record 5)"
         );
+    }
+
+    #[test]
+    fn a_live_mask_change_says_a_link_changed() {
+        // A failed crossing's cause is the live-mask sample that closed the
+        // link. Its line says what changed in plain words.
+        let s = why_line(&cause("chip:0000:02:00.0", "toplike.eth.live_mask", 42));
+        assert_eq!(
+            s,
+            "why: this goes back to chip 0000:02:00.0 changing which of its links are live (record 42)"
+        );
+        assert!(!s.contains("eth live mask"), "{s}");
     }
 
     #[test]

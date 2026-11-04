@@ -174,8 +174,11 @@ pub const HELP_KEYS: &[&[(&str, &str)]] = &[
 
 /// The `!` text. Each claim is checked against the code: the floors in
 /// `tt_toplike_saga::maze` and `topology`, worlds in `world`, determinism in the crate's
-/// docs, causes in `chronicle`, names in `config.rs`, labels in spec 3.9,
-/// the light and memory in this module.
+/// docs, causes in `chronicle` and `saga_why.rs`, crossing in `links` and
+/// "Crossing" in `saga`, the `~` mark in `saga::ESTIMATED_MARK`, names in
+/// `config.rs`, labels in spec 3.9, the light and memory in this module.
+/// It fills the Explain panel's 30-row target at 80 columns exactly (26
+/// lines), so a new sentence needs an old one shortened.
 pub const EXPLAIN_TEXT: &[&str] = &[
     "Saga",
     "",
@@ -183,26 +186,26 @@ pub const EXPLAIN_TEXT: &[&str] = &[
     "this box's own signals. Each chip is a floor with its",
     "own hero. A Blackhole floor follows the chip's tile",
     "grid, with ruins over harvested columns, a vault per",
-    "GDDR channel and a portal per live Ethernet link.",
-    "Other chips get a default floor. Every floor has a gate",
-    "for PCIe. The seed, from the low bits of the readings,",
+    "GDDR channel and a portal per live Ethernet link. Other",
+    "chips get a default floor. Every floor has a gate for",
+    "PCIe. The seed, from the low bits of the readings,",
     "places the rooms. A model coming up raises a world with",
     "a sage to visit; a training run raises a forge that ends",
     "when the run stops. A reset, the model going away or a",
     "quiet season ends a world, and the next gets a new maze.",
     "",
-    "A hero's light shows what it can see; the map keeps what",
-    "it has seen, dimmed, until the world changes. A hot chip",
-    "warms its floor's colour. With more than one chip each",
-    "floor gets a tile and each line names its floor (F3):",
-    "[ and ] move the focus, z shows the focused floor alone.",
-    "The same recording gives the same story. Every line has",
-    "a cause: press y to see its entity, its signal (or \"no",
-    "signal\") and its place in the stream.",
+    "The map keeps what a hero's light showed, dimmed, until",
+    "the world changes. A hot chip warms its floor. With more",
+    "than one chip each floor gets a tile and each line names",
+    "its floor (F3). A hero can cross a portal to the linked",
+    "chip's floor while the link is live. [ and ] move the",
+    "focus; z shows the focused floor alone.",
     "",
-    "For screen sharing, set names = \"generated\" under",
-    "[saga]. (mock) in the title means --mock estimates;",
-    "(replay) means a recorded log is playing.",
+    "The same recording gives the same story; y shows what",
+    "caused a line. (mock) in the title means --mock",
+    "estimates, and ~ ends a line built from them; (replay)",
+    "means a recorded log. For screen sharing, set names =",
+    "\"generated\" under [saga].",
 ];
 
 /// What the view draws besides the state. None of it reaches the core: the
@@ -3071,7 +3074,15 @@ pub fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'static>> {
                 format!("{} triumphant", tone_mark(Tone::Triumphant)),
                 fg(p.yellow),
             ),
-            ("  names in bold".to_string(), dim),
+            // A line that ends in `~` was built from estimated readings
+            // (spec 3.9), as every `--mock` crossing line is.
+            (
+                format!(
+                    "  {} estimated  names in bold",
+                    tt_toplike_saga::saga::ESTIMATED_MARK
+                ),
+                dim,
+            ),
         ]),
         line(vec![(
             "t42  the tick the line was written at (one per sweep)".to_string(),

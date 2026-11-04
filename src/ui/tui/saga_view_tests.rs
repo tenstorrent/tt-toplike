@@ -775,8 +775,16 @@ fn the_overlays_fit_their_row_targets() {
                 "roster",
                 "crossing",
                 "portal open to F2",
+                // The final fix wave (m6): the chronicle's `~` mark.
+                "~ estimated",
             ],
-            OverlayPanel::Explain => &["F3", "z shows the focused floor"],
+            // The final fix wave (m6): crossing and the `~` mark.
+            OverlayPanel::Explain => &[
+                "F3",
+                "z shows the focused floor",
+                "can cross",
+                "~ ends a line",
+            ],
         };
         for w in want {
             assert!(all.contains(w), "{kind:?} has {w:?}: {all}");
