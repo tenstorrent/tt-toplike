@@ -27,7 +27,7 @@ list is a summary and is not kept for every release.
 - The focused tile is drawn with its light, glow and trail; the other tiles are drawn calmer (one
   colour, a still goal, a hero that hops a few cells at a time), each tile's window moves in steps,
   and the chronicle's new lines arrive every two seconds. So 32 chips at 140x40 send the terminal
-  about 18 KB/s, inside the view's 20 KB/s budget.
+  about 19 KB/s, inside the view's 20 KB/s budget.
 - One chronicle holds every floor's lines, each tagged with its floor (`F3`) in the floor's colour.
   To keep it readable, one floor's quest lines are written per second; a hero not heard for 300
   ticks goes first. A party's birth writes one line for the whole party.

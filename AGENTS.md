@@ -2210,8 +2210,8 @@ What to know before changing it:
 * Terminal traffic (Task A.9). Measure it with `python3 tools/party_traffic.py <binary> --runs 3
   -- --mock 32 --mode saga`: a 140 x 40 pty, `TERM=xterm-256color COLORTERM=truecolor`, the bytes
   the TUI writes from 20 s to 40 s of a 40 s run, runs one after another. Set `XDG_CONFIG_HOME` to
-  an empty directory. The final 0.17.0 binary: `--mock 32` 16.8, 17.6 and 19.7 KB/s (mean 18.0),
-  inside the 20 KB/s budget; `--mock 1` 17.5, 13.8 and 17.6 (mean 16.3). The A.8 binary, by the
+  an empty directory. The final 0.17.0 binary: `--mock 32` 19.6, 19.1 and 17.4 KB/s (mean 18.7),
+  inside the 20 KB/s budget; `--mock 1` 16.0, 16.8 and 13.8 (mean 15.6). The A.8 binary, by the
   same tool on the same box: `--mock 32` 193.2, 192.0 and 168.5 (mean 184.6); `--mock 1` 13.8,
   19.0 and 16.6 (mean 16.4). One chip's view did not change (its frames are pinned).
 * Where the bytes went, by `print_party_traffic` (an ignored lib test that renders consecutive

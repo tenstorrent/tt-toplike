@@ -383,9 +383,9 @@ saga's settings and every problem in the section.
   of neighbouring tiles can look joined.
 * Terminal traffic, measured with `python3 tools/party_traffic.py <binary> --runs 3 -- --mock N
   --mode saga` (a 140 x 40 pty, bytes written from 20 s to 40 s of a 40 s run): `--mock 32` sends
-  about 18 KB/s (16.8, 17.6 and 19.7 KB/s in three runs), inside the 20 KB/s budget for a quiet
-  world; before the calmer tiles it sent about 185 KB/s. One chip sends about 16 KB/s (13.8, 17.5
-  and 17.6), as before. The margin is small: a busier story with more walking can pass 20 KB/s.
+  about 19 KB/s (19.6, 19.1 and 17.4 KB/s in three runs), inside the 20 KB/s budget for a quiet
+  world; before the calmer tiles it sent about 185 KB/s. One chip sends about 16 KB/s (16.0, 16.8
+  and 13.8), as before. The margin is small: a busier story with more walking can pass 20 KB/s.
   The test `the_party_view_stays_inside_its_traffic_budget` bounds the bytes a frame on the 32-chip
   test log.
 * The calm tiles show no light around their heroes, so a hero on an unfocused tile is easiest to

@@ -5,7 +5,7 @@ tt-toplike (0.17.0) noble; urgency=medium
     the view shows every floor at once as a grid of tiles, each following
     its hero under a one-row HUD (floor tag, name, vitality, quest). The
     focused tile is drawn with its light and glow; the others are drawn
-    calmer, so 32 chips at 140x40 send the terminal about 18 KB/s.
+    calmer, so 32 chips at 140x40 send the terminal about 19 KB/s.
   * In Saga, "[" and "]" move the focus from floor to floor, and the page
     follows the focus; "z" shows the focused floor alone. A roster row lists
     every hero and says how many chips have no floor. A box with more than
