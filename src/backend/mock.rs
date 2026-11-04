@@ -105,6 +105,30 @@ fn next_heartbeat(h: u32) -> u32 {
     h.checked_add(1).unwrap_or(1)
 }
 
+/// Whether the mock's ring link at chip `device_idx` is dark at update
+/// `update`. It scripts a flap so that a `--mock` saga can show a crossing:
+/// a hero crosses when a link comes up, and a mock whose mask never changes
+/// would never offer one.
+///
+/// Each chip's ring port goes dark for 8 to 12 s and comes back, again and
+/// again. Mock time is the update count, and one update is one tick, 0.1 s
+/// at the default 10 Hz, so the numbers below are in tenths of a second.
+///
+/// * The cycle is 600, 700 or 800 updates (60, 70 or 80 s), by chip.
+/// * The dark stretch is 80 to 120 updates (8 to 12 s), by chip.
+/// * The first fall is at update 100 plus a per-chip offset inside the
+///   cycle, so chips do not flap together and nothing is dark at the start.
+///
+/// It is a function of the chip and the update count alone, so the same
+/// mock time gives the same answer in every run.
+fn ring_link_is_dark(device_idx: usize, update: usize) -> bool {
+    let i = device_idx;
+    let cycle = 600 + 100 * (i % 3);
+    let dark = 80 + 10 * (i % 5);
+    let first = 100 + (i * 173) % cycle;
+    update >= first && (update - first) % cycle < dark
+}
+
 impl MockBackend {
     /// Create a new mock backend with specified number of devices
     ///
@@ -353,15 +377,30 @@ impl MockBackend {
         // provenance; the source that turns this into `LinkPeer` events is
         // the mock's `Estimated` one, so a log marks them as made up.)
         let low_live = eth_live & LOW_PORTS;
-        let eth_peers = if self.device_count > 1 && low_live != 0 {
+        let ring_port = (low_live != 0).then(|| (63 - low_live.leading_zeros()) as u8);
+        let eth_peers = if let (true, Some(port)) = (self.device_count > 1, ring_port) {
             let next = &self.devices[(device_idx + 1) % self.device_count];
             Some(vec![EthPeer {
-                port: (63 - low_live.leading_zeros()) as u8,
+                port,
                 peer_bus_id: next.bus_id.clone(),
                 peer_port: low_live.trailing_zeros() as u8,
             }])
         } else {
             None
+        };
+
+        // The scripted flap (see `ring_link_is_dark`): the near end of the
+        // ring link drops out of the mask for a short stretch. The peers
+        // above were taken from the steady mask, so the wiring is the same
+        // while the port is dark; the far end's bit stays up. Like every
+        // mock reading, the source marks it `Estimated`.
+        let eth_live = match ring_port {
+            Some(port)
+                if self.device_count > 1 && ring_link_is_dark(device_idx, self.update_count) =>
+            {
+                eth_live & !(1u64 << port)
+            }
+            _ => eth_live,
         };
 
         let harvesting_state = if is_harvested {
@@ -683,6 +722,94 @@ mod tests {
         let before = backend.smbus_telemetry(2).unwrap().eth_peers.clone();
         backend.update().unwrap();
         assert_eq!(backend.smbus_telemetry(2).unwrap().eth_peers, before);
+    }
+
+    /// The live mask of chip `i`, as the mock reports it now.
+    fn mask_of(b: &MockBackend, i: usize) -> u64 {
+        b.smbus_telemetry(i).unwrap().eth_live_status.unwrap()
+    }
+
+    #[test]
+    fn the_mock_flaps_one_ring_link_on_a_slow_schedule() {
+        // Four chips, 3,000 updates (five minutes of mock time at 10 Hz).
+        let n = 4;
+        let mut backend = MockBackend::new(n);
+        backend.init().unwrap();
+        let steady = mask_of(&backend, 0);
+        let ring_port = backend
+            .smbus_telemetry(0)
+            .unwrap()
+            .eth_peers
+            .as_ref()
+            .unwrap()[0]
+            .port;
+        let peers_before: Vec<_> = (0..n)
+            .map(|i| backend.smbus_telemetry(i).unwrap().eth_peers.clone())
+            .collect();
+        let mut series: Vec<Vec<u64>> = vec![Vec::new(); n];
+        for _ in 0..3_000 {
+            backend.update().unwrap();
+            for (i, s) in series.iter_mut().enumerate() {
+                s.push(mask_of(&backend, i));
+            }
+            // The ring itself never changes: the peers stay as wired.
+            for (i, before) in peers_before.iter().enumerate() {
+                assert_eq!(&backend.smbus_telemetry(i).unwrap().eth_peers, before);
+            }
+        }
+        let mut first_drop = Vec::new();
+        for (i, s) in series.iter().enumerate() {
+            // Only the ring port's bit ever differs from the steady mask,
+            // and it only ever goes down.
+            let bit = 1u64 << ring_port;
+            assert!(s.iter().all(|m| *m == steady || *m == steady & !bit));
+            // Runs of "down": each is 80 to 120 updates (8 to 12 s), and
+            // there are several, so the flap repeats.
+            let mut runs = Vec::new();
+            let mut start = None;
+            for (t, m) in s.iter().enumerate() {
+                match (m & bit == 0, start) {
+                    (true, None) => start = Some(t),
+                    (false, Some(a)) => {
+                        runs.push((a, t - a));
+                        start = None;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(runs.len() >= 3, "chip {i} flaps again and again: {runs:?}");
+            for (a, len) in &runs {
+                assert!(
+                    (80..=120).contains(len),
+                    "chip {i} is dark {len} updates from {a}"
+                );
+            }
+            // A slow cycle: starts are 600 to 800 updates apart.
+            for w in runs.windows(2) {
+                let gap = w[1].0 - w[0].0;
+                assert!((600..=800).contains(&gap), "chip {i}: {gap} between flaps");
+            }
+            // It is not dark at the start, so the first sight is whole.
+            assert_eq!(s[0], steady);
+            first_drop.push(runs[0].0);
+        }
+        first_drop.sort_unstable();
+        first_drop.dedup();
+        assert_eq!(first_drop.len(), n, "the chips do not flap together");
+        // Deterministic: the same mock time gives the same masks.
+        let mut again = MockBackend::new(n);
+        again.init().unwrap();
+        for t in 0..3_000 {
+            again.update().unwrap();
+            assert_eq!(mask_of(&again, 0), series[0][t]);
+        }
+        // One chip has no ring and no flap.
+        let mut one = MockBackend::new(1);
+        one.init().unwrap();
+        for _ in 0..1_500 {
+            one.update().unwrap();
+            assert_eq!(mask_of(&one, 0), steady);
+        }
     }
 
     #[test]

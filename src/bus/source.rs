@@ -775,6 +775,91 @@ mod tests {
         }
     }
 
+    /// The `LinkChanged` events in a poll, as (chip, mask) pairs.
+    fn link_changes(o: &[Payload]) -> Vec<(EntityKey, u16)> {
+        o.iter()
+            .filter_map(|p| match p {
+                Payload::Event(Event::LinkChanged { chip, mask }) => Some((chip.clone(), *mask)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_mock_flap_rise_emits_one_link_changed() {
+        // Chip 0 of a two-chip mock. Its ring port goes dark for a while
+        // and comes back: the fall and the rise each make one
+        // `LinkChanged`, and every other poll makes none.
+        use crate::backend::mock::MockBackend;
+        let mut backend = MockBackend::new(2);
+        backend.init().unwrap();
+        let mut src = BackendSource::new();
+        let chip = EntityKey::chip(&backend.devices()[0].bus_id);
+        let mut changes = Vec::new();
+        for t in 0..1_500 {
+            backend.update().unwrap();
+            for (c, m) in link_changes(&poll_dyn(&mut src, &backend)) {
+                if c == chip {
+                    changes.push((t, m));
+                }
+            }
+        }
+        // 1,500 updates hold two flaps of chip 0, so at least two falls and
+        // two rises.
+        assert!(changes.len() >= 4, "{changes:?}");
+        let steady = 0xAAAA_u16;
+        for pair in changes.chunks_exact(2) {
+            assert_eq!(pair[0].1, steady & !(1 << 11), "the fall: {pair:?}");
+            assert_eq!(pair[1].1, steady, "the rise: {pair:?}");
+            assert!((80..=120).contains(&(pair[1].0 - pair[0].0)));
+        }
+    }
+
+    #[test]
+    fn a_mock_run_offers_a_crossing() {
+        // `--mock 4` end to end without a bus, over enough mock time for
+        // the links to flap: the source feeds a saga, and the saga writes
+        // a crossing line. It has no model, so the only way a hook is
+        // offered is the `LinkChanged` that follows a rise.
+        use crate::backend::mock::MockBackend;
+        use tt_toplike_bus::Record;
+        use tt_toplike_saga::chronicle::NameMode;
+        use tt_toplike_saga::{Label, Saga, SagaConfig};
+        let mut backend = MockBackend::new(4);
+        backend.init().unwrap();
+        // The mock's own source: every reading is `Estimated`, so the
+        // crossing line carries the `~`.
+        let mut src = BackendSource::with_provenance(Provenance::Estimated);
+        let mut saga = Saga::new(SagaConfig {
+            season_ticks: 12_000,
+            names: NameMode::Real,
+            label: Label::Mock,
+        });
+        let mut crossed = false;
+        for _ in 0..6_000 {
+            backend.update().unwrap();
+            for payload in poll_dyn(&mut src, &backend) {
+                saga.feed(&Record {
+                    seq: 0,
+                    t_mono_ns: 0,
+                    t_wall_ms: 0,
+                    source: "backend".to_string(),
+                    payload,
+                });
+            }
+            if saga
+                .state()
+                .chronicle
+                .lines(usize::MAX)
+                .any(|b| b.text.contains("portal") && b.text.ends_with('~'))
+            {
+                crossed = true;
+                break;
+            }
+        }
+        assert!(crossed, "a mock saga shows a crossing line marked `~`");
+    }
+
     #[test]
     fn a_real_backend_emits_no_link_peer() {
         // A real backend reports a live mask and no peers (`None`). This

@@ -2388,10 +2388,19 @@ recording, replayed with `--headless --replay DIR --speed 50 --bus-dir DIR2`:
 | `--mock 32` | 70,390, 1 world, 14 beats | `0x7f96a9496a75fea5` | span 0.199 s against 11.930 s, same digest |
 | second `--mock 4` | 9,048, 1 world, 11 beats | `0x6f82483e31a9010c` (differs) | |
 
-A plain `--mock` run shows no crossing: its live masks never change (no `LinkChanged`) and it
-announces no model, so no crossing hook is ever offered, although its four `LinkPeer` events bind
-the portals. Crossings come from logs with a model on two linked chips or a link coming up
-(`cross4.jsonl`, whose chronicle shows crossing lines ending in `~`).
+In 0.18.0 as first built, a plain `--mock` run showed no crossing: its live masks never changed
+(no `LinkChanged`) and it announces no model, so no crossing hook was offered, although its four
+`LinkPeer` events bound the portals. Task B.7 fixed that. The mock backend (`ring_link_is_dark` in
+`src/backend/mock.rs`) drops each chip's ring port bit from the live mask for 80 to 120 updates
+(8 to 12 s at 10 Hz) on a cycle of 600, 700 or 800 updates, first fall at update 100 plus an
+offset by chip. The peers are taken from the steady mask, so the wiring does not change; the far
+end stays up. The source already sent `LinkChanged` on a mask change, so the rise now offers a
+crossing, and a `--mock N` (N of 2 or more) chronicle gets crossing lines ending in `~`. The flap
+also darkens that port's cage in the Wafer Waffler and other views of the mask for those seconds. Crossings
+also come from logs with a model on two linked chips (`cross4.jsonl`).
+B.7 smoke (release, `--mock 4`, 150 s): 109,532 records, 152 beats, 20 `HeroCrossed`, digest
+`0xb5ecf34f983007b8` three times (twice in place, once after `--replay --speed 50`). Crossing lines
+end in `~`. `tools/party_traffic.py` at `--mock 32`, 3 runs: 15.6, 18.4 and 14.7 KB/s (mean 16.3).
 
 0.17.0 (digest version 2, Task A.8), each a 12-second `--headless --mock N` recording:
 

@@ -30,6 +30,9 @@ list is a summary and is not kept for every release.
   so a hero who has crossed away can show on it for up to 5 ticks.
 - On real hardware no backend writes `LinkPeer` yet, so the far side of a link is unknown and no
   hero crosses. Only `--mock` (a ring of its own chips) and recorded logs carry it.
+- `--mock` with two or more chips now flaps one ring port per chip now and then (dark for 8 to 12
+  seconds every 60 to 80 seconds, each chip at its own time), so a mock saga shows crossings. The
+  port's cage in the Wafer Waffler goes dark for those seconds.
 - The saga digest's encoding is now version 3, so `--saga-digest` prints a different number than
   0.17 did for the same log. The bus crate is 0.2.0 and the saga crate is 0.3.0.
 

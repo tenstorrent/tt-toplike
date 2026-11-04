@@ -206,10 +206,21 @@ both ports of a link (`eth:<chip>/<n>`), and the saga keeps a link table from th
 * **The far side is unknown on real hardware until a link source exists.** Only the mock backend
   (a ring: each chip's highest live port in the low 12 to the next chip's lowest live port, marked
   as an estimate) and recorded logs carry `LinkPeer` today. No real backend writes it, so on real
-  hardware every portal is unbound and no hero crosses. A real source is future work. A plain
-  `--mock` run binds its portals but never crosses: its live masks never change and it announces
-  no model, so no crossing quest is offered. Crossings appear in recorded logs that carry a model
-  on two linked chips or a link coming up, such as the `cross4.jsonl` test fixture.
+  hardware every portal is unbound and no hero crosses. A real source is future work. A `--mock`
+  run with two or more chips flaps its ring links now and then, so a mock saga shows crossings
+  (see "The mock's flap" below). Crossings also appear in recorded logs that carry a model on two
+  linked chips or a link coming up, such as the `cross4.jsonl` test fixture.
+* **The mock's flap.** The mock announces no model, so a hero can cross only when a link comes
+  up. Each mock chip's ring port (the near end of its ring link) drops out of the live mask for
+  8 to 12 seconds and comes back, again and again. The cycle is 60, 70 or 80 seconds by chip, and
+  each chip's first fall is at a different time (the earliest at 10 seconds), so the links do not
+  flap together. The times are in mock time, which is one update per tick (0.1 s at the default
+  10 Hz). The far end's bit stays up and the wiring does not change, so a `LinkPeer` is not sent
+  again. The bus source sends a `LinkChanged` on the fall and on the rise, and the rise offers a
+  hero a crossing. All of it is `Estimated`, so the lines end in `~`. A flap also darkens that
+  port's cage in the Wafer Waffler for those seconds. A single-chip mock has no ring and no flap. A hero
+  needs time to plan and walk, so expect the first crossing in the 4-chip mock after about a
+  minute or two.
 * **Limits.** At most 32 heroes are in transit. The link table holds at most 64 chips by 64 ports.
   A floor holds at most one crossing hook per portal. Crossing lines skip the routine pace, and a
   hero dwells 30 ticks after each crossing, so the party writes at most about one crossing line per
