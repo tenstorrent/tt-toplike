@@ -961,14 +961,17 @@
 <!-- ── Modes ──────────────────────────────────────────────────────────────── -->
 <section class="section edge" id="modes">
   <p class="section-label">Visualization modes</p>
-  <h2 class="section-heading">Nine ways to watch your hardware think</h2>
+  <h2 class="section-heading">Ways to watch your hardware think</h2>
   <p class="section-sub">
     Press <code>v</code> to cycle, or jump directly with <code>a</code> (Arcade),
     <code>d</code> (Defrag), <code>g</code> (Insights), <code>i</code> (Inference
-    Server Monitor), or <code>~</code> (HivemindSweeper). Every mode reads the same
+    Server Monitor), <code>3</code> (Wafer Waffler), <code>S</code> (Saga), or
+    <code>~</code> (HivemindSweeper). Every mode reads the same
     live telemetry — power, temperature, aiclk, DDR state — and renders it
-    differently. Recordings below are from real 4× Blackhole hardware during live
-    LLM inference.
+    differently. Most recordings below are from real 4× Blackhole hardware during live
+    LLM inference. The four newest (Wafer Waffler, Saga, arcade layouts and plugin views)
+    were recorded with <code>--mock 4</code>, which simulates the telemetry, so they
+    show how each view looks and behaves and not a real board's numbers.
   </p>
 
   <div class="modes-grid">
@@ -1283,6 +1286,145 @@
              poster="assets/tt-toplike-training-lora.png"
              autoplay loop muted playsinline
              aria-label="Training view beside a live LoRA fine-tune on Blackhole: the trainer streams on the left while the right pane shows the resolved model card, live tokens per second, and a loss mountain range shaded pink through violet to deep blue"></video>
+    </div>
+
+    <hr class="mode-divider">
+
+    <!-- Wafer Waffler -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">3 · waffler</span>
+        <p class="mode-title">Wafer Waffler</p>
+        <p class="mode-desc">
+          Each Blackhole board in isometric 3D: one block per die, with the Tensix,
+          GDDR, Ethernet and management tiles in place. The cells are braille dots,
+          quarter blocks or half blocks, and the view picks a style from what the
+          hardware reports. The camera cuts when something happens: a chip's activity
+          rises, PCIe traffic passes 50&nbsp;MB/s, a GDDR passes 65&nbsp;°C, or an Ethernet
+          link comes up or goes down. The footer names the cause of each cut.
+        </p>
+        <p class="mode-desc">
+          Chip power, temperature, GDDR temperature and PCIe traffic are real readings.
+          The glow on each tile is an estimate from chip load, and the footer says so.
+          The clouds behind the dies are decoration. Blackhole chips only.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>3</kbd> open</span>
+          <span class="mode-hint"><kbd>[</kbd> <kbd>]</kbd> board</span>
+          <span class="mode-hint"><kbd>space</kbd> cut the camera</span>
+          <span class="mode-hint"><kbd>/cells</kbd> cell style</span>
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+          <span class="mode-hint"><kbd>!</kbd> explain</span>
+        </div>
+      </div>
+      <video class="mode-gif" src="assets/gifs/14-wafer-waffler.webm" autoplay muted loop playsinline
+             aria-label="Wafer Waffler: one Blackhole board in isometric 3D with its history panel and footer, recorded with simulated telemetry"></video>
+    </div>
+
+    <hr class="mode-divider">
+
+    <!-- Saga -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">S · saga</span>
+        <p class="mode-title">Saga</p>
+        <p class="mode-desc">
+          A party of heroes quests through a dungeon built from the machine's own
+          signals. Each chip is a floor with its own hero, and every floor is on
+          screen at once. A model becoming ready, a reset, a model going away, a
+          training run or a quiet season ends a world, and the next one has a new maze.
+          One chronicle tells what happens on every floor, each line tagged with its
+          floor, and <kbd>y</kbd> says in a sentence what set a line off.
+        </p>
+        <p class="mode-desc">
+          A hero can walk through an Ethernet portal into the floor of the chip at the
+          other end of the link. Today only <code>--mock</code> and recorded logs carry
+          the far end of a link, so on real hardware the portals are scenery. The same
+          recorded log always tells the same saga, and
+          <code>--bus-inspect DIR --saga-digest</code> prints a digest to compare a
+          recording with its replay.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>S</kbd> open</span>
+          <span class="mode-hint"><kbd>[</kbd> <kbd>]</kbd> move focus between floors</span>
+          <span class="mode-hint"><kbd>z</kbd> one floor alone</span>
+          <span class="mode-hint"><kbd>y</kbd> why this line</span>
+          <span class="mode-hint"><kbd>l</kbd> legend</span>
+        </div>
+      </div>
+      <video class="mode-gif" src="assets/gifs/13-saga.webm" autoplay muted loop playsinline
+             aria-label="Saga: one hero per chip on a grid of dungeon floors with a chronicle, recorded with simulated telemetry"></video>
+    </div>
+
+    <hr class="mode-divider">
+
+    <!-- Composable arcade -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">{ } · arcade layouts</span>
+        <p class="mode-title">A composable Arcade</p>
+        <p class="mode-desc">
+          The arcade is a stack of rows, and each row holds panels: the starfield,
+          castle, defrag, flow, the Wafer Waffler, Saga, the inference monitor and
+          more. Eight layouts ship. <code>classic</code> is the screen the arcade
+          always had, and <code>now-serving</code> puts the inference monitor over the
+          Wafer Waffler and Saga. <code>deck</code>, <code>skyline</code>,
+          <code>memory-lane</code>, <code>defrag-wide</code>, <code>waffler</code> and
+          <code>workload</code> arrange the same panels differently.
+        </p>
+        <p class="mode-desc">
+          Step through them with <kbd>{</kbd> and <kbd>}</kbd>, or name one with
+          <code>/arcade layout &lt;name&gt;</code> or <code>--arcade-layout</code>. Write
+          your own as <code>[[arcade.layouts]]</code> tables in <code>config.toml</code>.
+          A panel that does not fit is dropped and named on its row's rule. No layout
+          draws a right-side border character at any width.
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>a</kbd> arcade</span>
+          <span class="mode-hint"><kbd>{</kbd> <kbd>}</kbd> previous / next layout</span>
+          <span class="mode-hint"><kbd>/arcade layout list</kbd></span>
+          <span class="mode-hint"><kbd>w</kbd> backdrop</span>
+        </div>
+      </div>
+      <video class="mode-gif" src="assets/gifs/15-arcade-layouts.webm" autoplay muted loop playsinline
+             aria-label="Arcade stepping through five of its eight layouts, recorded with simulated telemetry"></video>
+    </div>
+
+    <hr class="mode-divider">
+
+    <!-- Plugin views -->
+    <div class="mode-row">
+      <div class="mode-meta">
+        <span class="mode-key">--viz · plugin views</span>
+        <p class="mode-title">Add your own view</p>
+        <p class="mode-desc">
+          A new full-screen view needs no edits to the rest of the program. A YAML or
+          JSON file in <code>~/.config/tt-toplike/viz/</code> describes the layout and
+          the widgets (gauge, sparkline, table, log, grid, heat strip and text), with
+          thresholds that recolour them. The program checks the folder every two
+          seconds, so a saved edit appears without a restart, and an edit that does not
+          load keeps the last good version on screen and says why. A JSON Schema is
+          published for editors and agents.
+        </p>
+        <p class="mode-desc">
+          For more control, a plugin is a Rust folder under <code>src/viz/plugins/</code>
+          that the build finds by itself, so a pull request touches one folder and
+          never conflicts with another plugin. A plugin that panics is switched off and
+          the program keeps running. Two examples ship, hidden until you ask for them:
+          <code>example-pulse</code> (Rust) and <code>thermal-board</code> (YAML).
+        </p>
+        <div class="mode-hints">
+          <span class="mode-hint"><kbd>tt-toplike viz new my-view --yaml</kbd></span>
+          <span class="mode-hint"><kbd>tt-toplike viz list</kbd></span>
+          <span class="mode-hint"><kbd>--viz my-view</kbd> start on it</span>
+          <span class="mode-hint"><kbd>v</kbd> cycle to it</span>
+        </div>
+        <p class="mode-desc">
+          The reference is <a href="https://github.com/tenstorrent/tt-toplike/blob/what-if/docs/viz-plugins.md" target="_blank" rel="noopener">docs/viz-plugins.md</a>.
+        </p>
+      </div>
+      <video class="mode-gif" src="assets/gifs/16-viz-plugins.webm" autoplay muted loop playsinline
+             aria-label="The viz list command, then the thermal-board YAML view and the example-pulse Rust view, recorded with simulated telemetry"></video>
     </div>
 
     <hr class="mode-divider">
