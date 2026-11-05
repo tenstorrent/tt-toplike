@@ -40,18 +40,42 @@ FRAME_MARK = b"\x1b[?25l"
 ALT_MARK = b"\x1b[?1049h"
 
 
+def checked_binary(path):
+    """Resolve `path` to an absolute path and require an executable regular file.
+
+    The path comes from the command line and is handed to exec, so it is
+    checked before the fork. No shell is involved: the binary and its
+    arguments go to execv as a list, and nothing is interpreted as code.
+    """
+    full = os.path.realpath(path)
+    if not (os.path.isfile(full) and os.access(full, os.X_OK)):
+        sys.exit(f"not an executable file: {path}")
+    return full
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
         sys.exit(2)
-    binp, args, secs = sys.argv[1], sys.argv[2:-1], float(sys.argv[-1])
-    cols = int(os.environ.get("STARTUP_COLS", "140"))
-    rows = int(os.environ.get("STARTUP_ROWS", "40"))
+    binp, args = checked_binary(sys.argv[1]), sys.argv[2:-1]
+    try:
+        secs = float(sys.argv[-1])
+        cols = int(os.environ.get("STARTUP_COLS", "140"))
+        rows = int(os.environ.get("STARTUP_ROWS", "40"))
+    except ValueError:
+        sys.exit("the last argument must be a number of seconds; "
+                 "STARTUP_COLS and STARTUP_ROWS must be whole numbers")
+    if not (1 <= cols <= 1000 and 1 <= rows <= 1000):
+        sys.exit("STARTUP_COLS and STARTUP_ROWS must be between 1 and 1000")
     pid, fd = pty.fork()
     if pid == 0:
         os.environ["TERM"] = "xterm-256color"
         os.environ["COLORTERM"] = "truecolor"
-        os.execv(binp, [binp] + args)
+        try:
+            os.execv(binp, [binp] + args)
+        finally:
+            # Only reached if exec failed; stop the child here.
+            os._exit(127)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     t0 = time.time()
     first = None

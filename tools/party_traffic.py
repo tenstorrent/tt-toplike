@@ -41,13 +41,31 @@ import termios
 import time
 
 
+def checked_binary(path):
+    """Resolve `path` to an absolute path and require an executable regular file.
+
+    The path comes from the command line and is handed to exec, so it is
+    checked before the fork. No shell is involved: the binary and its
+    arguments go to execv as a list, and nothing is interpreted as code.
+    """
+    full = os.path.realpath(path)
+    if not (os.path.isfile(full) and os.access(full, os.X_OK)):
+        sys.exit(f"not an executable file: {path}")
+    return full
+
+
 def one_run(binp, args, secs, a, b, cols, rows):
     """Bytes written between `a` and `b` seconds of one run of `secs`."""
     pid, fd = pty.fork()
     if pid == 0:
         os.environ["TERM"] = "xterm-256color"
         os.environ["COLORTERM"] = "truecolor"
-        os.execv(binp, [binp] + args)
+        try:
+            os.execv(binp, [binp] + args)
+        finally:
+            # Only reached if exec failed. Without this the child would
+            # carry on running this script's own code as a second process.
+            os._exit(127)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
     t0 = time.time()
     counted = 0
@@ -86,12 +104,18 @@ def main():
     args = argv[cut + 1:]
     if not (0 <= o.a < o.b <= o.secs):
         sys.exit("need 0 <= --from < --to <= --secs")
-    cols = int(os.environ.get("STARTUP_COLS", "140"))
-    rows = int(os.environ.get("STARTUP_ROWS", "40"))
+    binp = checked_binary(o.binary)
+    try:
+        cols = int(os.environ.get("STARTUP_COLS", "140"))
+        rows = int(os.environ.get("STARTUP_ROWS", "40"))
+    except ValueError:
+        sys.exit("STARTUP_COLS and STARTUP_ROWS must be whole numbers")
+    if not (1 <= cols <= 1000 and 1 <= rows <= 1000):
+        sys.exit("STARTUP_COLS and STARTUP_ROWS must be between 1 and 1000")
     span = o.b - o.a
     rates = []
     for i in range(o.runs):
-        n = one_run(o.binary, args, o.secs, o.a, o.b, cols, rows)
+        n = one_run(binp, args, o.secs, o.a, o.b, cols, rows)
         rate = n / span / 1000
         rates.append(rate)
         print(f"run {i + 1}: {n} bytes from {o.a:.0f} s to {o.b:.0f} s = {rate:.1f} KB/s")
