@@ -721,7 +721,7 @@ fn a_panic_in_any_plugin_method_turns_the_plugin_off_and_does_not_unwind() {
         let area = Rect::new(0, 0, 20, 4);
         let c = Color::Reset;
         // Each call returns normally, whether or not the plugin panics.
-        let mut exercise = |host: &mut VizHost| match method {
+        let exercise = |host: &mut VizHost| match method {
             "min_size" | "render" => {
                 let mut buf = Buffer::empty(area);
                 let _ = host.render_into(h, &mut buf, area, None);

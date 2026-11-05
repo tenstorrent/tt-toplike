@@ -694,6 +694,7 @@ fn deny_reason_does_not_echo_unknown_state() {
 
 // ---- the real runner, against scripts ----
 
+#[cfg(unix)]
 mod command_runner {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
