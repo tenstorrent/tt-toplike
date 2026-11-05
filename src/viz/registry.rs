@@ -253,6 +253,20 @@ impl Registry {
         }
     }
 
+    /// Mark `h` as failed with `msg` but keep its current viz, so the last
+    /// good version stays drawable while the listing shows the error (a YAML
+    /// file that was edited into a broken state). Returns false for an
+    /// unknown handle. [`Registry::replace_built`] restores `Ok` later.
+    pub fn mark_failed_keep_viz(&mut self, h: VizHandle, msg: &str) -> bool {
+        match self.slots.get_mut(&h.0) {
+            Some(slot) => {
+                slot.entry.status = EntryStatus::Failed(msg.to_string());
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Remove `h`. It vanishes from `entries()` and the handle is never
     /// issued again. Returns false for an unknown handle.
     pub fn remove(&mut self, h: VizHandle) -> bool {
@@ -268,7 +282,7 @@ static GLOBAL: OnceLock<RwLock<Registry>> = OnceLock::new();
 /// Run `f` on the global registry under its write lock. A poisoned lock
 /// is taken over: the registry's data is
 /// plain and stays consistent.
-fn with_global<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
+pub(crate) fn with_global<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
     let lock = GLOBAL.get_or_init(|| RwLock::new(Registry::new()));
     let mut guard = lock.write().unwrap_or_else(|e| e.into_inner());
     f(&mut guard)

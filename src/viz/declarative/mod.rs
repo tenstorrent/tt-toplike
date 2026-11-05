@@ -15,11 +15,14 @@
 //! one-line `Display` that names the file and, where the parser knows it,
 //! the line, so the host can log it as-is.
 
+pub mod loader;
 pub mod schema;
 pub mod validate;
 pub mod viz;
 pub mod widgets;
 
+#[cfg(test)]
+mod loader_tests;
 #[cfg(test)]
 mod schema_tests;
 #[cfg(test)]

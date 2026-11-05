@@ -174,3 +174,21 @@ fn entries_are_sorted_by_id() {
     let ids: Vec<String> = r.entries().into_iter().map(|e| e.id).collect();
     assert_eq!(ids, ["alpha", "mid", "zeta"]);
 }
+
+#[test]
+fn mark_failed_keep_viz_sets_failed_status_and_keeps_the_viz() {
+    let mut r = Registry::new();
+    let h = add(&mut r, "keeper").unwrap();
+    assert!(r.mark_failed_keep_viz(h, "bad edit"));
+    assert_eq!(
+        r.entries()[0].status,
+        EntryStatus::Failed("bad edit".into())
+    );
+    // The last good version still renders.
+    assert!(r.with_viz(h, |v| v.id().to_string()).is_some());
+    // An unknown handle is refused.
+    assert!(!r.mark_failed_keep_viz(super::registry::VizHandle(999), "x"));
+    // A later good load restores Ok.
+    assert!(r.replace(h, mk("keeper")));
+    assert_eq!(r.entries()[0].status, EntryStatus::Ok);
+}
