@@ -22,6 +22,8 @@ pub mod viz;
 pub mod widgets;
 
 #[cfg(test)]
+mod example_tests;
+#[cfg(test)]
 mod loader_tests;
 #[cfg(test)]
 mod schema_tests;
