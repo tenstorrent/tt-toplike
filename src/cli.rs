@@ -193,6 +193,21 @@ pub struct Cli {
     )]
     pub mode: Option<VisualizationMode>,
 
+    /// Start on a plugin view (see `crate::viz`). The id is checked once
+    /// the registry is populated, not by clap.
+    #[arg(
+        long,
+        value_name = "ID",
+        help = "Start on a plugin view and enable it for this run",
+        long_help = concat!(
+            "Start the TUI on the plugin view with this id and enable it for the run ",
+            "(it need not be in `[viz] enable`). An unknown id exits with a message ",
+            "listing every registered id and where it came from; see the [viz] section ",
+            "of the docs. With --mode, --viz wins."
+        )
+    )]
+    pub viz: Option<String>,
+
     // Help text built with `concat!` so it carries the view's display name.
     #[arg(
         long,
@@ -674,6 +689,43 @@ pub fn parse_serve_bind(spec: &str) -> Result<std::net::SocketAddr, String> {
         .ok_or_else(|| format!("no address resolved for bind address '{spec}'"))
 }
 
+/// Which view the TUI starts on, once `--mode` and `--viz` are combined.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartView {
+    /// A built-in `--mode`.
+    Mode(VisualizationMode),
+    /// A plugin view, by id (not yet checked against the registry).
+    Viz(String),
+    /// Neither flag: the usual starting view.
+    Default,
+}
+
+/// Combine `--mode` and `--viz`: `--viz` wins when both are given. Pure;
+/// the TUI start-up calls it and then resolves a `Viz` id against the registry.
+pub fn effective_start(mode: Option<VisualizationMode>, viz: Option<&str>) -> StartView {
+    match (viz, mode) {
+        (Some(id), _) => StartView::Viz(id.to_string()),
+        (None, Some(m)) => StartView::Mode(m),
+        (None, None) => StartView::Default,
+    }
+}
+
+/// The message for `--viz <id>` naming no registered viz: it lists every
+/// `(id, source)` pair, or says "none". Lives here, not in `crate::viz`,
+/// so it exists in both feature forms.
+pub fn unknown_viz_message(id: &str, entries: &[(String, String)]) -> String {
+    let list = if entries.is_empty() {
+        "none".to_string()
+    } else {
+        entries
+            .iter()
+            .map(|(id, src)| format!("{id} ({src})"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    format!("unknown viz `{id}`; available: {list}")
+}
+
 /// Visualization mode selection
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum VisualizationMode {
@@ -871,6 +923,7 @@ impl Cli {
             check_config: false,
             arcade_layout: None,
             mode: None,
+            viz: None,
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             throttle: false,
@@ -1162,6 +1215,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            viz: None,
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
@@ -1215,6 +1269,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            viz: None,
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
@@ -1263,6 +1318,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            viz: None,
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
@@ -1311,6 +1367,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            viz: None,
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
@@ -1363,6 +1420,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            viz: None,
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
@@ -1408,6 +1466,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            viz: None,
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
@@ -1456,6 +1515,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            viz: None,
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
@@ -1513,6 +1573,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            viz: None,
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
@@ -1558,6 +1619,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            viz: None,
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
@@ -1605,6 +1667,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            viz: None,
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,
@@ -1723,6 +1786,45 @@ mod tests {
                 "`--mode {spelling}` must select the Training view"
             );
         }
+    }
+
+    #[test]
+    fn cli_viz_flag_takes_a_string() {
+        use clap::CommandFactory;
+        assert_eq!(Cli::try_parse_from(["tt-toplike"]).unwrap().viz, None);
+        let cli = Cli::try_parse_from(["tt-toplike", "--viz", "example-pulse"]).unwrap();
+        assert_eq!(cli.viz.as_deref(), Some("example-pulse"));
+        assert!(Cli::try_parse_from(["tt-toplike", "--viz"]).is_err());
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("--viz <ID>"), "help lists the flag");
+    }
+
+    /// `--viz` wins over `--mode`; with neither the default view starts.
+    #[test]
+    fn viz_flag_wins_over_mode() {
+        use VisualizationMode::Saga;
+        assert_eq!(effective_start(None, None), StartView::Default);
+        assert_eq!(effective_start(Some(Saga), None), StartView::Mode(Saga));
+        assert_eq!(effective_start(None, Some("x")), StartView::Viz("x".into()));
+        assert_eq!(
+            effective_start(Some(Saga), Some("x")),
+            StartView::Viz("x".into())
+        );
+    }
+
+    #[test]
+    fn unknown_viz_flag_lists_known_ids() {
+        let entries = vec![
+            ("example-pulse".to_string(), "rust".to_string()),
+            ("thermal-board".to_string(), "yaml".to_string()),
+        ];
+        let m = unknown_viz_message("nope", &entries);
+        assert!(m.contains("unknown viz `nope`"), "{m}");
+        assert!(m.contains("available"), "{m}");
+        assert!(m.contains("example-pulse (rust)"), "{m}");
+        assert!(m.contains("thermal-board (yaml)"), "{m}");
+        let m = unknown_viz_message("nope", &[]);
+        assert!(m.contains("available: none"), "{m}");
     }
 
     /// The Wafer Waffler answers to its code name and to its display name.

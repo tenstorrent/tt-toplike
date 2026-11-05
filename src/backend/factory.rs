@@ -360,6 +360,7 @@ mod tests {
             workload: false,
             print: false,
             mode: None,
+            viz: None,
             rotate: false,
             profile: crate::config::AnimationProfile::Normal,
             bench: false,

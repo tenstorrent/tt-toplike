@@ -169,6 +169,55 @@ pub struct LoadedConfig {
     /// names it uses, and how long a season lasts. A bad value keeps that
     /// key's default.
     pub saga: SagaSettings,
+    /// The `[viz]` settings: which plugin views to enable and each one's
+    /// own table. Default (nothing enabled) when the file has no `[viz]`.
+    pub viz: VizSettings,
+}
+
+/// The `[viz]` section: `enable = ["id", ...]` lists the plugin views to
+/// add to the `v` cycle on top of those enabled by default, and each
+/// `[viz.<id>]` table is kept whole and handed to that viz's `configure`
+/// at first use.
+///
+/// The ids are checked for shape only. The registry is not populated when
+/// the config is parsed (YAML viz files are scanned afterwards), so whether
+/// an id names a real viz is asked later with [`VizSettings::unknown_enabled`].
+#[derive(Debug, Clone, Default)]
+pub struct VizSettings {
+    /// Ids from `enable`, in file order. Later files replace the list.
+    pub enable: Vec<String>,
+    /// `[viz.<id>]` tables by id, merged key-by-key across files.
+    pub per_viz: std::collections::BTreeMap<String, toml_edit::Table>,
+}
+
+impl VizSettings {
+    /// The ids in `enable` that `known` rejects. The caller (the TUI's viz
+    /// host) passes the registry lookup after the YAML scan and raises a
+    /// config problem for each one; this crate cannot ask the registry
+    /// itself because it compiles without the `tui` feature.
+    pub fn unknown_enabled(&self, known: &dyn Fn(&str) -> bool) -> Vec<String> {
+        self.enable
+            .iter()
+            .filter(|id| !known(id))
+            .cloned()
+            .collect()
+    }
+}
+
+/// True when `id` is kebab-case: `[a-z0-9]+(-[a-z0-9]+)*`.
+///
+/// This duplicates `crate::viz::registry::is_valid_id` on purpose:
+/// `config.rs` compiles without the `tui` feature, where `crate::viz` does
+/// not exist. The test `config_and_registry_agree_on_what_a_viz_id_is`
+/// (tui form) keeps the two copies in step on a table of ids.
+fn is_valid_viz_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
 }
 
 /// Which names the saga's chronicle uses (`[saga] names`).
@@ -355,6 +404,10 @@ pub fn write_check_report(loaded: &LoadedConfig, out: &mut dyn std::io::Write) -
         } else {
             writeln!(out, "saga: off ([saga] enabled = false)")?;
         }
+        // The plugin views: silent unless `[viz] enable` names some.
+        if !loaded.viz.enable.is_empty() {
+            writeln!(out, "viz: enabled {}", loaded.viz.enable.join(", "))?;
+        }
         match loaded.problems.len() {
             0 => writeln!(out, "ok")?,
             n => writeln!(
@@ -516,13 +569,14 @@ fn one_line(message: &str) -> String {
 }
 
 /// The keys allowed at the top of a config file.
-const TOP_KEYS: [&str; 6] = [
+const TOP_KEYS: [&str; 7] = [
     "sensitivity",
     "max_particles_scale",
     "tt_smi_reset_behavior",
     "arcade",
     "backdrop",
     "saga",
+    "viz",
 ];
 
 /// Merge config `sources` (each a path and its text), later ones winning per
@@ -729,6 +783,16 @@ pub fn load_from(sources: &[(PathBuf, String)]) -> LoadedConfig {
                 });
             };
             parse_saga(item, &mut out.saga, &mut saga_report);
+        }
+        if let Some(item) = top.get("viz") {
+            let mut viz_report = |span: Option<std::ops::Range<usize>>, message: String| {
+                out.problems.push(ConfigProblem {
+                    file: path.clone(),
+                    line: span.map(|s| line_of(text, s.start)),
+                    message,
+                });
+            };
+            parse_viz(item, &mut out.viz, &mut viz_report);
         }
         // This file's problems in line order.
         out.problems[first_problem..].sort_by_key(|p| p.line.unwrap_or(0));
@@ -1422,6 +1486,68 @@ fn parse_saga(item: &toml_edit::Item, saga: &mut SagaSettings, report: &mut Repo
     }
 }
 
+/// The `[viz]` table, read into `viz`. Structural problems only: `enable`
+/// must be an array of kebab-case id strings, every other key must be a
+/// `[viz.<id>]` table with a valid id. A bad entry is skipped and the rest
+/// kept. Unknown-but-well-formed ids are not a problem here (the registry
+/// is empty at parse time); see [`VizSettings::unknown_enabled`].
+///
+/// A valid `enable` replaces the list from an earlier file; a `[viz.<id>]`
+/// table is merged into the earlier file's table key by key.
+fn parse_viz(item: &toml_edit::Item, viz: &mut VizSettings, report: &mut Report<'_>) {
+    let Some(table) = item.as_table_like() else {
+        report(item.span(), "`viz` must be a table: [viz]".into());
+        return;
+    };
+    for (k, v) in table.iter() {
+        let key_span = table.get_key_value(k).and_then(|(key, _)| key.span());
+        if k == "enable" {
+            let Some(arr) = v.as_array() else {
+                report(
+                    v.span(),
+                    "`viz.enable` must be an array of viz ids: enable = [\"example-pulse\"]".into(),
+                );
+                continue;
+            };
+            let mut ids = Vec::new();
+            for e in arr.iter() {
+                match e.as_str() {
+                    Some(id) if is_valid_viz_id(id) => ids.push(id.to_string()),
+                    Some(id) => report(
+                        e.span(),
+                        format!(
+                            "`viz.enable` entry {id:?} is not a viz id (lower-case letters, digits and single hyphens, such as \"example-pulse\"); it is skipped"
+                        ),
+                    ),
+                    None => report(
+                        e.span(),
+                        "`viz.enable` entries must be strings (viz ids); this one is skipped"
+                            .into(),
+                    ),
+                }
+            }
+            viz.enable = ids;
+        } else if let Some(t) = v.as_table_like() {
+            if !is_valid_viz_id(k) {
+                report(
+                    key_span,
+                    format!("`[viz.{k}]` is not a viz id (lower-case letters, digits and single hyphens); the table is ignored"),
+                );
+                continue;
+            }
+            let dst = viz.per_viz.entry(k.to_string()).or_default();
+            for (tk, tv) in t.iter() {
+                dst.insert(tk, tv.clone());
+            }
+        } else {
+            report(
+                key_span,
+                format!("unknown key `viz.{k}` (expected enable, or a [viz.<id>] table)"),
+            );
+        }
+    }
+}
+
 /// A height or width weight: a whole number of at least 1, 1 when absent.
 fn weight(item: Option<&toml_edit::Item>, what: &str, report: &mut Report<'_>) -> Option<u32> {
     let Some(item) = item else {
@@ -1908,6 +2034,144 @@ panels = [{ view = "flow" }, { view = "training" }, { view = "inference" }]
             p,
             vec!["/x/config.toml:2: unknown key `arcade.nope` (expected cloudfield, row, layout or layouts)"]
         );
+    }
+
+    // ---- `[viz]` ----
+
+    /// `[viz] enable` is a list of ids, kept in file order.
+    #[test]
+    fn viz_enable_list_parses() {
+        let l = load(&[(
+            "c.toml",
+            "[viz]\nenable = [\"example-pulse\", \"thermal-board\"]\n",
+        )]);
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(l.viz.enable, vec!["example-pulse", "thermal-board"]);
+    }
+
+    /// The registry is empty when the config is parsed (YAML files are
+    /// scanned later), so a well-formed id nobody has registered is no
+    /// problem here. `unknown_enabled` finds it once the scan is done.
+    #[test]
+    fn viz_enable_unknown_id_is_a_config_problem_not_a_failure() {
+        let l = load(&[("c.toml", "[viz]\nenable = [\"example-pulse\", \"nope\"]\n")]);
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert_eq!(
+            l.viz.unknown_enabled(&|id| id == "example-pulse"),
+            vec!["nope"]
+        );
+        assert!(l.viz.unknown_enabled(&|_| true).is_empty());
+    }
+
+    /// A `[viz.<id>]` table is kept whole for `Viz::configure`.
+    #[test]
+    fn viz_per_id_table_is_kept() {
+        let l = load(&[(
+            "c.toml",
+            "[viz]\nenable = [\"a\"]\n\n[viz.example-pulse]\nrate = 3\ncolor = \"red\"\n",
+        )]);
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        let t = &l.viz.per_viz["example-pulse"];
+        assert_eq!(t["rate"].as_integer(), Some(3));
+        assert_eq!(t["color"].as_str(), Some("red"));
+        assert_eq!(l.viz.per_viz.len(), 1);
+    }
+
+    /// Structural problems each get a line and leave the rest of `[viz]`
+    /// usable.
+    #[test]
+    fn bad_viz_values_are_reported_with_their_lines() {
+        let text = "[viz]\nenable = [\"ok\", \"Bad_Id\", 3]\nbogus = 1\n\n[viz.Not_Valid]\nx = 1\n";
+        let p = problems(&[("c.toml", text)]);
+        assert_eq!(p.len(), 4, "{p:?}");
+        assert!(
+            p[0].starts_with("c.toml:2:") && p[0].contains("Bad_Id"),
+            "{p:?}"
+        );
+        assert!(
+            p[1].starts_with("c.toml:2:") && p[1].contains("string"),
+            "{p:?}"
+        );
+        assert!(
+            p[2].starts_with("c.toml:3:") && p[2].contains("viz.bogus"),
+            "{p:?}"
+        );
+        assert!(
+            p[3].starts_with("c.toml:5:") && p[3].contains("Not_Valid"),
+            "{p:?}"
+        );
+        let l = load(&[("c.toml", text)]);
+        assert_eq!(l.viz.enable, vec!["ok"]);
+        assert!(l.viz.per_viz.is_empty());
+
+        let p = problems(&[("c.toml", "[viz]\nenable = \"x\"\n")]);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(
+            p[0].contains("viz.enable") && p[0].contains("array"),
+            "{p:?}"
+        );
+        let p = problems(&[("c.toml", "viz = 3\n")]);
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert!(p[0].contains("`viz` must be a table"), "{p:?}");
+    }
+
+    /// Existing config files have no `[viz]` section and must behave as
+    /// before: default settings, no problem, nothing in the summary.
+    #[test]
+    fn a_config_with_no_viz_section_is_unchanged() {
+        let text = "[arcade]\ncloudfield = true\n";
+        let l = load(&[("c.toml", text)]);
+        assert!(l.problems.is_empty(), "{:?}", l.problems);
+        assert!(l.viz.enable.is_empty());
+        assert!(l.viz.per_viz.is_empty());
+        let mut out = Vec::new();
+        write_check_report(&l, &mut out);
+        assert!(!String::from_utf8(out).unwrap().contains("viz"));
+    }
+
+    #[test]
+    fn the_summary_names_enabled_viz() {
+        let l = load(&[(
+            "c.toml",
+            "[viz]\nenable = [\"example-pulse\", \"thermal-board\"]\n",
+        )]);
+        let mut out = Vec::new();
+        write_check_report(&l, &mut out);
+        let out = String::from_utf8(out).unwrap();
+        assert!(
+            out.contains("viz: enabled example-pulse, thermal-board\n"),
+            "{out}"
+        );
+    }
+
+    /// config.rs holds its own copy of the id rule (it compiles without the
+    /// `tui` feature, where `crate::viz` does not exist). The copies must agree.
+    #[cfg(feature = "tui")]
+    #[test]
+    fn config_and_registry_agree_on_what_a_viz_id_is() {
+        for id in [
+            "a",
+            "example-pulse",
+            "a1-b2",
+            "9",
+            "",
+            "-",
+            "a-",
+            "-a",
+            "a--b",
+            "A",
+            "a_b",
+            "a b",
+            "é",
+            "a-B",
+            "thermal-board-2",
+        ] {
+            assert_eq!(
+                is_valid_viz_id(id),
+                crate::viz::registry::is_valid_id(id),
+                "disagree on {id:?}"
+            );
+        }
     }
 
     /// With no `[saga]` section the saga runs with real names and a
