@@ -126,9 +126,11 @@ fn thermal_board_empty_world_placeholder() {
     assert_golden(&golden("thermal-board-empty-80x24.txt"), &text);
 }
 
-/// Mirrors the host's rule (`viz_host::cycle_list`): an entry joins the view
+/// Documents the host's rule (`viz_host::cycle_list`): an entry joins the view
 /// cycle when it is enabled by default or its id is in the enabled set.
-/// `viz_host` is private to the TUI module, so the rule is restated here.
+/// `viz_host` is private to the TUI module, so the rule is restated here and
+/// is not tested against the real function. What this file pins is the
+/// loader's `enabled_by_default = false` flag for `viz/examples/`.
 fn in_cycle(e: &crate::viz::registry::VizEntry, enabled: &BTreeSet<String>) -> bool {
     e.enabled_by_default || enabled.contains(&e.id)
 }
@@ -153,8 +155,23 @@ fn thermal_board_is_hidden_until_enabled() {
     let enabled: BTreeSet<String> = ["thermal-board".to_string()].into();
     assert!(in_cycle(&e, &enabled));
 
-    // The golden folder holds .txt files and is not scanned as a viz.
-    assert!(reg.entries().iter().all(|e| e.id != "golden"));
+    // Everything the loader found in the repo's `viz/`: exactly one entry,
+    // the example, from `viz/examples`, and nothing failed.
+    let all = reg.entries();
+    assert!(
+        all.iter()
+            .all(|e| e.status == crate::viz::registry::EntryStatus::Ok),
+        "{all:?}"
+    );
+    let from_examples: Vec<&str> = all
+        .iter()
+        .filter(|e| {
+            matches!(&e.source, crate::viz::registry::Source::File(p)
+                if p.starts_with(viz_dir().join("examples")))
+        })
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(from_examples, ["thermal-board"]);
 }
 
 /// The cells of the bar line of chip `i` (chip rows are two lines high, the
@@ -203,9 +220,9 @@ fn thermal_board_colours_follow_the_thresholds() {
 fn thermal_board_table_lists_the_hottest_chip_first() {
     let text = render_text(
         &[
-            ("0000:01:00.0", 52.0, 100.0),
-            ("0000:02:00.0", 88.0, 100.0),
-            ("0000:03:00.0", 64.0, 100.0),
+            ("0000:01:00.0", 52.0, 250.0),
+            ("0000:02:00.0", 88.0, 90.0),
+            ("0000:03:00.0", 64.0, 150.0),
         ],
         80,
         24,
@@ -220,6 +237,14 @@ fn thermal_board_table_lists_the_hottest_chip_first() {
         .collect();
     assert_eq!(order, ["02:00.0", "03:00.0", "01:00.0"], "{text}");
     assert!(lines[header + 1].contains("88"));
+    // The power table has its own order: 01 (250), 03 (150), 02 (90).
+    let power: Vec<&str> = (1..=3)
+        .map(|i| {
+            let right = &lines[header + i][40..];
+            right.split_whitespace().next().unwrap()
+        })
+        .collect();
+    assert_eq!(power, ["01:00.0", "03:00.0", "02:00.0"], "{text}");
 }
 
 #[test]
@@ -233,10 +258,18 @@ fn thermal_board_with_many_chips_says_how_many_are_cut() {
     let text = render_text(&refs, 80, 24);
     assert_eq!(text.lines().count(), 24);
     let last = text.lines().last().unwrap();
-    assert!(last.starts_with("+") && last.ends_with("more"), "{text}");
+    // All 12 chip rows want 24 lines, so the table row gets none (1 row not
+    // drawn). The last chip row gives up its second line to the note, which
+    // still draws its label line, so N is 1.
+    assert_eq!(last, "+1 more", "{text}");
 
     // Five chips fit with the tables: no "+N more", all five in the table.
     let five = &refs[..5];
     let text = render_text(five, 80, 24);
     assert!(!text.contains("more"), "{text}");
+    for (id, _, _) in five {
+        let short = &id[5..];
+        // Once as a gauge label, once in each of the two tables.
+        assert!(text.matches(short).count() >= 3, "{short} missing\n{text}");
+    }
 }

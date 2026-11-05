@@ -19,7 +19,8 @@
 # few seconds. If the edit has a mistake, the last good version keeps drawing
 # and the loader reports the problem.
 #
-# Signals used (both are measured per chip and always present on the bus):
+# Signals used (both are measured per chip on the bus; a chip with no reading
+# yet shows `--`):
 #   tt_asic_temperature_celsius   chip temperature, in degrees C
 #   tt_tdp_w                      live power draw in watts. The name says
 #                                 "tdp", but the value is what the chip is
@@ -69,7 +70,10 @@ layout:
     # Two lines let a gauge put its label on the first line and its bar on
     # the second. With one line, the label and the bar share a line.
     height: 2
-    # cells are the widgets side by side in this row.
+    # cells are the widgets side by side in this row. Cells have no gap
+    # between them, so the temperature value at the right end of the left
+    # gauge runs into the start of the power bar. If that bothers you, swap
+    # the order of the two cells, or use two rows per chip (one gauge each).
     cells:
       # weight is this cell's share of the row width (1 to 100, default 1).
       # Equal weights give each cell half the row.
