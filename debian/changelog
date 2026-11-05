@@ -1,3 +1,34 @@
+tt-toplike (0.19.0) noble; urgency=medium
+
+  * Viz plugins: a full-screen view can now be added without touching the
+    rest of the program. There are two tiers. A Rust plugin is a folder
+    under src/viz/plugins/ that the build finds by itself. A YAML (or JSON)
+    plugin is one file in viz/ or in ~/.config/tt-toplike/viz/ with gauge,
+    sparkline, table, log, grid, heat_strip and text widgets, thresholds
+    that recolour them, and a JSON Schema for editors. The program checks
+    the YAML folders every 2 seconds, so a saved edit appears without a
+    restart; an edit that does not load keeps the last good version drawing
+    and says why in "tt-toplike viz list" and the log.
+  * --viz <id> starts on a plugin view and switches it on for the run. In
+    config.toml, [viz] enable = ["id"] adds views to the "v" cycle, and a
+    [viz.<id>] table is handed to that plugin. The cycle goes from the
+    Wafer Waffler to each enabled plugin in id order, then to Insights.
+    /mode <id> and /viz <id> switch too, and a plugin has its own legend
+    (l), explanation (!) and help (?) panels. A panic in a plugin turns
+    that plugin off and the program goes on.
+  * "tt-toplike viz new <name>" makes a Rust plugin from the example (in a
+    checkout), "tt-toplike viz new <name> --yaml" makes a YAML one, and
+    "tt-toplike viz list" shows every view with its source and status.
+  * Two examples ship, example-pulse (Rust) and thermal-board (YAML). Both
+    are hidden until asked for with --viz or [viz] enable.
+  * Limits: a plugin draws a full-screen view only. It cannot take keys of
+    its own, add a panel to the arcade layout, or add a signal. YAML has
+    no custom drawing. The reference is docs/viz-plugins.md.
+  * Nothing on the signal bus changed. The bus crate stays at 0.2.0 and the
+    saga crate at 0.3.0.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Wed, 04 Nov 2026 19:20:00 -0800
+
 tt-toplike (0.18.0) noble; urgency=medium
 
   * Saga heroes cross Ethernet links. Each portal on a floor's north edge

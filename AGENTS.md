@@ -2480,3 +2480,21 @@ again after `--replay --speed 50`; a second recording printed `0x2782e7c24489ccc
 Before the party (0.16.x, digest version 1), the final fix wave's 12-second `--mock` recording
 printed `0x0b5598cead3a912f`; under version 2 that number no longer applies. Before the fix wave
 two separate recordings both printed `0x1ec90317adb4fa0a` (ruling R26).
+
+---
+
+## Viz plugins (Nov 4 2026, branch `viz-plugins`, 0.19.0)
+
+Prompt (Taylor): make tt-toplike a platform people remix. Someone tells a coding agent "add a viz
+that does X", and the agent adds it in one place; a PR touches only its own folder or file. Spec:
+`docs/superpowers/specs/2026-11-04-viz-plugins-design.md`. Reference: `docs/viz-plugins.md`. Recipe:
+"Add a viz" near the top of this file.
+
+Decisions: the built-in views stay on `DisplayMode` (the user did not want them disturbed), and the
+registry holds plugins only. Two tiers share it: a Rust folder found by `build.rs`, and a YAML or
+JSON file with seven widgets that reloads on save (a 2 second poll, the last good version kept). The
+`v` cycle goes from the Wafer Waffler to each enabled plugin in id order. Both shipped examples are
+hidden by default. A panic guard turns off a plugin that panics. `on_key` is in the trait but the
+host does not call it. Docs are guarded by `src/viz/docs_tests.rs`: the recipe's commands, the paths
+the docs name and the version pins are checked against the code. The bus (0.2.0) and saga (0.3.0)
+crates did not change; the bus carried no new signal and the party traffic is unchanged.

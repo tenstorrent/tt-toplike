@@ -17,6 +17,30 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.19.0
+- Viz plugins. A full-screen view can now be added without touching the rest of the program, in
+  two ways. A Rust plugin is a folder under `src/viz/plugins/` that the build finds by itself. A
+  YAML (or JSON) plugin is one file in `viz/` or in `~/.config/tt-toplike/viz/`. The YAML tier has
+  seven widgets (gauge, sparkline, table, log, grid, heat strip and text), thresholds that recolour
+  them, and a JSON Schema for editors (`viz/schema/viz-v1.schema.json`).
+- The program checks the YAML folders every 2 seconds, so a saved edit shows up without a restart.
+  An edit that does not load keeps the last good version drawing, and `tt-toplike viz list` and the
+  log say why.
+- `--viz <id>` starts on a plugin view and switches it on for that run. `[viz] enable = ["id"]` in
+  `config.toml` adds views to the `v` cycle, and a `[viz.<id>]` table is handed to that plugin. The
+  cycle goes from the Wafer Waffler to each enabled plugin in id order, then to Insights. `/mode
+  <id>` and `/viz <id>` also switch. A plugin has its own legend (`l`), explanation (`!`) and help
+  (`?`) panels. A panic in a plugin turns that plugin off and the program goes on.
+- `tt-toplike viz new <name>` makes a Rust plugin from the example (in a checkout), `tt-toplike viz
+  new <name> --yaml` makes a YAML plugin, and `tt-toplike viz list` shows every view with its
+  source and status (`ok`, `hidden` or `failed`).
+- Two examples ship: `example-pulse` (Rust) and `thermal-board` (YAML). Both are hidden until you
+  ask for them with `--viz` or `[viz] enable`.
+- Limits: a plugin draws a full-screen view only. It cannot take keys of its own, add a panel to
+  the arcade layout, or add a signal, and YAML has no custom drawing. `AGENTS.md` has an "Add a viz"
+  recipe and `docs/viz-plugins.md` is the reference.
+- Nothing on the signal bus changed. The bus crate stays at 0.2.0 and the saga crate at 0.3.0.
+
 ### 0.18.0
 - Saga heroes cross Ethernet links. Each portal on a floor's north edge is bound to its Ethernet
   port, and a new bus event, `LinkPeer`, names the port at the other end of a link. A hero whose
