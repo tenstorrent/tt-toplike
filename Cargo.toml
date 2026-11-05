@@ -78,6 +78,11 @@ ratatui = { version = "0.30", default-features = true, optional = true }
 crossterm = { version = "0.29", features = ["event-stream"], optional = true }
 unicode-width = "0.1"
 
+# YAML parser for declarative viz plugins (src/viz/declarative). Optional and
+# pulled in only by the `tui` feature. serde_yaml_ng is the maintained fork of
+# the archived serde_yaml; it has no C dependency, so it builds on every target.
+serde_yaml_ng = { version = "0.10", optional = true }
+
 # GUI framework (optional - only needed for GUI frontend)
 # iced 0.14: boot fn is first arg (not title string), .title() is builder method, .run() replaces .run_with()
 iced = { version = "0.14", features = ["canvas", "tokio"], optional = true }
@@ -176,6 +181,9 @@ core-foundation = "0.10"
 mockall = "0.13"
 pretty_assertions = "1.4"
 tempfile = "3.13"
+# Checks the viz YAML/JSON fixtures against viz/schema/viz-v1.schema.json.
+# Dev-only; default features off so it does not pull an HTTP client.
+jsonschema = { version = "0.60", default-features = false }
 
 [features]
 # Default features: Safe, non-invasive backends only
@@ -183,7 +191,7 @@ tempfile = "3.13"
 default = ["tui", "json-backend", "linux-procfs", "remote"]
 
 # Frontend features
-tui = ["ratatui", "crossterm"]  # Terminal UI with Ratatui
+tui = ["ratatui", "crossterm", "dep:serde_yaml_ng"]  # Terminal UI with Ratatui
 gui = ["iced"]                  # Native GUI with iced (legacy)
 egui = ["eframe", "egui_plot"]  # Lightweight egui dashboard
 app = ["eframe", "egui_plot", "portable-pty", "vte"]  # Native terminal window

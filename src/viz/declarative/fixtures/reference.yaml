@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+#
+# Reference viz definition. Every key the format has appears here once, and
+# each is explained. Copy this file to start a new view.
+# The format is checked by viz/schema/viz-v1.schema.json.
+
+# Format version. Must be 1.
+version: 1
+
+# Unique id: lowercase letters, digits and single hyphens (kebab-case),
+# starting with a letter, at most 48 characters.
+id: reference-board
+
+# Name shown in the view cycle and the title bar.
+title: Reference Board
+
+# Smallest terminal this view draws well in: [columns, rows].
+# Optional. A smaller terminal shows a "needs W x H" message instead.
+min_size: [60, 12]
+
+# Lines for the legend strip. Optional.
+legend:
+  - "gauge: power draw against its limit"
+  - "sparkline: recent power, one row per chip"
+  - "table: current readings"
+
+# One paragraph shown by the explain key. Optional.
+explain: A small board that shows power for every chip.
+
+# Rows, drawn top to bottom. At most 16 rows and 64 widgets in all.
+layout:
+  # A row of fixed height: a number of terminal lines.
+  - height: 3
+    cells:
+      # weight is the cell's share of the row width (1 to 100, default 1).
+      - weight: 2
+        # widget picks the widget: gauge, sparkline, table, log, grid,
+        # heat_strip or text.
+        widget: gauge
+        # Bus signal to show. Any non-empty name; the host feeds it.
+        signal: power_w
+        # kind is the entity kind the signal belongs to (default chip).
+        kind: chip
+        # label is the caption drawn with the widget.
+        label: Total power
+        # max is the value that fills the widget.
+        max: 300.0
+        # thresholds recolour the widget once the value reaches `at`.
+        # Colours: primary, secondary, success, error, warning, info, text,
+        # muted, border, red, yellow, green, cyan, blue, magenta, white, gray.
+        thresholds:
+          - at: 200.0
+            color: yellow
+          - at: 260.0
+            color: red
+
+  # A row that repeats once per chip. `each: chip` is the only value so far.
+  # height: fill takes whatever height is left.
+  - height: fill
+    each: chip
+    cells:
+      - widget: sparkline
+        signal: power_w
+        label: Power
+
+  # A table of current readings.
+  - height: 6
+    cells:
+      - widget: table
+        signal: temp_c
+        label: Temperature

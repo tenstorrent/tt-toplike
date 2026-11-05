@@ -17,6 +17,7 @@
 //! The built-in views do not use any of this; they stay on `DisplayMode`.
 
 pub mod ctx;
+pub mod declarative;
 pub mod history;
 pub mod plugins;
 pub mod registry;

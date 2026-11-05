@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "id": "reference-board",
+  "title": "Reference Board",
+  "min_size": [60, 12],
+  "legend": [
+    "gauge: power draw against its limit",
+    "sparkline: recent power, one row per chip",
+    "table: current readings"
+  ],
+  "explain": "A small board that shows power for every chip.",
+  "layout": [
+    {
+      "height": 3,
+      "cells": [
+        {
+          "weight": 2,
+          "widget": "gauge",
+          "signal": "power_w",
+          "kind": "chip",
+          "label": "Total power",
+          "max": 300.0,
+          "thresholds": [
+            { "at": 200.0, "color": "yellow" },
+            { "at": 260.0, "color": "red" }
+          ]
+        }
+      ]
+    },
+    {
+      "height": "fill",
+      "each": "chip",
+      "cells": [
+        { "widget": "sparkline", "signal": "power_w", "label": "Power" }
+      ]
+    },
+    {
+      "height": 6,
+      "cells": [
+        { "widget": "table", "signal": "temp_c", "label": "Temperature" }
+      ]
+    }
+  ]
+}
