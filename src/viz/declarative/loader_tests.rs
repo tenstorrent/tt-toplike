@@ -277,3 +277,278 @@ fn missing_directory_is_not_an_error() {
     assert!(l.scan_with(&mut r).is_empty());
     assert!(l.poll_with(&mut r).is_empty());
 }
+
+// ---- fix round 1 ----------------------------------------------------------
+
+/// Run `f` on a thread and fail the test if it has not finished in 10
+/// seconds, so a hang fails instead of blocking CI.
+fn within_10s<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(Duration::from_secs(10)).expect("poll hung")
+}
+
+fn ids(r: &Registry) -> Vec<String> {
+    r.entries().into_iter().map(|e| e.id).collect()
+}
+
+#[test]
+fn file_versus_file_clash_first_by_path_wins_and_names_the_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.yaml");
+    let b = dir.path().join("b.yaml");
+    write(&a, &def("same", "A"), 0);
+    write(&b, &def("same", "B"), 0);
+    let mut r = Registry::new();
+    let mut l = Loader::new(vec![dir.path().to_path_buf()]);
+    l.scan_with(&mut r);
+    let h = r.handle_of("same").unwrap();
+    assert_eq!(r.with_viz(h, |v| v.title().to_string()).unwrap(), "A");
+    let msg = failed_msg(&r, "b");
+    assert!(msg.contains("same") && msg.contains("a.yaml"), "{msg}");
+}
+
+#[test]
+fn clash_clears_when_the_other_file_is_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.yaml");
+    let b = dir.path().join("b.yaml");
+    write(&a, &def("same", "A"), 0);
+    write(&b, &def("same", "B"), 0);
+    let mut r = Registry::new();
+    let mut l = Loader::new(vec![dir.path().to_path_buf()]);
+    l.scan_with(&mut r);
+    // b.yaml is unchanged, yet a retry on the next poll must not log or
+    // report anything while the clash stands.
+    assert!(l.poll_with(&mut r).is_empty());
+    fs::remove_file(&a).unwrap();
+    let ch = l.poll_with(&mut r);
+    // a's entry goes; b's placeholder is replaced by the real viz.
+    assert!(ch.iter().any(|c| matches!(c, Change::Removed(_))));
+    assert!(ch.iter().any(|c| matches!(c, Change::Added(_))));
+    assert_eq!(ids(&r), ["same"]);
+    assert_eq!(r.entries()[0].status, EntryStatus::Ok);
+    assert_eq!(r.entries()[0].title, "B");
+}
+
+#[test]
+fn clash_clears_when_the_other_file_changes_its_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.yaml");
+    let b = dir.path().join("b.yaml");
+    write(&a, &def("same", "A"), 0);
+    write(&b, &def("same", "B"), 0);
+    let mut r = Registry::new();
+    let mut l = Loader::new(vec![dir.path().to_path_buf()]);
+    l.scan_with(&mut r);
+    write(&a, &def("other", "A2"), 5);
+    l.poll_with(&mut r);
+    assert_eq!(ids(&r), ["other", "same"]);
+    assert!(r.entries().iter().all(|e| e.status == EntryStatus::Ok));
+}
+
+#[test]
+fn clash_on_a_good_file_keeps_its_last_good_and_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.yaml");
+    let b = dir.path().join("b.yaml");
+    write(&a, &def("a-id", "A"), 0);
+    write(&b, &def("b-id", "B"), 0);
+    let mut r = Registry::new();
+    let mut l = Loader::new(vec![dir.path().to_path_buf()]);
+    l.scan_with(&mut r);
+    let hb = r.handle_of("b-id").unwrap();
+    write(&b, &def("a-id", "B2"), 5); // now clashes with a.yaml
+    let ch = l.poll_with(&mut r);
+    assert!(matches!(&ch[..], [Change::Failed(h, _)] if *h == hb));
+    assert_eq!(r.with_viz(hb, |v| v.title().to_string()).unwrap(), "B");
+    fs::remove_file(&a).unwrap();
+    l.poll_with(&mut r);
+    // b.yaml now owns a-id (an id change: new handle).
+    assert_eq!(ids(&r), ["a-id"]);
+    assert_eq!(r.entries()[0].status, EntryStatus::Ok);
+    assert_eq!(r.entries()[0].title, "B2");
+}
+
+#[test]
+fn two_files_swapping_ids_both_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.yaml");
+    let b = dir.path().join("b.yaml");
+    write(&a, &def("one", "From A"), 0);
+    write(&b, &def("two", "From B"), 0);
+    let mut r = Registry::new();
+    let mut l = Loader::new(vec![dir.path().to_path_buf()]);
+    l.scan_with(&mut r);
+    write(&a, &def("two", "From A"), 5);
+    write(&b, &def("one", "From B"), 5);
+    l.poll_with(&mut r);
+    assert!(r.entries().iter().all(|e| e.status == EntryStatus::Ok));
+    let title = |id: &str| r.entries().into_iter().find(|e| e.id == id).unwrap().title;
+    assert_eq!(title("two"), "From A");
+    assert_eq!(title("one"), "From B");
+}
+
+#[test]
+fn placeholder_never_blocks_a_real_id_in_the_same_scan() {
+    let dir = tempfile::tempdir().unwrap();
+    // "alpha.yaml" is broken: its placeholder id would be "alpha". The
+    // good file "zeta.yaml" has `id: alpha` and sorts later.
+    fs::write(dir.path().join("alpha.yaml"), "x: [").unwrap();
+    write(&dir.path().join("zeta.yaml"), &def("alpha", "Real"), 0);
+    let mut r = Registry::new();
+    let mut l = Loader::new(vec![dir.path().to_path_buf()]);
+    l.scan_with(&mut r);
+    let real = r.entries().into_iter().find(|e| e.id == "alpha").unwrap();
+    assert_eq!(real.status, EntryStatus::Ok);
+    assert_eq!(real.title, "Real");
+    // The broken file got another placeholder id.
+    assert_eq!(ids(&r), ["alpha", "alpha-file"]);
+    assert!(failed_msg(&r, "alpha-file").contains("alpha.yaml"));
+}
+
+#[test]
+fn real_id_evicts_a_placeholder_in_a_later_poll() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("alpha.yaml"), "x: [").unwrap();
+    let mut r = Registry::new();
+    let mut l = Loader::new(vec![dir.path().to_path_buf()]);
+    l.scan_with(&mut r);
+    assert_eq!(ids(&r), ["alpha"]);
+    write(&dir.path().join("zeta.yaml"), &def("alpha", "Real"), 0);
+    l.poll_with(&mut r);
+    assert_eq!(ids(&r), ["alpha", "alpha-file"]);
+    assert_eq!(r.entries()[0].status, EntryStatus::Ok);
+    assert_eq!(r.entries()[0].title, "Real");
+    assert!(matches!(r.entries()[1].status, EntryStatus::Failed(_)));
+    assert!(l.poll_with(&mut r).is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_named_like_a_viz_file_does_not_hang_poll() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("pipe.yaml");
+    let ok = std::process::Command::new("mkfifo").arg(&p).status();
+    if !ok.map(|s| s.success()).unwrap_or(false) {
+        eprintln!("mkfifo unavailable; skipping");
+        return;
+    }
+    let d = dir.path().to_path_buf();
+    let n = within_10s(move || {
+        let mut r = Registry::new();
+        let mut l = Loader::new(vec![d]);
+        l.scan_with(&mut r);
+        l.poll_with(&mut r);
+        r.entries().len()
+    });
+    assert_eq!(n, 0);
+}
+
+#[test]
+fn mtime_going_backwards_is_a_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("a.yaml");
+    write(&p, &def("alpha", "One"), 100);
+    let mut r = Registry::new();
+    let mut l = Loader::new(vec![dir.path().to_path_buf()]);
+    l.scan_with(&mut r);
+    let h = r.handle_of("alpha").unwrap();
+    // Same length, older mtime (a restored backup).
+    write(&p, &def("alpha", "Two"), 0);
+    assert_eq!(l.poll_with(&mut r), vec![Change::Updated(h)]);
+    assert_eq!(r.with_viz(h, |v| v.title().to_string()).unwrap(), "Two");
+}
+
+#[test]
+fn same_mtime_but_different_length_is_a_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("a.yaml");
+    let t = SystemTime::now() - Duration::from_secs(50);
+    let put = |text: &str| {
+        fs::write(&p, text).unwrap();
+        let f = fs::File::options().write(true).open(&p).unwrap();
+        f.set_modified(t).unwrap();
+    };
+    put(&def("alpha", "One"));
+    let mut r = Registry::new();
+    let mut l = Loader::new(vec![dir.path().to_path_buf()]);
+    l.scan_with(&mut r);
+    let h = r.handle_of("alpha").unwrap();
+    put(&def("alpha", "Longer Title"));
+    assert_eq!(l.poll_with(&mut r), vec![Change::Updated(h)]);
+}
+
+#[test]
+fn a_file_replaced_by_a_directory_is_removed() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("a.yaml");
+    write(&p, &def("alpha", "One"), 0);
+    let mut r = Registry::new();
+    let mut l = Loader::new(vec![dir.path().to_path_buf()]);
+    l.scan_with(&mut r);
+    let h = r.handle_of("alpha").unwrap();
+    fs::remove_file(&p).unwrap();
+    fs::create_dir(&p).unwrap();
+    assert_eq!(l.poll_with(&mut r), vec![Change::Removed(h)]);
+    assert!(r.entries().is_empty());
+}
+
+#[test]
+fn examples_under_any_dir_and_multiple_dirs_work() {
+    let user = tempfile::tempdir().unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    fs::create_dir(user.path().join("examples")).unwrap();
+    write(
+        &user.path().join("examples/u.yaml"),
+        &def("user-example", "U"),
+        0,
+    );
+    write(&user.path().join("mine.yaml"), &def("user-mine", "M"), 0);
+    write(&repo.path().join("repo.yaml"), &def("repo-one", "R"), 0);
+    let mut r = Registry::new();
+    let mut l = Loader::new(vec![user.path().to_path_buf(), repo.path().to_path_buf()]);
+    l.scan_with(&mut r);
+    let got: Vec<_> = r
+        .entries()
+        .into_iter()
+        .map(|e| (e.id, e.enabled_by_default))
+        .collect();
+    assert_eq!(
+        got,
+        vec![
+            ("repo-one".to_string(), true),
+            ("user-example".to_string(), false),
+            ("user-mine".to_string(), true)
+        ]
+    );
+}
+
+#[test]
+fn repo_viz_dir_is_accepted_only_for_a_tt_toplike_checkout() {
+    use super::loader::default_dirs_for_test;
+    let ours = tempfile::tempdir().unwrap();
+    fs::create_dir(ours.path().join("viz")).unwrap();
+    fs::write(
+        ours.path().join("Cargo.toml"),
+        "[package]\nname = \"tt-toplike\"\n",
+    )
+    .unwrap();
+    let other = tempfile::tempdir().unwrap();
+    fs::create_dir(other.path().join("viz")).unwrap();
+    fs::write(
+        other.path().join("Cargo.toml"),
+        "[package]\nname = \"someone-else\"\n",
+    )
+    .unwrap();
+    let bare = tempfile::tempdir().unwrap();
+    fs::create_dir(bare.path().join("viz")).unwrap();
+    assert_eq!(
+        default_dirs_for_test(ours.path()),
+        Some(ours.path().join("viz"))
+    );
+    assert_eq!(default_dirs_for_test(other.path()), None);
+    assert_eq!(default_dirs_for_test(bare.path()), None);
+}
