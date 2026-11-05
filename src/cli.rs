@@ -62,6 +62,10 @@ use std::path::PathBuf;
 
     # Quiet mode (no logs, only TUI)
     tt-toplike -q
+
+    # Make a new view (Rust folder in a checkout, or --yaml anywhere), and list views
+    tt-toplike viz new <name>
+    tt-toplike viz list
 ")]
 pub struct Cli {
     /// Backend selection

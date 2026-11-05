@@ -25,6 +25,21 @@ use tt_toplike::{
 use tt_toplike::backend::luwen::LuwenBackend;
 
 fn main() {
+    // `tt-toplike viz ...` (new, list) is handled before the flag parser, so
+    // no other invocation parses any differently. It needs no backend, no
+    // terminal and no hardware.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("viz") {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let code = tt_toplike::viz::cli::run(
+            &argv[1..],
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+            &cwd,
+        );
+        std::process::exit(code);
+    }
+
     // Parse command-line arguments.
     //
     // `mut` only in the `remote` build: the `--remote` arm rewrites `cli.remote`

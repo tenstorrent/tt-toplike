@@ -103,7 +103,7 @@ pub struct Loader {
 
 /// True when `manifest` (the text of a Cargo.toml) is this package's: a
 /// line `name = "tt-toplike"`.
-fn is_our_manifest(manifest: &str) -> bool {
+pub(crate) fn is_our_manifest(manifest: &str) -> bool {
     manifest
         .lines()
         .any(|l| l.trim() == "name = \"tt-toplike\"")

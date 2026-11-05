@@ -4,7 +4,7 @@
 # thermal-board: temperature and power for every chip, on one screen.
 #
 # This is an example view written in YAML. You can read it as a tutorial and
-# copy it as a starting point (`viz new --yaml <name>` makes a copy for you).
+# copy it as a starting point (`tt-toplike viz new <name> --yaml` makes a copy for you).
 # Every key is explained below. The full format is in the plugin reference
 # (docs/viz-plugins.md), and a JSON Schema that editors can use to check and
 # complete this file is at viz/schema/viz-v1.schema.json.
@@ -72,8 +72,9 @@ layout:
     height: 2
     # cells are the widgets side by side in this row. Cells have no gap
     # between them, so the temperature value at the right end of the left
-    # gauge runs into the start of the power bar. If that bothers you, swap
-    # the order of the two cells, or use two rows per chip (one gauge each).
+    # gauge runs into the start of the power bar. Swapping the two cells only
+    # moves the contact: the power value then runs into the start of the
+    # temperature bar. To get a gap, use two rows per chip (one gauge each).
     cells:
       # weight is this cell's share of the row width (1 to 100, default 1).
       # Equal weights give each cell half the row.

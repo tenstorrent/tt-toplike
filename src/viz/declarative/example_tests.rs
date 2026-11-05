@@ -3,7 +3,7 @@
 
 //! Tests for the YAML example `viz/examples/thermal-board.yaml`.
 //!
-//! The example is also the template `viz new --yaml` copies, so a broken file
+//! The example is also the template `viz new <name> --yaml` copies, so a broken file
 //! must fail CI. Every test reads the real file from the repository, not a
 //! copy of its text.
 
