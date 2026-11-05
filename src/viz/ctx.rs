@@ -4,7 +4,6 @@
 //! The plugin trait and the context a plugin renders with.
 
 use super::history::History;
-use crossterm::event::KeyCode;
 use ratatui::{buffer::Buffer, layout::Rect};
 use tt_toplike_bus::{EntityKey, EntityKind, WorldRead};
 
@@ -31,7 +30,8 @@ pub struct VizCtx<'a> {
     pub world: &'a dyn WorldRead,
     /// Recent values of the signals the host records.
     pub history: &'a History,
-    /// The frame counter of the host's draw loop.
+    /// The host's data-tick counter: it counts data ticks (the same clock the
+    /// history cadence uses), not drawn frames.
     pub tick: u64,
     /// The bus clock's monotonic time in nanoseconds; the scale every
     /// reading's `t_mono_ns` is on.
@@ -69,7 +69,8 @@ pub trait Viz: Send {
         (40, 10)
     }
 
-    /// The signals the viz reads. Informational; the default is none.
+    /// The signals the viz reads. The host records a history for exactly these
+    /// signals while the viz is on screen (see [`History`]); the default is none.
     fn signals(&self) -> Vec<SignalSpec> {
         Vec::new()
     }
@@ -83,7 +84,8 @@ pub trait Viz: Send {
     /// A plain-language account of what the view shows, for the explain panel.
     fn explain(&self) -> String;
 
-    /// Help text listing the viz's keys, for the help panel.
+    /// Help text for the help panel. A viz has no keys of its own, so this
+    /// describes the view and its settings.
     fn help(&self) -> String;
 
     /// Receive the viz's `[viz.<id>]` table from the config file. Called by
@@ -91,13 +93,6 @@ pub trait Viz: Send {
     /// default ignores it.
     fn configure(&mut self, cfg: &toml_edit::Table) {
         let _ = cfg;
-    }
-
-    /// Offer a key press to the viz. Return `true` if it was used, so the host
-    /// does not act on it. The default uses none.
-    fn on_key(&mut self, key: KeyCode) -> bool {
-        let _ = key;
-        false
     }
 }
 

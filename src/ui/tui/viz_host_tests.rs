@@ -819,3 +819,40 @@ fn the_status_bar_title_comes_from_the_cache() {
     assert_eq!(id_of(p.h), "vh-title-cache");
     assert_eq!(name_of(VizHandle(u32::MAX)), format!("#{}", u32::MAX));
 }
+
+/// `--viz <id>` naming a registered entry that failed to load (a YAML file
+/// that never loaded: an entry with no viz behind it) is not refused at
+/// start-up. It resolves to that plugin, the first render finds no viz, and
+/// `leave_message` carries the reason. `run_tui` treats a `Some` message as
+/// "go back to Insights and show it" (the arm after `terminal.draw`), so
+/// the user lands on Insights with the reason on the status line.
+#[test]
+fn viz_flag_naming_a_failed_entry_resolves_then_leaves_with_the_reason() {
+    use crate::cli::StartView;
+    let p = stub("vh-failed-file", (1, 1), false, &[]);
+    assert!(registry::mark_failed(
+        p.h,
+        "bad.yaml:3: unknown widget `gauge2`"
+    ));
+
+    // Start-up accepts the id: it is registered, whatever its status.
+    let entries = registry::entries();
+    assert_eq!(
+        resolve_start(StartView::Viz("vh-failed-file".into()), &entries),
+        Ok(DisplayMode::Plugin(p.h))
+    );
+
+    // The render finds no viz behind the handle and draws nothing.
+    let mut host = host();
+    let area = Rect::new(0, 0, 40, 5);
+    let mut buf = Buffer::empty(area);
+    let outcome = host.render_into(p.h, &mut buf, area, None);
+    assert_eq!(outcome, RenderOutcome::Gone);
+    assert_eq!(p.renders.load(Ordering::SeqCst), 0, "no viz ran");
+
+    // The loop's trigger: a message that names the id and the reason.
+    assert_eq!(
+        host.leave_message(p.h, &outcome),
+        Some("viz vh-failed-file is unavailable: bad.yaml:3: unknown widget `gauge2`".to_string())
+    );
+}

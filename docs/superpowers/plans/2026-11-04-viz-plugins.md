@@ -45,7 +45,7 @@ Failure modes the spec implies that no task would test unless pinned. Each has a
 
 **Interfaces:**
 - Produces (exact names later tasks rely on):
-  - `pub trait Viz: Send` with `fn id(&self) -> &str`, `fn title(&self) -> &str`, `fn min_size(&self) -> (u16, u16)` (default `(40, 10)`), `fn signals(&self) -> Vec<SignalSpec>` (default empty), `fn render(&mut self, buf: &mut Buffer, area: Rect, ctx: &VizCtx)`, `fn legend(&self) -> Vec<String>`, `fn explain(&self) -> String`, `fn help(&self) -> String`, `fn configure(&mut self, cfg: &toml_edit::Table)` (default no-op), `fn on_key(&mut self, key: crossterm::event::KeyCode) -> bool` (default `false`).
+  - `pub trait Viz: Send` with `fn id(&self) -> &str`, `fn title(&self) -> &str`, `fn min_size(&self) -> (u16, u16)` (default `(40, 10)`), `fn signals(&self) -> Vec<SignalSpec>` (default empty), `fn render(&mut self, buf: &mut Buffer, area: Rect, ctx: &VizCtx)`, `fn legend(&self) -> Vec<String>`, `fn explain(&self) -> String`, `fn help(&self) -> String`, `fn configure(&mut self, cfg: &toml_edit::Table)` (default no-op). (`on_key` was planned here and removed 2026-11-04: the host never called it.)
   - `pub struct SignalSpec { pub kind: EntityKind, pub name: String }`
   - `pub struct VizCtx<'a> { pub world: &'a dyn WorldRead, pub history: &'a History, pub tick: u64, pub now_mono_ns: u64 }` plus `VizCtx::chips(&self) -> Vec<EntityKey>` (via `world.entities(EntityKind::Chip)`).
   - `pub struct History` with `History::new(cap: usize)`, `record(&mut self, key: &EntityKey, signal: &str, v: f64)`, `series(&self, key: &EntityKey, signal: &str) -> &[f64]` (oldest first; empty slice when unknown), default cap 240 per series.

@@ -83,11 +83,16 @@ N"` or `git show <version tag>` if you need the original detail.
 A viz is a full-screen view that you add without touching shared code. The reference is
 `docs/viz-plugins.md`; read it before you write anything. This is the short recipe.
 
+**Commands in a checkout.** In a checkout of the repository, run every `tt-toplike ...` command below
+as `cargo run --features tui --bin tt-toplike-tui -- ...` (for example `cargo run --features tui
+--bin tt-toplike-tui -- viz list`). The plain `tt-toplike ...` form is for an installed binary. A Rust
+plugin needs a rebuild, and `cargo run` does that. A YAML file needs none.
+
 1. **Pick a tier.** A YAML file is the default: gauges, sparklines, tables, a log, a grid, a heat
    strip or text, with colours that change at thresholds. Use a Rust folder only when you need your
    own drawing, state between frames, or a `[viz.<id>]` setting.
 2. **Read the signal names** in `src/bus/signals.rs`. Use a name from that file. A viz cannot add a
-   signal. (`tt_fan_speed_rpm` is fan speed; `tt_tdp_w` is live power draw; `tt_asic_temperature_celsius`
+   signal. (`tt_fan_speed_rpm` is fan speed; `tt_tdp_w` is the chip's live power draw; `tt_asic_temperature_celsius`
    is temperature.)
 3. **Run the scaffold.**
    * YAML: `tt-toplike viz new <name> --yaml` writes `viz/<name>.yaml` in a checkout (or the user
@@ -96,7 +101,7 @@ A viz is a full-screen view that you add without touching shared code. The refer
      `src/viz/plugins/<snake_name>/` with `mod.rs`, `tests.rs` and `README.md`. Edit those. Rebuild.
    * `<name>` is kebab-case, at most 48 characters, and not a built-in view name or an existing viz id.
      `tt-toplike viz list` shows what exists.
-4. **Run it with no hardware:** `tt-toplike --mock 4 --viz <name>`. A viz that is off by default
+4. **Run it with no hardware:** `cargo run --features tui --bin tt-toplike-tui -- --mock 4 --viz <name>` (or `tt-toplike --mock 4 --viz <name>` with an installed binary). A viz that is off by default
    needs `--viz <id>` or `[viz] enable = ["<id>"]` in `config.toml`. Open the legend (`l`), explain
    (`!`) and help (`?`) panels to check their text. A YAML file reloads on save within about 2
    seconds.
@@ -109,13 +114,18 @@ A viz is a full-screen view that you add without touching shared code. The refer
    widget (YAML). Tests build a fake world with `WorldBuilder` (`src/viz/testkit.rs`). Do not
    import `ttnn` or `ttml`, and do not take a chip lease for a viz.
 
+7. **Before you open a pull request,** run what CI runs: `cargo fmt --all --check`, then
+   `cargo clippy --features tui -- -D warnings`, then
+   `cargo clippy --no-default-features --features tui,json-backend -- -D warnings`, then the test
+   command from step 5.
+
 **What a pull request may touch:** only its own folder `src/viz/plugins/<name>/` (Rust) or its own
 file `viz/<name>.yaml` (YAML). It edits no shared file: that rules out `Cargo.toml`, `build.rs`,
 `src/cli.rs`, `src/ui`, `src/bus`, the docs and another viz's files. If the viz seems to need a shared change, ask for it
 in its own pull request.
 
 **Limits:** full screen only, no keys of its own, no arcade panels, no new signals, no custom
-drawing in YAML. The Rust `Viz` trait has `on_key`, but the host does not call it. The examples to
+drawing in YAML. The `Viz` trait has no key method. The examples to
 copy are `src/viz/plugins/example_pulse/` and `viz/examples/thermal-board.yaml`. A test,
 `agents_md_recipe_names_real_commands` in `src/viz/docs_tests.rs`, fails when a command named here
 is renamed or removed.
@@ -2494,7 +2504,8 @@ Decisions: the built-in views stay on `DisplayMode` (the user did not want them 
 registry holds plugins only. Two tiers share it: a Rust folder found by `build.rs`, and a YAML or
 JSON file with seven widgets that reloads on save (a 2 second poll, the last good version kept). The
 `v` cycle goes from the Wafer Waffler to each enabled plugin in id order. Both shipped examples are
-hidden by default. A panic guard turns off a plugin that panics. `on_key` is in the trait but the
-host does not call it. Docs are guarded by `src/viz/docs_tests.rs`: the recipe's commands, the paths
+hidden by default. A panic guard turns off a plugin that panics. A key method in the first draft of
+the trait was removed before release, because the host never called it. Docs are guarded by `src/viz/docs_tests.rs`: the recipe's commands, the paths
 the docs name and the version pins are checked against the code. The bus (0.2.0) and saga (0.3.0)
-crates did not change; the bus carried no new signal and the party traffic is unchanged.
+crates did not change; the bus carried no new signal and the party traffic is unchanged (one run: 14.2 KB/s; the 0.18.0
+three-run mean was 16.3 KB/s).

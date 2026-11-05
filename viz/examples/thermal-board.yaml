@@ -24,9 +24,8 @@
 # Signals used (both are measured per chip on the bus; a chip with no reading
 # yet shows `--`):
 #   tt_asic_temperature_celsius   chip temperature, in degrees C
-#   tt_tdp_w                      live power draw in watts. The name says
-#                                 "tdp", but the value is what the chip is
-#                                 drawing now, not its limit.
+#   tt_tdp_w                      the chip's live power draw in watts. The
+#                                 name comes from the telemetry source.
 
 # Format version. Must be 1. Required.
 version: 1

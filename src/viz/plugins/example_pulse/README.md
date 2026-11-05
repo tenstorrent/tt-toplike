@@ -14,8 +14,8 @@ thresholds. With no chips the view says `no chips`.
 
 ## Signals read (all on chip entities)
 
-* `tt_tdp_w`: the power the chip is drawing now, in watts, sent every poll. The name says
-  "tdp", but it is not the chip's power limit.
+* `tt_tdp_w`: the chip's live power draw in watts, sent every poll. The name comes from
+  the telemetry source.
 * `tt_asic_temperature_celsius`: ASIC temperature in degrees Celsius.
 
 ## How to enable it

@@ -208,5 +208,6 @@ fn sparkline_of_nothing_is_blank() {
 #[test]
 fn sparkline_survives_a_nan_sample() {
     assert_eq!(sparkline(&[1.0, f64::NAN, 3.0], 3), "\u{2581}\u{2581}\u{2588}");
-    assert_eq!(sparkline(&[f64::NAN, f64::NAN], 2).chars().count(), 2);
+    // All NaN: nothing to scale, so the flat middle block.
+    assert_eq!(sparkline(&[f64::NAN, f64::NAN], 2), "\u{2584}\u{2584}");
 }

@@ -60,7 +60,7 @@ Exact signatures are left to the builder. The trait covers:
 - `id`, `title`, `min_size`.
 - `render(frame, area, ctx)`, where `ctx` gives a read-only view of the signal bus (current entity values and history), the selected chip, the tick, and the theme/colour mode.
 - `legend()`, `explain()`, `help()` returning text fragments the overlays compose.
-- `on_key(key)` for keys the viz owns. Optional.
+- ~~`on_key(key)` for keys the viz owns. Optional.~~ Removed 2026-11-04: the host never called it, and the non-goals rule out direct keys.
 - `settings_schema()` naming a `[viz.<id>]` config section and its keys. Optional.
 - `signals()` listing the bus entities it reads, so the bus driver can skip work for a viz that is not showing.
 

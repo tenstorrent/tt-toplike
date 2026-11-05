@@ -71,7 +71,16 @@ most 48 characters. The command refuses a name that a built-in view already answ
   `failed: <reason>`. A YAML file that does not load shows up as `failed` with the error and the
   line, so this is the place to look when a file seems to be ignored.
 
+Exit codes: 0 on success, 1 when the command refuses (a bad or taken name, a file that already
+exists) or fails, 2 for a usage error.
+
 These commands run before the terminal, the backend or any hardware is touched.
+
+**In a checkout, use `cargo run`.** The `tt-toplike` command above is the installed binary. In a
+checkout that has no installed binary, run the same words as
+`cargo run --features tui --bin tt-toplike-tui -- <words>`, for example
+`cargo run --features tui --bin tt-toplike-tui -- viz new my-view --yaml`. A Rust plugin must be
+rebuilt before it shows up; `cargo run` rebuilds. A YAML file needs no rebuild.
 
 ## 3. What a plugin sees: signals and history
 
@@ -91,7 +100,7 @@ The two signals the examples use, both on `chip` entities, sent every poll:
 | Signal | Meaning |
 | --- | --- |
 | `tt_asic_temperature_celsius` | ASIC temperature in degrees Celsius. |
-| `tt_tdp_w` | The power the chip is drawing now, in watts. The name says "tdp", but it is not the chip's power limit. |
+| `tt_tdp_w` | The power the chip is drawing now, in watts. The name comes from the telemetry source. |
 
 Other signals you might want: `tt_fan_speed_rpm` (fan speed, sent only when it changes),
 `tt_ai_clock_mhz`, `toplike.voltage_v`, `toplike.current_a`. A reading is missing until the first
@@ -151,7 +160,6 @@ the draw thread. The trait needs `Send` but not `Sync`.
 | `explain(&self) -> String` | Required. A plain-language account of the view for the explain panel (`!`). |
 | `help(&self) -> String` | Required. Help text for the help panel (`?`). |
 | `configure(&mut self, cfg: &toml_edit::Table)` | Optional. Receives the `[viz.<id>]` table (section 6). Called once after construction and again when the config reloads. A plugin with no such table is not called. Ignore values of the wrong type and keep the old setting. |
-| `on_key(&mut self, key: KeyCode) -> bool` | Present in the trait, but the host does not call it yet. A plugin cannot take keys (section 9). |
 
 `VizCtx` is what `render` receives:
 
@@ -294,7 +302,7 @@ Default colours: a gauge and a sparkline use `primary`. A `grid` and a `heat_str
   more lines high the label has its own line and the bar sits below it. In a one-line row the label
   and bar share the line, and the label gets at most a third of the width. The bar and the value
   take the threshold colour. Without `max`, the bar scales to the highest value in the history of
-  that signal on that entity, and if there is none, to 100. That scale moves as readings change, so
+  that signal on that entity. If there is no history, or its highest value is 0 or below, it scales to 100. That scale moves as readings change, so
   set `max` for a stable bar.
 * **`sparkline`**: the recent history of the signal as block heights on one line, then the latest
   value. Without `max` the scale is the highest value shown. It needs history (section 3), so the
@@ -345,6 +353,7 @@ backend to try a viz with no hardware:
 
 ```
 tt-toplike --mock 4 --viz thermal-board
+cargo run --features tui --bin tt-toplike-tui -- --mock 4 --viz thermal-board   # in a checkout
 ```
 
 **`[viz]` in `config.toml`** (`~/.config/tt-toplike/config.toml` on Linux):
@@ -391,8 +400,7 @@ you commit:
 UPDATE_GOLDEN=1 cargo test --lib --features tui viz::plugins::<snake_name>
 ```
 
-A missing golden file fails and names `UPDATE_GOLDEN=1`. Review the new text. Read the
-new text before you accept it.
+A missing golden file fails and names `UPDATE_GOLDEN=1`. Read the new text before you accept it.
 
 Two shared tests cover every viz found on disk, with no change from you:
 
@@ -411,12 +419,16 @@ file `viz/<name>.yaml`** (YAML). It edits no shared file. That rules out `Cargo.
 built so that no shared file needs a line for a new viz. If your viz seems to need a change to
 shared code, stop and ask for that change as its own pull request.
 
+Before you open the pull request, run what CI runs: `cargo fmt --all --check`,
+`cargo clippy --features tui -- -D warnings`,
+`cargo clippy --no-default-features --features tui,json-backend -- -D warnings`, and the viz tests
+from section 7.
+
 ## 9. Limits
 
 * **Full screen only.** A viz draws the whole view area (the terminal minus the status bar). It
   cannot draw a panel inside another view.
-* **No direct keys.** `on_key` exists in the trait but the host does not call it, so a viz cannot
-  take a key press. The keys are the host's: `v`, `l`, `!`, `?`, `Esc`.
+* **No direct keys.** The trait has no key method, so a viz cannot take a key press. The keys are the host's: `v`, `l`, `!`, `?`, `Esc`.
 * **No arcade panels.** A viz cannot add a panel to the arcade layout.
 * **No new signals.** A viz reads signals that sources already write (`src/bus/signals.rs`). It
   cannot write to the bus or add a source. A signal that is not there needs a source change in its
@@ -438,5 +450,6 @@ example:
 
 The agent should read `AGENTS.md` (the section "Add a viz") and this page, pick a tier (this one
 fits YAML: a gauge per chip on `tt_fan_speed_rpm`), run `tt-toplike viz new <name> --yaml`, edit
-the file it made, and try it with `tt-toplike --mock 4 --viz <name>`. Its change should be one
+the file it made, and try it with `cargo run --features tui --bin tt-toplike-tui -- --mock 4 --viz <name>`. A fan reads thousands of
+RPM, so it should set `max` on the gauge (for example 6000) to give the bar a fixed scale. Its change should be one
 file, or one folder, and nothing shared (section 8).

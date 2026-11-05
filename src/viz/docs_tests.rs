@@ -170,8 +170,8 @@ fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
     &text[a..b]
 }
 
-/// The root crate's version in `Cargo.toml` equals the version at the top of
-/// `debian/changelog` and `CHANGELOG.md`, and the one `QUICK_START.md` and
+/// The root crate's version in `Cargo.toml` matches the version at the top of
+/// `debian/changelog` and `CHANGELOG.md`, and the version `QUICK_START.md` and
 /// the site's eyebrow line show. A release bump that misses one fails here.
 #[test]
 fn the_root_version_is_the_same_everywhere_it_is_pinned() {

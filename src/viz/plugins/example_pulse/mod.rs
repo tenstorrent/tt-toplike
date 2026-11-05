@@ -34,8 +34,8 @@ pub fn make() -> Box<dyn Viz> {
 /// so the history has a steady series to draw. `toplike.board_power_w` is
 /// sent only when it changes and would give a sparse sparkline.
 ///
-/// The name says "tdp", but the value is the power the chip is drawing now.
-/// It is not the chip's power limit (see `src/bus/signals.rs`, `TDP_W`).
+/// `tt_tdp_w` is the chip's live power draw; the name comes from the
+/// telemetry source (see `src/bus/signals.rs`, `TDP_W`).
 const POWER: &str = "tt_tdp_w";
 /// ASIC temperature in degrees Celsius.
 const TEMP: &str = "tt_asic_temperature_celsius";
