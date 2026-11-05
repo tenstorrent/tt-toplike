@@ -14,14 +14,23 @@ Recommends: tt-smi, tenstorrent-dkms, curl
 Suggests: tt-toplike-app, tenstorrent-tools
 Description: Real-time hardware monitoring TUI for Tenstorrent silicon
  tt-toplike is a terminal-based monitoring tool for Tenstorrent hardware
- (Grayskull, Wormhole, Blackhole). Multiple visualization modes provide
- psychedelic real-time views of hardware telemetry:
+ (Grayskull, Wormhole, Blackhole). Each view draws the same live telemetry
+ in a different way:
  .
-  - arcade: unified split-screen with all three visualizations
-  - castle: memory hierarchy (DDR channels, L2 cache, Tensix cores)
-  - starfield: Tensix cores as stars (brightness = power, colour = temp)
-  - flow: NoC particles and DDR perimeter animation
-  - normal: traditional telemetry table
+  - insights: per-chip panels with power, temperature, DDR status and processes
+  - arcade: split-screen starfield, castle, defrag and flow in one view
+  - castle, starfield, flow, defrag: single-view takes on the memory hierarchy
+    and the Tensix cores
+  - saga: a party of heroes, one per chip, questing through the machine's
+    signals
+  - wafer waffler: the board and its dies in isometric 3D
+  - inference, training and gallery views for running models and recordings
+  - your own: a view can be added as a Rust folder or as a YAML file
+    (tt-toplike viz new <name> --yaml)
+ .
+ The signal bus records and replays what tt-toplike sees (--bus-dir,
+ --bus-inspect), and --host runs every view on a machine with no Tenstorrent
+ hardware.
  .
  Uses safe, non-invasive backends by default. Direct hardware access via
  Luwen (PCI BAR0) is available only via --backend luwen and should never
