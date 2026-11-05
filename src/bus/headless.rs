@@ -440,7 +440,11 @@ pub fn run_headless_with(
 
     report.head = host.bus().head();
     report.flushed = host.bus().flush(FLUSH_WAIT);
+    // `server` is a plain unit value off Unix, and dropping a Copy value is a lint error.
+    #[cfg(unix)]
     drop(server);
+    #[cfg(not(unix))]
+    let _ = server;
     drop(host);
     Ok(report)
 }
@@ -491,7 +495,11 @@ pub fn run_headless_replay(
         frames: 0,
         flushed: host.bus().flush(FLUSH_WAIT),
     };
+    // `server` is a plain unit value off Unix, and dropping a Copy value is a lint error.
+    #[cfg(unix)]
     drop(server);
+    #[cfg(not(unix))]
+    let _ = server;
     drop(host);
     Ok(report)
 }

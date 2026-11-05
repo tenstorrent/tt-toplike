@@ -383,6 +383,8 @@ impl TuiBus {
                     .map_err(|e| format!("cannot serve the bus socket at {}: {e}", p.display()))?,
             ),
         };
+        // `b` is only changed on Unix (the socket server), so `mut` is unused elsewhere.
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut b = TuiBus::local(host, opts);
         #[cfg(unix)]
         {
