@@ -3,7 +3,7 @@
 
 //! Tests for `example-pulse`: registration, golden frames, colours, edge cases.
 
-use super::{make, ENABLED_BY_DEFAULT, POWER, TEMP};
+use super::{make, sparkline, ENABLED_BY_DEFAULT, POWER, TEMP};
 use crate::ui::colors;
 use crate::viz::testkit::{assert_golden, render_to_text, WorldBuilder};
 use crate::viz::{registry, History, Viz, VizCtx};
@@ -162,4 +162,51 @@ fn a_missing_reading_draws_dashes() {
     let rows: Vec<&str> = text.lines().collect();
     assert!(rows[0].contains("--") && rows[0].contains("55 C"), "{}", rows[0]);
     assert!(rows[1].contains("80.0 W") && rows[1].contains("--"), "{}", rows[1]);
+}
+
+/// A chip with a power history but no temperature reading draws its
+/// sparkline in the primary colour, and the legend and explain text say so.
+#[test]
+fn a_chip_with_no_temperature_uses_the_primary_colour() {
+    let view = WorldBuilder::new().sample(A, POWER, 80.0).build();
+    let mut hist = History::default();
+    for i in 0..10 {
+        hist.record(&EntityKey::chip(A), POWER, i as f64);
+    }
+    let mut viz = make();
+    let buf = render_buf(&mut *viz, 80, 6, &view, &hist);
+    assert_eq!(spark_colour(&buf, 0), colors::primary());
+    assert!(
+        viz.legend().iter().any(|l| l.contains("primary colour")),
+        "legend: {:?}",
+        viz.legend()
+    );
+    assert!(viz.explain().contains("primary colour"), "{}", viz.explain());
+}
+
+/// A flat series draws the middle block, padded on the left.
+#[test]
+fn sparkline_of_a_flat_series_sits_in_the_middle() {
+    assert_eq!(sparkline(&[7.0, 7.0, 7.0], 5), "  \u{2584}\u{2584}\u{2584}");
+}
+
+/// One sample is flat too, and sits at the right edge.
+#[test]
+fn sparkline_of_a_single_sample() {
+    assert_eq!(sparkline(&[5.0], 4), "   \u{2584}");
+}
+
+/// No samples give blanks, and a zero width gives nothing.
+#[test]
+fn sparkline_of_nothing_is_blank() {
+    assert_eq!(sparkline(&[], 3), "   ");
+    assert_eq!(sparkline(&[1.0, 2.0], 0), "");
+}
+
+/// A NaN sample does not panic or move the scale: it draws the lowest block
+/// and the finite samples keep their places.
+#[test]
+fn sparkline_survives_a_nan_sample() {
+    assert_eq!(sparkline(&[1.0, f64::NAN, 3.0], 3), "\u{2581}\u{2581}\u{2588}");
+    assert_eq!(sparkline(&[f64::NAN, f64::NAN], 2).chars().count(), 2);
 }

@@ -33,6 +33,9 @@ pub fn make() -> Box<dyn Viz> {
 /// Chip power in watts. This is the fast-lane signal (one value every poll),
 /// so the history has a steady series to draw. `toplike.board_power_w` is
 /// sent only when it changes and would give a sparse sparkline.
+///
+/// The name says "tdp", but the value is the power the chip is drawing now.
+/// It is not the chip's power limit (see `src/bus/signals.rs`, `TDP_W`).
 const POWER: &str = "tt_tdp_w";
 /// ASIC temperature in degrees Celsius.
 const TEMP: &str = "tt_asic_temperature_celsius";
@@ -63,7 +66,10 @@ fn number(v: &Value) -> Option<f64> {
 
 /// A sparkline `width` cells wide from the newest samples, scaled between the
 /// smallest and largest value shown. Short series are padded on the left so
-/// the newest sample sits at the right edge.
+/// the newest sample sits at the right edge. A flat series (or one sample)
+/// draws the middle block. A NaN sample draws the lowest block and does not
+/// move the scale; the host records only finite values, so this is a guard
+/// and not a case the view meets.
 fn sparkline(series: &[f64], width: usize) -> String {
     let shown = &series[series.len().saturating_sub(width)..];
     let lo = shown.iter().copied().fold(f64::INFINITY, f64::min);
@@ -138,6 +144,7 @@ impl Viz for Pulse {
             format!("yellow: {} C up to {} C", hot - 15.0, hot),
             format!("red: {hot} C or more"),
             "the sparkline is power, the colour is temperature".into(),
+            "primary colour: the chip has no temperature reading yet".into(),
         ]
     }
 
@@ -146,7 +153,9 @@ impl Viz for Pulse {
         "One row per chip. The sparkline is the chip's recent power draw in \
          watts (the tt_tdp_w signal), and its colour follows the ASIC \
          temperature (tt_asic_temperature_celsius). The numbers are the \
-         latest power and temperature; -- means the chip has not reported one."
+         latest power and temperature; -- means the chip has not reported one. A \
+         chip with no temperature reading draws its sparkline in the primary \
+         colour, because there is nothing to compare with the thresholds."
             .into()
     }
 
@@ -180,7 +189,9 @@ impl Pulse {
             number(&r.value)
         };
         let (power, temp) = (read(POWER), read(TEMP));
-        // Green below hot - 15, yellow below hot, red at or above hot.
+        // Green below hot - 15, yellow below hot, red at or above hot. A chip
+        // with no temperature reading has nothing to compare, so its
+        // sparkline draws in the primary colour (the legend says so).
         let colour = match temp {
             None => colors::primary(),
             Some(t) if t >= self.hot_c => colors::error(),

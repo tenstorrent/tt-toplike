@@ -8,11 +8,14 @@ The example Rust viz plugin. Copy this folder to start your own; the rule is in
 One row per chip: the chip's PCI address, a sparkline of its recent power draw,
 and the latest power (W) and temperature (C). The sparkline is green below
 `hot_c - 15`, yellow below `hot_c`, and red at or above it. A reading the chip
-has not reported shows `--`. With no chips the view says `no chips`.
+has not reported shows `--`. A chip with no temperature reading draws its
+sparkline in the primary colour, since there is nothing to compare with the
+thresholds. With no chips the view says `no chips`.
 
 ## Signals read (all on chip entities)
 
-* `tt_tdp_w`: chip power in watts, sent every poll.
+* `tt_tdp_w`: the power the chip is drawing now, in watts, sent every poll. The name says
+  "tdp", but it is not the chip's power limit.
 * `tt_asic_temperature_celsius`: ASIC temperature in degrees Celsius.
 
 ## How to enable it

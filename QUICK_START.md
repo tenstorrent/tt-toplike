@@ -114,6 +114,14 @@ tt-toplike --mode saga    # or press S in any mode
 - One chronicle tells what happens on every floor, each line tagged with its floor (`F3`). `y` says in a sentence what set each line off
 - `S` or `Esc` leaves. Not in the `v` cycle or the rotation. `[saga]` in `config.toml` sets `enabled`, `names` and `season_minutes`. See [docs/saga.md](docs/saga.md)
 
+### Your own view (viz plugins)
+```bash
+tt-toplike viz new my-view --yaml    # one YAML file, reloaded when you save it
+tt-toplike viz list                  # every view, its source and status
+tt-toplike --mock 4 --viz my-view    # try it with no hardware
+```
+- A view can also be a Rust folder (`tt-toplike viz new my-view`, in a checkout). The shipped examples are hidden until you ask for them with `--viz <id>` or `[viz] enable = [...]` in `config.toml`. The reference, with every widget and field: [docs/viz-plugins.md](docs/viz-plugins.md)
+
 ### Rotate every view (`--rotate` / `R`)
 ```bash
 tt-toplike --rotate                     # start rotating immediately

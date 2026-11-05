@@ -78,6 +78,50 @@ N"` or `git show <version tag>` if you need the original detail.
 
 ---
 
+## Add a viz
+
+A viz is a full-screen view that you add without touching shared code. The reference is
+`docs/viz-plugins.md`; read it before you write anything. This is the short recipe.
+
+1. **Pick a tier.** A YAML file is the default: gauges, sparklines, tables, a log, a grid, a heat
+   strip or text, with colours that change at thresholds. Use a Rust folder only when you need your
+   own drawing, state between frames, or a `[viz.<id>]` setting.
+2. **Read the signal names** in `src/bus/signals.rs`. Use a name from that file. A viz cannot add a
+   signal. (`tt_fan_speed_rpm` is fan speed; `tt_tdp_w` is live power draw; `tt_asic_temperature_celsius`
+   is temperature.)
+3. **Run the scaffold.**
+   * YAML: `tt-toplike viz new <name> --yaml` writes `viz/<name>.yaml` in a checkout (or the user
+     folder `~/.config/tt-toplike/viz/` elsewhere). Edit that one file.
+   * Rust: `tt-toplike viz new <name>` (in a checkout) copies `src/viz/plugins/example_pulse/` to
+     `src/viz/plugins/<snake_name>/` with `mod.rs`, `tests.rs` and `README.md`. Edit those. Rebuild.
+   * `<name>` is kebab-case, at most 48 characters, and not a built-in view name or an existing viz id.
+     `tt-toplike viz list` shows what exists.
+4. **Run it with no hardware:** `tt-toplike --mock 4 --viz <name>`. A viz that is off by default
+   needs `--viz <id>` or `[viz] enable = ["<id>"]` in `config.toml`. Open the legend (`l`), explain
+   (`!`) and help (`?`) panels to check their text. A YAML file reloads on save within about 2
+   seconds.
+5. **Test it.** `env -u COLORTERM -u TMUX TERM=dumb cargo test --lib --features tui viz::`. A Rust
+   plugin keeps its tests and golden frames in its own folder (`golden/`, made with
+   `UPDATE_GOLDEN=1 cargo test --lib --features tui viz::plugins::<snake_name>`; read each new frame
+   before you commit it). A YAML file is loaded and drawn at three sizes by
+   `src/viz/all_examples_tests.rs`, which needs no file from you.
+6. **Never open real hardware in a viz or a viz test.** Read the bus through `ctx.world` (Rust) or a
+   widget (YAML). Tests build a fake world with `WorldBuilder` (`src/viz/testkit.rs`). Do not
+   import `ttnn` or `ttml`, and do not take a chip lease for a viz.
+
+**What a pull request may touch:** only its own folder `src/viz/plugins/<name>/` (Rust) or its own
+file `viz/<name>.yaml` (YAML). It edits no shared file: that rules out `Cargo.toml`, `build.rs`,
+`src/cli.rs`, `src/ui`, `src/bus`, the docs and another viz's files. If the viz seems to need a shared change, ask for it
+in its own pull request.
+
+**Limits:** full screen only, no keys of its own, no arcade panels, no new signals, no custom
+drawing in YAML. The Rust `Viz` trait has `on_key`, but the host does not call it. The examples to
+copy are `src/viz/plugins/example_pulse/` and `viz/examples/thermal-board.yaml`. A test,
+`agents_md_recipe_names_real_commands` in `src/viz/docs_tests.rs`, fails when a command named here
+is renamed or removed.
+
+---
+
 ## Phase 0–1: Planning & Foundation (Jan 11, 2026)
 
 Prompt: "I want to see what this app would be like written in Rust." Research

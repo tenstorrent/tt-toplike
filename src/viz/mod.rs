@@ -29,6 +29,8 @@ mod all_examples_tests;
 #[cfg(test)]
 mod cli_tests;
 #[cfg(test)]
+mod docs_tests;
+#[cfg(test)]
 mod history_tests;
 #[cfg(test)]
 mod plugins_tests;

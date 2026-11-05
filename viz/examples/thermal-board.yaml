@@ -74,9 +74,8 @@ layout:
     height: 2
     # cells are the widgets side by side in this row. Cells have no gap
     # between them, so the temperature value at the right end of the left
-    # gauge runs into the start of the power bar. Swapping the two cells only
-    # moves the contact: the power value then runs into the start of the
-    # temperature bar. To get a gap, use two rows per chip (one gauge each).
+    # gauge runs into the start of the power bar. To get a gap, use two rows
+    # per chip (one gauge each).
     cells:
       # weight is this cell's share of the row width (1 to 100, default 1).
       # Equal weights give each cell half the row.
