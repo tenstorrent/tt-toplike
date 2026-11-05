@@ -170,14 +170,30 @@ fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
     &text[a..b]
 }
 
+/// The `version` of the `[package]` table in a manifest. The key must start a
+/// line, so `rust-version = "..."` (which a normalized manifest, as `cargo
+/// package` writes it, lists before `version`) cannot match.
+fn package_version(manifest: &str) -> String {
+    let package = &manifest[manifest.find("[package]").expect("[package]")..];
+    between(package, "\nversion = \"", "\"").to_string()
+}
+
+/// A normalized manifest lists `rust-version` first; the parser still finds
+/// the package version, and it ignores the same key in later tables.
+#[test]
+fn package_version_ignores_rust_version() {
+    let normalized = "[package]\nedition = \"2021\"\nrust-version = \"1.93\"\nname = \"tt-toplike\"\nversion = \"0.19.0\"\n\n[dependencies.x]\nversion = \"9\"\n";
+    assert_eq!(package_version(normalized), "0.19.0");
+    let plain = "[package]\nname = \"tt-toplike\"\nversion = \"1.2.3\"\nrust-version = \"1.93\"\n";
+    assert_eq!(package_version(plain), "1.2.3");
+}
+
 /// The root crate's version in `Cargo.toml` matches the version at the top of
 /// `debian/changelog` and `CHANGELOG.md`, and the version `QUICK_START.md` and
 /// the site's eyebrow line show. A release bump that misses one fails here.
 #[test]
 fn the_root_version_is_the_same_everywhere_it_is_pinned() {
-    let manifest = read("Cargo.toml");
-    let package = &manifest[manifest.find("[package]").expect("[package]")..];
-    let version = between(package, "version = \"", "\"").to_string();
+    let version = package_version(&read("Cargo.toml"));
 
     let deb = read("debian/changelog");
     let deb_top = between(&deb, "tt-toplike (", ")");

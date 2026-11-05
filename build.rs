@@ -90,6 +90,7 @@ fn main() {
              \x20           {name}::ENABLED_BY_DEFAULT,\n\
              \x20           Box::new({name}::make),\n\
              \x20       ) {{\n\
+             \x20           log::warn!(\"viz plugin `{{id}}` (folder `{name}`) not registered: {{e}}\");\n\
              \x20           errors.push(e);\n\
              \x20       }}\n\
              \x20   }}\n"

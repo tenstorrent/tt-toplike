@@ -10,8 +10,8 @@ use tt_toplike_bus::{EntityKey, EntityKind, WorldRead};
 /// One signal a viz reads, declared so the host (and the docs) can list what
 /// a plugin depends on.
 ///
-/// Returned by [`Viz::signals`]; read by the host's plugin listing and by
-/// the `explain` text.
+/// Returned by [`Viz::signals`]; the host records a history for each one
+/// while the viz is on screen (see [`History`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignalSpec {
     /// The kind of entity the signal is read from.
@@ -89,8 +89,9 @@ pub trait Viz: Send {
     fn help(&self) -> String;
 
     /// Receive the viz's `[viz.<id>]` table from the config file. Called by
-    /// the host once after construction and again on config reload. The
-    /// default ignores it.
+    /// the host once at start-up, and again when a YAML viz file is reloaded
+    /// (a Rust plugin is built once, so for it only the first). The default
+    /// ignores it.
     fn configure(&mut self, cfg: &toml_edit::Table) {
         let _ = cfg;
     }

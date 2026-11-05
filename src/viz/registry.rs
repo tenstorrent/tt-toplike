@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 /// A handle to a registered viz. Handed out once per registration and never
 /// reused, so a stale handle finds nothing instead of someone else's viz.
-/// The host's view enum will carry one for a plugin view.
+/// The TUI's `DisplayMode::Plugin` carries one for a plugin view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VizHandle(pub u32);
 
@@ -372,22 +372,16 @@ pub fn with_viz<R>(h: VizHandle, f: impl FnOnce(&mut dyn Viz) -> R) -> Option<R>
     Some(run_on(&arc, f))
 }
 
-/// [`Registry::replace`] on the global registry. Called by the YAML watcher
-/// when an edited file loads. The new viz is built outside the lock; a render
-/// in flight finishes on the old instance.
-pub fn replace(h: VizHandle, make: MakeViz) -> bool {
-    let viz = make();
-    with_global(|r| r.replace_built(h, viz))
-}
-
-/// [`Registry::mark_failed`] on the global registry. Called by the YAML watcher
-/// when an edited file no longer loads.
+/// [`Registry::mark_failed`] on the global registry. Called by the TUI host's
+/// panic guard (`viz_host::fail`) when a plugin panics. (The YAML loader calls
+/// the `Registry` method itself, inside `with_global`.)
 pub fn mark_failed(h: VizHandle, msg: &str) -> bool {
     with_global(|r| r.mark_failed(h, msg))
 }
 
-/// [`Registry::remove`] on the global registry. Called by the YAML watcher
-/// when a file is deleted.
+/// [`Registry::remove`] on the global registry. Only tests call it. (The YAML
+/// loader calls the `Registry` method itself, inside `with_global`, when a
+/// file is deleted.)
 pub fn remove(h: VizHandle) -> bool {
     with_global(|r| r.remove(h))
 }

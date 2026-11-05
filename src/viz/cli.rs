@@ -620,7 +620,8 @@ fn run_new(args: &[&str], out: &mut dyn Write, err: &mut dyn Write, cwd: &Path, 
             "next, create its golden test frames (read them before you commit):\n  \
              UPDATE_GOLDEN=1 cargo test --lib --features tui viz::plugins::{module}\n\
              then build and look at it:\n  \
-             cargo run --features tui --bin tt-toplike-tui -- --mock --viz {name}"
+             cargo run --features tui --bin tt-toplike-tui -- --mock --viz {name}\n\
+             and run `cargo fmt` before you commit (a long name can change how the copy is formatted)"
         );
     } else if checkout {
         let _ = writeln!(

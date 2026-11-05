@@ -295,7 +295,7 @@ limits: [docs/saga.md](docs/saga.md).
 You can add a full-screen view without touching the rest of the program. Write one YAML file
 (gauges, tables, sparklines and more, reloaded when you save it) with `tt-toplike viz new <name>
 --yaml`, or a Rust folder with `tt-toplike viz new <name>`. `tt-toplike viz list` shows every view,
-and `tt-toplike --viz <id>` starts on one. Two examples ship, hidden until you ask for them. The
+and `tt-toplike --viz <id>` starts on one. Two examples ship, hidden until you ask for them: `example-pulse` is in the binary, and `thermal-board` is found when tt-toplike runs inside a checkout. The
 reference, written so that a coding agent can follow it, is
 [docs/viz-plugins.md](docs/viz-plugins.md).
 

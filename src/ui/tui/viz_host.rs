@@ -380,16 +380,27 @@ impl VizHost {
             return;
         };
         let mut done: Vec<(tt_toplike_bus::EntityKind, &str)> = Vec::new();
+        let mut live: Vec<(tt_toplike_bus::EntityKind, std::collections::HashSet<_>)> = Vec::new();
         for s in &specs {
             if done.contains(&(s.kind, s.name.as_str())) {
                 continue;
             }
             done.push((s.kind, s.name.as_str()));
-            for key in world.entities(s.kind) {
-                if let Some(x) = world.reading(&key, &s.name).and_then(|r| number(&r.value)) {
-                    self.history.record(&key, &s.name, x);
+            let keys = world.entities(s.kind);
+            for key in &keys {
+                if let Some(x) = world.reading(key, &s.name).and_then(|r| number(&r.value)) {
+                    self.history.record(key, &s.name, x);
                 }
             }
+            match live.iter_mut().find(|(k, _)| *k == s.kind) {
+                Some((_, set)) => set.extend(keys),
+                None => live.push((s.kind, keys.into_iter().collect())),
+            }
+        }
+        // Forget the series of entities that have left the world, for the
+        // kinds just recorded (a process that exited, a lease that ended).
+        for (kind, keys) in &live {
+            self.history.retain_entities(*kind, keys);
         }
     }
 
@@ -676,7 +687,14 @@ pub(super) fn resolve_start(
 fn source_name(s: &Source) -> String {
     match s {
         Source::Folder => "rust".to_string(),
-        Source::File(p) => p.display().to_string(),
+        // A file name is chosen by whoever wrote the file: strip control
+        // characters as `viz list` does, so an ESC cannot reach the terminal.
+        Source::File(p) => p
+            .display()
+            .to_string()
+            .chars()
+            .map(|c| if c.is_control() { '?' } else { c })
+            .collect(),
     }
 }
 

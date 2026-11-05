@@ -856,3 +856,44 @@ fn viz_flag_naming_a_failed_entry_resolves_then_leaves_with_the_reason() {
         Some("viz vh-failed-file is unavailable: bad.yaml:3: unknown widget `gauge2`".to_string())
     );
 }
+
+/// The host drops the history of an entity that has left the world, for the
+/// kinds it just recorded.
+#[test]
+fn record_forgets_entities_that_left_the_world() {
+    use crate::viz::testkit::WorldBuilder;
+    let p = stub("vh-forget", (1, 1), false, &["power_w"]);
+    let mut host = host();
+    let (a, b, c) = ("0000:01:00.0", "0000:02:00.0", "0000:03:00.0");
+    let three = WorldBuilder::new()
+        .sample(a, "power_w", 1.0)
+        .sample(b, "power_w", 2.0)
+        .sample(c, "power_w", 3.0)
+        .build();
+    host.record(p.h, &three);
+    for bus in [a, b, c] {
+        assert_eq!(
+            host.history()
+                .series(&EntityKey::chip(bus), "power_w")
+                .len(),
+            1
+        );
+    }
+    let two = WorldBuilder::new()
+        .sample(a, "power_w", 1.5)
+        .sample(c, "power_w", 3.5)
+        .build();
+    host.record(p.h, &two);
+    assert!(host
+        .history()
+        .series(&EntityKey::chip(b), "power_w")
+        .is_empty());
+    assert_eq!(
+        host.history().series(&EntityKey::chip(a), "power_w"),
+        [1.0, 1.5]
+    );
+    assert_eq!(
+        host.history().series(&EntityKey::chip(c), "power_w"),
+        [3.0, 3.5]
+    );
+}

@@ -120,7 +120,7 @@ tt-toplike viz new my-view --yaml    # one YAML file, reloaded when you save it
 tt-toplike viz list                  # every view, its source and status
 tt-toplike --mock 4 --viz my-view    # try it with no hardware
 ```
-- A view can also be a Rust folder (`tt-toplike viz new my-view`, in a checkout). The shipped examples are hidden until you ask for them with `--viz <id>` or `[viz] enable = [...]` in `config.toml`. The reference, with every widget and field: [docs/viz-plugins.md](docs/viz-plugins.md)
+- A view can also be a Rust folder (`tt-toplike viz new my-view`, in a checkout). The shipped examples are hidden until you ask for them with `--viz <id>` or `[viz] enable = [...]` in `config.toml`; `example-pulse` is in the binary and `thermal-board` is found when you run inside a checkout. The reference, with every widget and field: [docs/viz-plugins.md](docs/viz-plugins.md)
 
 ### Rotate every view (`--rotate` / `R`)
 ```bash

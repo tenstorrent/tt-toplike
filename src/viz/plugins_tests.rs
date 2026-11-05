@@ -41,16 +41,27 @@ fn every_plugin_folder_id_matches_its_folder_name() {
 #[test]
 fn init_is_idempotent() {
     let _ = super::init();
+    // Other tests register and remove `Source::Folder` stand-ins in the same
+    // global registry on other threads, so only the plugin folders that exist
+    // on disk are compared (as `all_examples_tests` does).
+    let on_disk: std::collections::BTreeSet<String> =
+        std::fs::read_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/viz/plugins"))
+            .expect("src/viz/plugins exists")
+            .flatten()
+            .filter(|d| d.path().join("mod.rs").is_file())
+            .map(|d| d.file_name().to_string_lossy().replace('_', "-"))
+            .collect();
     let folder_ids = || {
         let mut v: Vec<String> = entries()
             .into_iter()
-            .filter(|e| e.source == Source::Folder)
+            .filter(|e| e.source == Source::Folder && on_disk.contains(&e.id))
             .map(|e| e.id)
             .collect();
         v.sort();
         v
     };
     let before = folder_ids();
+    assert_eq!(before.len(), on_disk.len(), "every folder registered");
     let again = super::init();
     assert!(again.is_empty(), "second init reported errors: {again:?}");
     assert_eq!(before, folder_ids(), "second init registered something new");

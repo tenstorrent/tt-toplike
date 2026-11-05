@@ -45,6 +45,9 @@ anything:
   two tables). Every key in it has a comment.
 
 Both are hidden by default: they are not in the `v` cycle until you ask for them (section 6).
+`example-pulse` is compiled into the binary. `thermal-board` is found when tt-toplike runs inside a
+checkout of the repository (the current folder, or a folder above the executable). An installed
+binary can make its own copy with `tt-toplike viz new <name> --yaml`.
 
 ## 2. Make one: `viz new` and `viz list`
 
@@ -349,10 +352,11 @@ whose modified time or size changed. Save a file and the view changes within a f
 **`--viz <id>`** starts the TUI on that viz and switches it on for the run, even when it is hidden
 by default and not in `[viz] enable`. An unknown id exits with a message that lists every
 registered id and where it came from. With `--mode` as well, `--viz` wins. Use it with the mock
-backend to try a viz with no hardware:
+backend to try a viz with no hardware. (`thermal-board` needs a checkout; see section 1.) Modes
+that do not start the TUI, such as `--bench`, `--print` and `--headless`, ignore `--viz`:
 
 ```
-tt-toplike --mock 4 --viz thermal-board
+tt-toplike --mock 4 --viz example-pulse
 cargo run --features tui --bin tt-toplike-tui -- --mock 4 --viz thermal-board   # in a checkout
 ```
 
@@ -360,7 +364,7 @@ cargo run --features tui --bin tt-toplike-tui -- --mock 4 --viz thermal-board   
 
 ```toml
 [viz]
-enable = ["example-pulse", "thermal-board"]   # views to switch on, besides those on by default
+enable = ["example-pulse", "thermal-board"]   # views to switch on, besides those on by default (thermal-board: checkout only)
 
 [viz.example-pulse]
 hot_c = 85          # one table per viz; its keys are that plugin's own settings
@@ -378,7 +382,7 @@ kept no viz is not in the cycle.
 
 **Commands.** `/mode <id>` and `/viz <id>` switch to an enabled plugin. Built-in names for `/mode`
 come first and win. In a plugin view, `l` opens the legend, `!` the explanation and `?` the help
-panel (it lists the plugin views), and `Esc` leaves. The status bar shows "Esc leave <title>".
+panel for that viz. The help panel of another view lists the enabled plugin views. `Esc` leaves. The status bar shows "Esc leave <title>".
 
 ## 7. Testing and the golden frames
 
