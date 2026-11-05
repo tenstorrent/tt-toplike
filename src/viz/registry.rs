@@ -229,6 +229,10 @@ impl Registry {
 
     /// Like [`Registry::replace`] with the viz already built. A render in
     /// flight on the old instance finishes on it.
+    ///
+    /// The old viz is dropped here, inside the registry lock. That is fine
+    /// for a YAML `DeclarativeViz` (plain data, no custom `Drop`); a future
+    /// Rust-plugin reload path must drop the old viz outside the lock.
     pub fn replace_built(&mut self, h: VizHandle, viz: Box<dyn Viz>) -> bool {
         match self.slots.get_mut(&h.0) {
             Some(slot) => {
@@ -269,6 +273,10 @@ impl Registry {
 
     /// Remove `h`. It vanishes from `entries()` and the handle is never
     /// issued again. Returns false for an unknown handle.
+    ///
+    /// The viz is dropped here, inside the registry lock. That is fine for a
+    /// YAML `DeclarativeViz` (plain data, no custom `Drop`); a future
+    /// Rust-plugin reload path must drop the viz outside the lock.
     pub fn remove(&mut self, h: VizHandle) -> bool {
         self.slots.remove(&h.0).is_some()
     }

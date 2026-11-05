@@ -914,16 +914,6 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         ));
     }
 
-    // Disable stderr log output BEFORE anything below logs, and so before
-    // raw mode. Once the terminal is in raw mode, a stray `\n` from a log
-    // line doesn't return the cursor to column 0, so any log emitted between
-    // raw-mode-enable and this call would "staircase" diagonally across the
-    // screen. It is first here because the config read and the plugin scan
-    // below log their problems. Logs still reach the in-app message buffer
-    // (shown in the Insights panel); stderr is re-enabled on exit and on
-    // every early return below.
-    crate::logging::disable_stderr();
-
     // The config file is read here, once, before raw mode: reading it
     // after `enable_raw_mode` would leave a blank raw-mode screen if the
     // read ever stalled. `config::read_config_file` reads only a regular
@@ -941,16 +931,12 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // turn `--viz` / `--mode` into the first view. All of it happens before
     // the backend, the bus, the saga and raw mode start, so an unknown
     // `--viz` exits with its message on an untouched terminal and nothing
-    // (a `--record` log, a served socket) has begun. Pinned by
+    // (a `--record` log, a served socket) has begun. Stderr logging is still
+    // on here, so a plugin or YAML load warning prints on the normal
+    // terminal before the TUI starts. Pinned by
     // `config_read_tests::plugins_are_resolved_before_anything_starts`.
     let mut viz = viz_host::VizHost::new(&loaded_config.viz);
-    let start_mode = match viz.start_mode(cli) {
-        Ok(m) => m,
-        Err(msg) => {
-            crate::logging::enable_stderr();
-            return Err(TTTopError::Config(msg));
-        }
-    };
+    let start_mode = viz.start_mode(cli).map_err(TTTopError::Config)?;
 
     // The start-up splash (`splash`): it draws only if the first frame takes
     // longer than 150 ms, and the guard gives the screen back on an error.
@@ -974,16 +960,18 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     } else {
         splash::Step::LookingForChips
     });
-    let mut backend = match factory::create_backend(backend_type, config.clone(), cli) {
-        Ok(b) => b,
-        Err(e) => {
-            crate::logging::enable_stderr();
-            return Err(TTTopError::Backend(e));
-        }
-    };
+    let mut backend =
+        factory::create_backend(backend_type, config.clone(), cli).map_err(TTTopError::Backend)?;
 
     log::info!("TUI started with {:?} backend", backend_type);
     crate::startup_log::phase("backend ready");
+
+    // Disable stderr log output BEFORE entering raw mode. Once the terminal is
+    // in raw mode, a stray `\n` from a log line doesn't return the cursor to
+    // column 0, so any log emitted between raw-mode-enable and this call would
+    // "staircase" diagonally across the screen. Logs still reach the in-app
+    // message buffer (shown in the Insights panel); stderr is re-enabled on exit.
+    crate::logging::disable_stderr();
 
     // The panic hook, then the signal bus, in that order (see
     // `start_bus_after_panic_hook`). Both before raw mode, so a bus that
@@ -14895,6 +14883,15 @@ mod config_read_tests {
         let host = at("viz_host::VizHost::new(");
         let start = at("viz.start_mode(cli)");
         assert!(host < start, "the host exists before --viz is resolved");
+        // Stderr logging stays on until after the backend is made, as it
+        // always was, so a backend start-up warning (no hardware, using the
+        // mock) still reaches the terminal; the plugin scan logs before it.
+        let quiet = at("crate::logging::disable_stderr();");
+        assert!(
+            at("factory::create_backend(") < quiet,
+            "disable_stderr stays after create_backend"
+        );
+        assert!(host < quiet, "the plugin scan logs to stderr");
         for later in [
             "splash::start()",
             "factory::create_backend(",
