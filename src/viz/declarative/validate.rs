@@ -44,7 +44,8 @@ pub fn check_id(id: &str) -> bool {
     first_ok && groups_ok
 }
 
-/// Check a parsed definition. The error carries no file name (the caller
+/// Check a parsed definition. Callers should use `super::load`, which runs
+/// this and names the file. The error here carries no file name (the caller
 /// knows the path; see [`LoadError::with_path`]) and no line (the parsed
 /// tree has none).
 pub fn validate(def: &VizDef) -> Result<(), LoadError> {
