@@ -28,11 +28,11 @@ fn main() {
     // `tt-toplike viz ...` (new, list) is handled before the flag parser, so
     // no other invocation parses any differently. It needs no backend, no
     // terminal and no hardware.
-    let argv: Vec<String> = std::env::args().skip(1).collect();
-    if argv.first().map(String::as_str) == Some("viz") {
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if let Some(rest) = tt_toplike::viz::cli::viz_intercept(&argv) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         let code = tt_toplike::viz::cli::run(
-            &argv[1..],
+            &rest,
             &mut std::io::stdout().lock(),
             &mut std::io::stderr().lock(),
             &cwd,

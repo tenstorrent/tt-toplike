@@ -4,13 +4,15 @@
 # thermal-board: temperature and power for every chip, on one screen.
 #
 # This is an example view written in YAML. You can read it as a tutorial and
-# copy it as a starting point (`tt-toplike viz new <name> --yaml` makes a copy for you).
+# copy it as a starting point (`tt-toplike viz new <name> --yaml` makes a copy
+# for you).
 # Every key is explained below. The full format is in the plugin reference
 # (docs/viz-plugins.md), and a JSON Schema that editors can use to check and
 # complete this file is at viz/schema/viz-v1.schema.json.
 #
-# Turn it on in one of two ways, because files in viz/examples/ start switched
-# off:
+# A file in viz/examples/ starts switched off; a copy anywhere else in viz/ or
+# in the user folder starts switched on. A file that is off can be turned on in
+# one of two ways:
 #   * in the toplike config file:   [viz]
 #                                   enable = ["thermal-board"]
 #   * or for one run:               tt-toplike --viz thermal-board

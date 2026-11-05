@@ -8,9 +8,9 @@
 //! `src/viz/plugins/example_pulse/` and an empty `viz/`. Nothing here writes
 //! into the real repository.
 
-use super::cli::{format_list, new_rust, new_yaml, run};
+use super::cli::{format_list, new_rust, new_yaml, run_in, viz_intercept, Env};
 use crate::viz::declarative::loader::Loader;
-use crate::viz::registry::{EntryStatus, Registry};
+use crate::viz::registry::{EntryStatus, Registry, Source, VizEntry, VizHandle};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -70,10 +70,20 @@ fn s(v: &[&str]) -> Vec<String> {
     v.iter().map(|x| x.to_string()).collect()
 }
 
-/// Run the command, returning (exit code, stdout, stderr).
+/// Run the command, returning (exit code, stdout, stderr). It never reads
+/// the real user config directory: the scan sees only `<cwd>/viz` and a
+/// YAML scaffold outside a checkout goes to `<cwd>/user-viz`.
 fn run_cmd(args: &[&str], cwd: &Path) -> (i32, String, String) {
+    let env = Env {
+        loader_dirs: vec![cwd.join("viz")],
+        user_dir: Some(cwd.join("user-viz")),
+    };
+    run_cmd_in(args, cwd, &env)
+}
+
+fn run_cmd_in(args: &[&str], cwd: &Path, env: &Env) -> (i32, String, String) {
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let code = run(&s(args), &mut out, &mut err, cwd);
+    let code = run_in(&s(args), &mut out, &mut err, cwd, env);
     (
         code,
         String::from_utf8(out).unwrap(),
@@ -285,7 +295,10 @@ fn viz_list_shows_a_failed_entry_with_its_reason() {
         lines[1..].iter().all(|l| l.as_bytes()[id_w - 1] == b' '),
         "{text}"
     );
-    assert!(broken < fine);
+    assert!(
+        lines.iter().position(|l| l == broken) < lines.iter().position(|l| l == fine),
+        "{text}"
+    );
 
     // Not on by default shows as hidden; nothing at all says so.
     assert_eq!(format_list(&[]), "no viz found\n");
@@ -366,4 +379,330 @@ fn run_scaffolds_in_a_checkout_and_prints_the_next_command() {
     assert_eq!(code, 0, "{err}");
     assert!(tmp.path().join("viz/demo-yaml.yaml").is_file());
     assert!(out.contains("tt-toplike"), "{out}");
+}
+
+/// A listing row built by hand, so the test controls the order.
+fn row(id: &str, title: &str, source: Source, status: EntryStatus, on: bool) -> VizEntry {
+    VizEntry {
+        handle: VizHandle(1),
+        id: id.into(),
+        title: title.into(),
+        source,
+        enabled_by_default: on,
+        status,
+    }
+}
+
+#[test]
+fn list_is_sorted_by_id_whatever_the_registration_order() {
+    // Registered zeta first, then alpha: the output must still lead with alpha.
+    let entries = [
+        row("zeta", "Zeta", Source::Folder, EntryStatus::Ok, true),
+        row("alpha", "Alpha", Source::Folder, EntryStatus::Ok, true),
+    ];
+    let text = format_list(&entries);
+    let at = |id: &str| text.lines().position(|l| l.starts_with(id)).expect(&text);
+    assert!(at("alpha") < at("zeta"), "{text}");
+    assert_eq!(text.lines().count(), 3);
+}
+
+#[test]
+fn list_replaces_control_characters_and_aligns_by_display_width() {
+    let entries = [
+        row(
+            "evil",
+            "x\u{1b}[2Jy\nz",
+            Source::File(PathBuf::from("/tmp/a\u{7}b.yaml")),
+            EntryStatus::Failed("bad\u{1b}]0;pwned\u{7} key\nnext line".into()),
+            true,
+        ),
+        row(
+            "wide",
+            "\u{4e2d}\u{6587}",
+            Source::Folder,
+            EntryStatus::Ok,
+            true,
+        ),
+    ];
+    let text = format_list(&entries);
+    assert!(
+        !text.contains('\u{1b}') && !text.contains('\u{7}'),
+        "{text:?}"
+    );
+    assert_eq!(
+        text.lines().count(),
+        3,
+        "a newline in a cell must not add a line: {text:?}"
+    );
+    assert!(text.contains("x?[2Jy?z"), "{text:?}");
+    // The source column starts at the same display column on every line:
+    // the two-character CJK title is four cells wide.
+    use unicode_width::UnicodeWidthStr;
+    let col = |l: &str, key: &str| UnicodeWidthStr::width(&l[..l.find(key).unwrap()]);
+    let lines: Vec<&str> = text.lines().collect();
+    let header = col(lines[0], "SOURCE");
+    assert_eq!(col(lines[1], "/tmp/"), header, "{text}");
+    assert_eq!(col(lines[2], "folder"), header, "{text}");
+}
+
+#[test]
+fn run_list_prints_the_header_and_a_failed_entry_and_exits_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vizdir = tmp.path().join("viz");
+    fs::create_dir_all(&vizdir).unwrap();
+    fs::write(
+        vizdir.join("broken.yaml"),
+        "version: 1\nid: broken\nbogus_key: 1\n",
+    )
+    .unwrap();
+    let env = Env {
+        loader_dirs: vec![vizdir],
+        user_dir: None,
+    };
+    let (code, out, err) = run_cmd_in(&["list"], tmp.path(), &env);
+    assert_eq!(code, 0, "{err}");
+    assert!(out.lines().next().unwrap().starts_with("ID"), "{out}");
+    let line = out.lines().find(|l| l.starts_with("broken")).expect(&out);
+    assert!(
+        line.contains("failed: ") && line.contains("bogus_key"),
+        "{line}"
+    );
+    // The Rust plugin folders are listed too.
+    assert!(out.lines().any(|l| l.starts_with("example-pulse")), "{out}");
+    // No `no viz found` here: the Rust folders always exist. That text is
+    // covered by `format_list(&[])` in the test above.
+}
+
+#[test]
+fn yaml_outside_a_checkout_with_no_config_dir_is_a_refusal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = Env {
+        loader_dirs: vec![],
+        user_dir: None,
+    };
+    let (code, out, err) = run_cmd_in(&["new", "demo-yaml", "--yaml"], tmp.path(), &env);
+    assert_eq!(code, 1);
+    assert!(out.is_empty() && err.contains("config directory"), "{err}");
+    assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn yaml_outside_a_checkout_goes_to_the_given_user_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (code, out, err) = run_cmd(&["new", "demo-yaml", "--yaml"], tmp.path());
+    assert_eq!(code, 0, "{err}");
+    assert!(tmp.path().join("user-viz/demo-yaml.yaml").is_file());
+    assert!(out.contains("loads on its own"), "{out}");
+}
+
+#[test]
+fn the_viz_decision_never_panics_on_odd_arguments() {
+    use std::ffi::OsString;
+    let os = |t: &str| OsString::from(t);
+    assert_eq!(viz_intercept(&[]), None);
+    assert_eq!(viz_intercept(&[os("--mock")]), None);
+    assert_eq!(viz_intercept(&[os("vizz")]), None);
+    assert_eq!(viz_intercept(&[os("list"), os("viz")]), None);
+    assert_eq!(viz_intercept(&[os("viz")]), Some(vec![]));
+    assert_eq!(
+        viz_intercept(&[os("viz"), os("new"), os("a")]),
+        Some(vec!["new".to_string(), "a".to_string()])
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = OsString::from_vec(vec![0x66, 0xff, 0x6f]);
+        // A first argument that is not UTF-8 is not `viz`: no panic, no match.
+        assert_eq!(viz_intercept(&[bad.clone(), os("viz")]), None);
+        // A later one is converted lossily on the viz path only.
+        let got = viz_intercept(&[os("viz"), os("new"), bad]).unwrap();
+        assert_eq!(got[1], "f\u{fffd}o");
+    }
+}
+
+#[test]
+fn hostile_names_are_refused_before_any_path_is_built() {
+    let tmp = fake_checkout();
+    let before = files_under(tmp.path()).len();
+    for bad in [
+        "a/b", "..", ".x", "a\\b", "/abs", "a\0b", "../x", "x/..", ".",
+    ] {
+        assert!(new_rust(bad, tmp.path(), &[]).is_err(), "{bad:?}");
+        assert!(
+            new_yaml(bad, &tmp.path().join("viz"), &[]).is_err(),
+            "{bad:?}"
+        );
+    }
+    assert_eq!(files_under(tmp.path()).len(), before, "nothing was written");
+    assert!(!tmp.path().join("viz").read_dir().unwrap().any(|_| true));
+}
+
+#[test]
+fn only_the_three_template_files_are_copied() {
+    let tmp = fake_checkout();
+    let tpl = tmp.path().join("src/viz/plugins/example_pulse");
+    fs::write(tpl.join(".hidden"), "x").unwrap();
+    fs::write(tpl.join("notes.txt"), "x").unwrap();
+    fs::write(tpl.join("mod.rs.orig"), "x").unwrap();
+    let dir = new_rust("demo-probe", tmp.path(), &[]).unwrap();
+    let mut names: Vec<String> = fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|d| d.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["README.md", "mod.rs", "tests.rs"]);
+}
+
+#[test]
+fn names_containing_the_templates_words_come_out_right() {
+    for (name, title, ty) in [
+        ("heart-pulse", "Heart Pulse", "HeartPulse"),
+        ("pulse-x", "Pulse X", "PulseX"),
+        ("example-x", "Example X", "ExampleX"),
+        ("pulse", "Pulse", "Pulse"),
+    ] {
+        let tmp = fake_checkout();
+        let dir = new_rust(name, tmp.path(), &[]).unwrap();
+        let m = fs::read_to_string(dir.join("mod.rs")).unwrap();
+        let t = fs::read_to_string(dir.join("tests.rs")).unwrap();
+        let r = fs::read_to_string(dir.join("README.md")).unwrap();
+        assert!(
+            m.contains(&format!("        \"{title}\"\n")),
+            "{name}: title\n{m}"
+        );
+        assert_eq!(m.matches(&format!("\"{title}\"")).count(), 1, "{name}");
+        assert!(m.contains(&format!("struct {ty} {{")), "{name}");
+        assert!(m.contains(&format!("impl Viz for {ty} {{")), "{name}");
+        assert!(m.contains(&format!("Box::new({ty} {{")), "{name}");
+        assert!(m.contains(&format!("        \"{name}\"\n")), "{name}: id");
+        assert!(t.contains(&format!("make().id(), \"{name}\"")), "{name}");
+        assert!(r.starts_with(&format!("# {name}\n")), "{name}");
+        // Nothing doubled or left over.
+        for text in [&m, &t, &r] {
+            for stale in [
+                "ExamplePulse",
+                "example_pulse",
+                "example-pulse",
+                "Example Pulse",
+            ] {
+                assert!(!text.contains(stale), "{name}: {stale}");
+            }
+            assert!(!text.contains('\u{1}'), "{name}: a placeholder leaked");
+        }
+        assert!(
+            !m.contains(&format!("{ty}{ty}")) && !m.contains(&format!("{title} {ty}")),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn built_in_view_names_are_refused() {
+    let tmp = fake_checkout();
+    for name in [
+        "flow",
+        "castle",
+        "memory",
+        "topology",
+        "starfield",
+        "arcade",
+        "normal",
+        "insights",
+        "grid",
+        "defrag",
+        "hivemind",
+        "hive",
+        "sniff",
+        "training",
+        "train",
+        "tt-train",
+        "die3d",
+        "saga",
+    ] {
+        let err = new_rust(name, tmp.path(), &[]).expect_err(name).to_string();
+        assert!(err.contains("built-in view"), "{name}: {err}");
+        assert!(
+            new_yaml(name, &tmp.path().join("viz"), &[]).is_err(),
+            "{name}"
+        );
+    }
+    assert!(new_rust("flow-two", tmp.path(), &[]).is_ok());
+}
+
+/// Every name the TUI's `/mode` command answers to is refused by the scaffold.
+/// The list is read from the `"mode" => match arg {` block of
+/// `src/ui/tui/mod.rs`, so a view added there without updating the scaffold
+/// fails here.
+#[test]
+fn every_mode_the_tui_command_accepts_is_reserved() {
+    let src = include_str!("../ui/tui/mod.rs");
+    let start = src
+        .find("\"mode\" => match arg {")
+        .expect("the /mode match moved");
+    let block = &src[start..];
+    let end = block
+        .find("\"theme\" => match arg {")
+        .expect("the /theme match moved");
+    let mut seen = Vec::new();
+    // `skip(1)`: the first line is the `"mode" => match arg {` line itself.
+    for line in block[..end].lines().skip(1) {
+        let line = line.trim_start();
+        let Some((arms, _)) = line.split_once("=>") else {
+            continue;
+        };
+        if !arms.trim_start().starts_with('"') {
+            continue;
+        }
+        for arm in arms.split('|') {
+            let arm = arm.trim();
+            if let Some(name) = arm.strip_prefix('"').and_then(|a| a.strip_suffix('"')) {
+                seen.push(name.to_string());
+            }
+        }
+    }
+    assert!(seen.len() >= 10, "the scan found too little: {seen:?}");
+    let tmp = fake_checkout();
+    for name in seen {
+        let err = new_rust(&name, tmp.path(), &[]).expect_err(&name);
+        assert!(err.to_string().contains("built-in view"), "{name}: {err}");
+    }
+    // The aliases that are constants rather than literals.
+    for name in [
+        crate::animation::DIE3D_MODE_ALIAS,
+        crate::ui::tui::saga_view::MODE_NAME,
+    ] {
+        assert!(new_rust(name, tmp.path(), &[]).is_err(), "{name}");
+    }
+}
+
+/// The scaffold avoids type names the template imports. If the template gains
+/// an import, this fails until `IMPORTED_NAMES` is updated.
+#[test]
+fn every_type_the_template_imports_is_in_the_clash_list() {
+    let template = fs::read_to_string(repo().join("src/viz/plugins/example_pulse/mod.rs")).unwrap();
+    let mut checked = 0;
+    for line in template.lines().filter(|l| l.starts_with("use ")) {
+        for word in line.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+            if word.starts_with(|c: char| c.is_ascii_uppercase()) {
+                checked += 1;
+                // A name equal to it, lowercased, must be given the suffix.
+                let mut kebab = String::new();
+                for (i, c) in word.chars().enumerate() {
+                    if c.is_ascii_uppercase() && i > 0 {
+                        kebab.push('-');
+                    }
+                    kebab.push(c.to_ascii_lowercase());
+                }
+                let tmp = fake_checkout();
+                let dir = new_rust(&kebab, tmp.path(), &[]).expect(&kebab);
+                let m = fs::read_to_string(dir.join("mod.rs")).unwrap();
+                assert!(
+                    m.contains(&format!("struct {word}View")),
+                    "`{word}` is imported by the template but not in IMPORTED_NAMES"
+                );
+            }
+        }
+    }
+    assert!(checked >= 8, "the scan found too few imports: {checked}");
 }
