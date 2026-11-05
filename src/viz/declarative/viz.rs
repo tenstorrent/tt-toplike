@@ -27,7 +27,7 @@
 //! area draws nothing.
 
 use super::schema::{RowDef, VizDef, WidgetDef};
-use super::widgets::{self, Inst};
+use super::widgets::{self, EntityCache, Inst};
 use crate::ui::colors;
 use crate::viz::{SignalSpec, Viz, VizCtx};
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
@@ -63,10 +63,12 @@ impl DeclarativeViz {
         self.def.layout.iter().any(|r| {
             r.each.is_some()
                 || r.cells.iter().any(|c| {
-                    c.widget
-                        .body()
-                        .kind
-                        .is_none_or(|k| k == super::schema::KindName::Chip)
+                    // `log` reads events, never chips, whatever its `kind`.
+                    !matches!(c.widget, WidgetDef::Log(_))
+                        && c.widget
+                            .body()
+                            .kind
+                            .is_none_or(|k| k == super::schema::KindName::Chip)
                 })
         })
     }
@@ -246,8 +248,17 @@ impl Viz for DeclarativeViz {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        let chips = ctx.chips();
-        if chips.is_empty() && self.uses_chips() {
+        // One entity cache per frame: every widget that reads entities
+        // shares the lists it fetches (`widgets::EntityCache`).
+        let cache = EntityCache::new();
+        // The chip list is fetched only when the definition reads chips.
+        let uses_chips = self.uses_chips();
+        let chips = if uses_chips {
+            cache.get(ctx, tt_toplike_bus::EntityKind::Chip)
+        } else {
+            Default::default()
+        };
+        if chips.is_empty() && uses_chips {
             let note = "no chips - waiting for the first reading";
             buf.set_stringn(
                 area.x,
@@ -285,7 +296,7 @@ impl Viz for DeclarativeViz {
             let row_area = Rect::new(area.x, area.y + y, area.width, h);
             for (cell, (dx, w)) in r.row.cells.iter().zip(split_cells(r.row, area.width)) {
                 let cell_area = Rect::new(row_area.x + dx, row_area.y, w, row_area.height);
-                widgets::draw(buf, cell_area, &cell.widget, &r.inst, ctx);
+                widgets::draw(buf, cell_area, &cell.widget, &r.inst, ctx, &cache);
             }
         }
         if let Some(y) = more_y {

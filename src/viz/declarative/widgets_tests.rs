@@ -281,7 +281,7 @@ fn oversize_heights_and_tiny_or_zero_areas_do_not_panic() {
                 text_of(def.clone(), w, h, &view, &hist);
             }
         }
-        // A frame larger than the area, drawn at an offset.
+        // A frame much larger than the content.
         text_of(def.clone(), 200, 60, &view, &hist);
     }
     // A zero-size area draws nothing even inside a bigger buffer.
@@ -343,7 +343,7 @@ fn log_shows_recent_events_filtered_by_the_signal_text() {
     let hist = History::default();
     let only = text_of(layout("kernel"), 60, 4, &view, &hist);
     assert!(
-        only.contains("KernelCompiled") && !only.contains("Reset"),
+        only.contains("KernelCompiled: matmul") && !only.contains("Reset"),
         "{only}"
     );
     // `*` shows everything, oldest first, so the newest is last.
@@ -352,6 +352,57 @@ fn log_shows_recent_events_filtered_by_the_signal_text() {
         all.find("KernelCompiled").unwrap() < all.find("Reset").unwrap(),
         "{all}"
     );
+}
+
+#[test]
+fn log_lines_are_short_readable_text_not_debug_output() {
+    let chip = EntityKey::chip(CHIP2);
+    let view = WorldBuilder::new()
+        .event(Event::KernelCompiled {
+            chip: Some(chip.clone()),
+            source: "matmul".into(),
+        })
+        .event(Event::LinkChanged {
+            chip: chip.clone(),
+            mask: 0b1011,
+        })
+        .event(Event::RequestsCompleted {
+            model: EntityKey::model("llama"),
+            n: 7,
+        })
+        .event(Event::Reset {
+            chips: vec![chip.clone(), EntityKey::chip(CHIP1)],
+        })
+        // No hand-written line: the generic fallback names the event.
+        .event(Event::EccTick { chip, channel: 3 })
+        .build();
+    let def = def_with("  - height: 5\n    cells:\n      - widget: log\n        signal: \"*\"\n");
+    let text = text_of(def, 70, 5, &view, &History::default());
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "KernelCompiled: matmul on 02:00.0");
+    assert_eq!(lines[1], "LinkChanged: 02:00.0 links 0x000b (3 up)");
+    assert_eq!(lines[2], "RequestsCompleted: 7 on llama");
+    assert_eq!(lines[3], "Reset: 2 chips");
+    assert!(lines[4].starts_with("EccTick"), "{}", lines[4]);
+    // None of the hand-written lines show struct syntax.
+    assert!(!lines[..4]
+        .iter()
+        .any(|l| l.contains('{') || l.contains("Some(")));
+}
+
+#[test]
+fn log_shows_only_the_newest_matches_that_fit() {
+    let mut b = WorldBuilder::new();
+    for i in 0..30 {
+        b = b.event(Event::KernelCompiled {
+            chip: None,
+            source: format!("k{i}"),
+        });
+        b = b.event(Event::Reset { chips: vec![] });
+    }
+    let def = def_with("  - height: 2\n    cells:\n      - widget: log\n        signal: kernel\n");
+    let text = text_of(def, 40, 2, &b.build(), &History::default());
+    assert_eq!(text, "KernelCompiled: k28\nKernelCompiled: k29");
 }
 
 #[test]
@@ -449,8 +500,9 @@ fn trait_metadata_comes_from_the_definition_with_generated_fallbacks() {
     );
 }
 
-#[test]
-fn reference_fixture_golden_80x24() {
+/// Three chips with power and temperature, and a power history, for the
+/// reference fixture's golden and colour tests.
+fn reference_world() -> (LocalView, History) {
     let mut b = WorldBuilder::new();
     for (i, id) in [CHIP1, CHIP2, CHIP3].iter().enumerate() {
         b = b.sample(id, "power_w", [210.0, 95.0, 270.0][i]).sample(
@@ -459,7 +511,6 @@ fn reference_fixture_golden_80x24() {
             [61.0, 48.0, 83.0][i],
         );
     }
-    let view = b.build();
     let mut hist = History::default();
     for (i, id) in [CHIP1, CHIP2, CHIP3].iter().enumerate() {
         for step in 0..40 {
@@ -471,6 +522,12 @@ fn reference_fixture_golden_80x24() {
             );
         }
     }
+    (b.build(), hist)
+}
+
+#[test]
+fn reference_fixture_golden_80x24() {
+    let (view, hist) = reference_world();
     let mut viz = DeclarativeViz::new(load(Path::new("r.yaml"), REFERENCE_YAML).unwrap());
     let text = render_to_text(&mut viz, 80, 24, &view, &hist);
     assert_golden(
@@ -480,4 +537,355 @@ fn reference_fixture_golden_80x24() {
         )),
         &text,
     );
+}
+
+/// The golden is text only; this pins the colours on the same frame. The
+/// gauge reads chip 1 (210 W: past the yellow threshold at 200, short of
+/// the red one at 260). The three sparkline rows read 210, 95 and 270 W:
+/// yellow, no threshold (the primary colour) and red.
+#[test]
+fn reference_fixture_colours_follow_the_thresholds() {
+    use crate::ui::colors;
+    let (view, hist) = reference_world();
+    let def = load(Path::new("r.yaml"), REFERENCE_YAML).unwrap();
+    let buf = buffer_of(def, 80, 24, &view, &hist);
+    // Gauge: height 3, so the bar is on line 1.
+    let filled = colours_of(&buf, 1, "█");
+    assert!(!filled.is_empty());
+    assert!(filled.iter().all(|c| *c == Color::Yellow), "{filled:?}");
+    // Sparklines: lines 3, 4, 5. Collect the colours of their block cells.
+    let blocks = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+    let row_colours =
+        |y: u16| -> Vec<Color> { blocks.iter().flat_map(|b| colours_of(&buf, y, b)).collect() };
+    for (y, want) in [(3, Color::Yellow), (4, colors::primary()), (5, Color::Red)] {
+        let c = row_colours(y);
+        assert!(!c.is_empty(), "line {y} has a sparkline");
+        assert!(
+            c.iter().all(|x| *x == want),
+            "line {y}: {c:?}, want {want:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Fix round 1: cost, colour defaults, edge values
+// ---------------------------------------------------------------------
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+use tt_toplike_bus::{HeaderKind, ModelView, Reading, Value, WorldRead};
+
+/// A world that counts how often `entities` is called, per kind.
+struct Counting {
+    inner: LocalView,
+    calls: Mutex<HashMap<EntityKind, usize>>,
+}
+
+impl Counting {
+    fn new(inner: LocalView) -> Self {
+        Self {
+            inner,
+            calls: Mutex::new(HashMap::new()),
+        }
+    }
+    fn calls(&self, kind: EntityKind) -> usize {
+        *self.calls.lock().unwrap().get(&kind).unwrap_or(&0)
+    }
+}
+
+impl WorldRead for Counting {
+    fn seq(&self) -> u64 {
+        self.inner.seq()
+    }
+    fn models(&self) -> Vec<ModelView> {
+        self.inner.models()
+    }
+    fn model_on_chip(&self, chip: &EntityKey) -> Option<ModelView> {
+        self.inner.model_on_chip(chip)
+    }
+    fn entities(&self, kind: EntityKind) -> Vec<EntityKey> {
+        *self.calls.lock().unwrap().entry(kind).or_insert(0) += 1;
+        self.inner.entities(kind)
+    }
+    fn reading(&self, e: &EntityKey, s: &str) -> Option<Reading> {
+        self.inner.reading(e, s)
+    }
+    fn events_since(&self, seq: u64) -> Vec<(u64, Event)> {
+        self.inner.events_since(seq)
+    }
+    fn reset_seq(&self, chip: &EntityKey) -> Option<u64> {
+        self.inner.reset_seq(chip)
+    }
+    fn header_kind(&self) -> HeaderKind {
+        self.inner.header_kind()
+    }
+    fn now_mono_ns(&self) -> u64 {
+        self.inner.now_mono_ns()
+    }
+}
+
+/// Render `def` against `world` (any `WorldRead`) at 60 x 40.
+fn render_on(def: VizDef, world: &dyn WorldRead) {
+    let area = Rect::new(0, 0, 60, 40);
+    let mut buf = Buffer::empty(area);
+    let hist = History::default();
+    let ctx = VizCtx {
+        world,
+        history: &hist,
+        tick: 0,
+        now_mono_ns: 1,
+    };
+    DeclarativeViz::new(def).render(&mut buf, area, &ctx);
+}
+
+#[test]
+fn entity_lists_are_fetched_once_per_kind_per_frame() {
+    // Ten chip widgets and a table, an `each` row of three, and a host gauge.
+    let mut layout = String::new();
+    for _ in 0..10 {
+        layout.push_str(
+            "  - height: 1\n    cells:\n      - widget: gauge\n        signal: power_w\n",
+        );
+    }
+    layout.push_str("  - height: 4\n    cells:\n      - widget: table\n        signal: power_w\n");
+    layout.push_str("  - height: 1\n    each: chip\n    cells:\n      - widget: text\n        signal: power_w\n");
+    layout.push_str("  - height: 1\n    cells:\n      - widget: gauge\n        signal: load\n        kind: host\n");
+    let w = Counting::new(many_chips(3));
+    render_on(def_with(&layout), &w);
+    assert_eq!(w.calls(EntityKind::Chip), 1, "one chip list for the frame");
+    assert_eq!(w.calls(EntityKind::Host), 1);
+}
+
+#[test]
+fn a_log_only_definition_never_lists_entities() {
+    let def = def_with("  - height: 3\n    cells:\n      - widget: log\n        signal: \"*\"\n");
+    let w = Counting::new(many_chips(3));
+    render_on(def, &w);
+    assert_eq!(w.calls(EntityKind::Chip), 0);
+    assert_eq!(w.calls(EntityKind::Host), 0);
+}
+
+#[test]
+fn a_widget_that_needs_a_chip_note_does_not_fetch_entities() {
+    // In an `each` row a host-kind widget draws the note; it needs no list.
+    let def = def_with("  - height: 1\n    each: chip\n    cells:\n      - widget: gauge\n        signal: x\n        kind: host\n");
+    let w = Counting::new(many_chips(2));
+    render_on(def, &w);
+    assert_eq!(w.calls(EntityKind::Host), 0);
+}
+
+/// Cells of `sym` in row 0, as colours, for a one-line widget over `view`.
+fn one_line(widget: &str, extra: &str, view: &LocalView, hist: &History) -> Buffer {
+    buffer_of(
+        def_with(&format!(
+            "  - height: 1\n    cells:\n      - widget: {widget}\n        signal: power_w\n{extra}"
+        )),
+        30,
+        1,
+        view,
+        hist,
+    )
+}
+
+#[test]
+fn grid_and_heat_strip_without_max_use_one_neutral_colour() {
+    use crate::ui::colors;
+    // A peak reading: with no `max` it would be 100 percent of its own
+    // series and used to come out red.
+    let view = WorldBuilder::new().sample(CHIP1, "power_w", 300.0).build();
+    let mut hist = History::default();
+    for v in [10.0, 150.0, 300.0] {
+        hist.record(&EntityKey::chip(CHIP1), "power_w", v);
+    }
+    for widget in ["grid", "heat_strip"] {
+        let buf = one_line(widget, "", &view, &hist);
+        let c = colours_of(&buf, 0, "█");
+        assert!(!c.is_empty(), "{widget}");
+        assert!(c.iter().all(|x| *x == colors::primary()), "{widget}: {c:?}");
+    }
+    // Thresholds alone recolour only what reaches them; the rest stays
+    // neutral (no ramp without a `max`).
+    let th = "        thresholds:\n          - at: 200\n            color: red\n";
+    let c = colours_of(&one_line("heat_strip", th, &view, &hist), 0, "█");
+    assert_eq!(c.len(), 3);
+    assert_eq!(c.iter().filter(|x| **x == Color::Red).count(), 1);
+    assert_eq!(c.iter().filter(|x| **x == colors::primary()).count(), 2);
+}
+
+#[test]
+fn grid_and_heat_strip_with_max_use_the_heat_ramp() {
+    use crate::ui::colors;
+    let view = WorldBuilder::new().sample(CHIP1, "power_w", 90.0).build();
+    let mut hist = History::default();
+    for v in [10.0, 60.0, 90.0] {
+        hist.record(&EntityKey::chip(CHIP1), "power_w", v);
+    }
+    // Grid: 90 of 100 is over four fifths: the error colour.
+    let g = colours_of(
+        &one_line("grid", "        max: 100\n", &view, &hist),
+        0,
+        "█",
+    );
+    assert!(g.iter().all(|c| *c == colors::error()), "{g:?}");
+    // Heat strip: 10 -> success, 60 -> warning, 90 -> error.
+    let h = colours_of(
+        &one_line("heat_strip", "        max: 100\n", &view, &hist),
+        0,
+        "█",
+    );
+    assert_eq!(
+        h,
+        vec![colors::success(), colors::warning(), colors::error()]
+    );
+}
+
+/// A 40 x 10 buffer with a 20 x 3 area at (5, 2). Renders `def` over `view`
+/// and `hist` into the area and asserts no cell outside it changed.
+fn assert_contained(def: VizDef, view: &LocalView, hist: &History) {
+    let mut buf = Buffer::empty(Rect::new(0, 0, 40, 10));
+    let blank = buf.clone();
+    let area = Rect::new(5, 2, 20, 3);
+    let ctx = VizCtx {
+        world: view,
+        history: hist,
+        tick: 0,
+        now_mono_ns: 1,
+    };
+    DeclarativeViz::new(def).render(&mut buf, area, &ctx);
+    for y in 0..10u16 {
+        for x in 0..40u16 {
+            let inside = (5..25).contains(&x) && (2..5).contains(&y);
+            if !inside {
+                assert_eq!(buf[(x, y)], blank[(x, y)], "cell {x},{y} was touched");
+            }
+        }
+    }
+}
+
+#[test]
+fn huge_text_values_do_not_wrap_widths_or_spill() {
+    // 70,000 columns of text is more than a u16 holds.
+    let huge = "x".repeat(70_000);
+    let view = WorldBuilder::new()
+        .entity_sample(EntityKey::chip(CHIP1), "power_w", Value::Text(huge))
+        .build();
+    let hist = History::default();
+    for widget in ["gauge", "text", "sparkline", "heat_strip", "table", "grid"] {
+        let def = def_with(&format!(
+            "  - height: 3\n    cells:\n      - widget: {widget}\n        signal: power_w\n        label: L\n"
+        ));
+        assert_contained(def, &view, &hist);
+    }
+    // And it still draws something in a plain frame.
+    let def =
+        def_with("  - height: 1\n    cells:\n      - widget: text\n        signal: power_w\n");
+    let text = text_of(def, 20, 1, &view, &hist);
+    assert!(text.starts_with("power_w: xxxx"), "{text}");
+}
+
+#[test]
+fn long_and_wide_glyph_labels_stay_inside_their_cell() {
+    let view = WorldBuilder::new().sample(CHIP1, "power_w", 5.0).build();
+    let mut hist = History::default();
+    hist.record(&EntityKey::chip(CHIP1), "power_w", 5.0);
+    let long = "L".repeat(300);
+    // Full-width glyphs are two columns each; an odd cut must not leave half
+    // a glyph past the edge.
+    let wide = "漢".repeat(100);
+    for label in [long, wide] {
+        for widget in ["gauge", "text", "sparkline", "heat_strip", "table", "grid"] {
+            let def = def_with(&format!(
+                "  - height: 3\n    cells:\n      - widget: {widget}\n        signal: power_w\n        label: \"{label}\"\n"
+            ));
+            assert_contained(def, &view, &hist);
+        }
+    }
+}
+
+#[test]
+fn negative_zero_prints_as_zero() {
+    let def =
+        def_with("  - height: 1\n    cells:\n      - widget: text\n        signal: power_w\n");
+    for (v, want) in [
+        (-0.0, "power_w: 0"),
+        (-0.04, "power_w: 0.0"),
+        (-3.0, "power_w: -3"),
+    ] {
+        let view = WorldBuilder::new().sample(CHIP1, "power_w", v).build();
+        let text = text_of(def.clone(), 30, 1, &view, &History::default());
+        assert_eq!(text, want);
+    }
+}
+
+#[test]
+fn flat_zero_and_single_sample_series_draw_without_nan() {
+    let spark = |series: &[f64], now: f64| {
+        let view = WorldBuilder::new().sample(CHIP1, "power_w", now).build();
+        let mut hist = History::default();
+        for v in series {
+            hist.record(&EntityKey::chip(CHIP1), "power_w", *v);
+        }
+        let def = def_with(
+            "  - height: 1\n    cells:\n      - widget: sparkline\n        signal: power_w\n",
+        );
+        text_of(def, 20, 1, &view, &hist)
+    };
+    // Flat at 5: its own maximum, so every sample is full height.
+    assert_eq!(spark(&[5.0, 5.0, 5.0], 5.0), "███ 5");
+    // All zero: no scale at all, so the lowest block, not a blank or a panic.
+    assert_eq!(spark(&[0.0, 0.0, 0.0], 0.0), "▁▁▁ 0");
+    // One sample.
+    assert_eq!(spark(&[7.0], 7.0), "█ 7");
+}
+
+#[test]
+fn gauge_scale_falls_back_to_100_when_history_is_all_zero() {
+    // No `max`, and a history whose largest value is 0: the scale is 100.
+    let view = WorldBuilder::new().sample(CHIP1, "power_w", 50.0).build();
+    let mut hist = History::default();
+    for _ in 0..3 {
+        hist.record(&EntityKey::chip(CHIP1), "power_w", 0.0);
+    }
+    let buf = buffer_of(gauge_layout(""), 40, 1, &view, &hist);
+    let (f, e) = (
+        colours_of(&buf, 0, "█").len(),
+        colours_of(&buf, 0, "░").len(),
+    );
+    assert!(f + e > 10, "a bar was drawn");
+    assert!(
+        ((f * 2) as i64 - (f + e) as i64).abs() <= 1,
+        "{f} of {}",
+        f + e
+    );
+}
+
+#[test]
+fn a_host_only_definition_on_an_empty_world_has_no_chips_placeholder() {
+    let view = WorldBuilder::new().build();
+    let def = def_with(
+        "  - height: 1\n    cells:\n      - widget: gauge\n        signal: load\n        kind: host\n        label: Load\n",
+    );
+    let text = text_of(def, 40, 2, &view, &History::default());
+    assert!(!text.contains("no chips"), "{text}");
+    assert!(text.contains("--"), "{text}");
+}
+
+#[test]
+fn an_area_larger_than_the_buffer_is_cut_to_the_buffer() {
+    let view = many_chips(3);
+    let hist = History::default();
+    let ctx = VizCtx {
+        world: &view,
+        history: &hist,
+        tick: 0,
+        now_mono_ns: 1,
+    };
+    let mut buf = Buffer::empty(Rect::new(0, 0, 20, 5));
+    let def = load(Path::new("r.yaml"), REFERENCE_YAML).unwrap();
+    // The area reaches far past the buffer on every side but the top left.
+    DeclarativeViz::new(def.clone()).render(&mut buf, Rect::new(0, 0, 500, 200), &ctx);
+    // An area that starts outside the buffer draws nothing.
+    let before = buf.clone();
+    DeclarativeViz::new(def).render(&mut buf, Rect::new(100, 100, 20, 5), &ctx);
+    assert_eq!(buf, before);
 }

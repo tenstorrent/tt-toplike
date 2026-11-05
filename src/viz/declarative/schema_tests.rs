@@ -37,12 +37,13 @@ fn parses_the_reference_yaml() {
     assert_eq!(def.layout.len(), 3);
     assert_eq!(def.layout[0].height, Height::Rows(3));
     assert!(matches!(def.layout[0].cells[0].widget, WidgetDef::Gauge(_)));
-    assert_eq!(def.layout[1].height, Height::Fill);
+    assert_eq!(def.layout[1].height, Height::Rows(1));
     assert!(def.layout[1].each.is_some());
     assert!(matches!(
         def.layout[1].cells[0].widget,
         WidgetDef::Sparkline(_)
     ));
+    assert_eq!(def.layout[2].height, Height::Fill);
     assert!(matches!(def.layout[2].cells[0].widget, WidgetDef::Table(_)));
     validate(&def).expect("reference validates");
 }

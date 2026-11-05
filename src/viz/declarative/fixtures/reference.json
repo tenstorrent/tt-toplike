@@ -28,14 +28,23 @@
       ]
     },
     {
-      "height": "fill",
+      "height": 1,
       "each": "chip",
       "cells": [
-        { "widget": "sparkline", "signal": "power_w", "label": "Power" }
+        {
+          "widget": "sparkline",
+          "signal": "power_w",
+          "label": "{chip} power",
+          "max": 300.0,
+          "thresholds": [
+            { "at": 200.0, "color": "yellow" },
+            { "at": 260.0, "color": "red" }
+          ]
+        }
       ]
     },
     {
-      "height": 6,
+      "height": "fill",
       "cells": [
         { "widget": "table", "signal": "temp_c", "label": "Temperature" }
       ]

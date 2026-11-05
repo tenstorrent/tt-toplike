@@ -33,8 +33,20 @@
 //! RGB value is written here. When a widget has `thresholds`, the colour is
 //! that of the threshold with the highest `at` that the value has reached,
 //! whatever order the file lists them in. With no threshold reached the
-//! widget uses a default: `primary` for a gauge, the heat ramp
-//! ([`heat_color`]) for `grid` and `heat_strip`.
+//! widget uses a default: `primary` for a gauge and a sparkline. For `grid`
+//! and `heat_strip` the default depends on whether the file gave a scale:
+//! with `max` the red/yellow/green heat ramp ([`heat_color`]) shows how
+//! close the value is to that `max`; without `max` there is no fixed scale
+//! to measure against (the series' own peak would always read as "full"), so
+//! they draw in one neutral colour, `primary`, and only thresholds recolour
+//! them.
+//!
+//! # Cost per frame
+//!
+//! A frame may hold up to 64 widget instances. Entity lists are fetched
+//! once per kind per frame through [`EntityCache`] and shared, and only by
+//! the widgets that read entities (never `log`). `log` filters events by
+//! name before it formats any of them.
 //!
 //! # Clipping
 //!
@@ -50,7 +62,10 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
 };
-use tt_toplike_bus::{EntityKey, EntityKind, Value};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::rc::Rc;
+use tt_toplike_bus::{EntityKey, EntityKind, Event, Value};
 use unicode_width::UnicodeWidthStr;
 
 /// A gauge with no `max` and no history scales to this.
@@ -66,21 +81,60 @@ pub struct Inst {
     pub chip: Option<EntityKey>,
 }
 
+/// The entity lists of one frame, fetched once per kind and shared.
+///
+/// `WorldRead::entities` builds a new `Vec` on every call, and a frame can
+/// hold 64 widgets, so the renderer makes one of these per frame and every
+/// widget that reads entities asks it. The world has no cheaper call (there
+/// is no "first entity of kind"), so one list per kind per frame is the
+/// floor. Interior mutability keeps `draw`'s signature a shared borrow.
+#[derive(Default)]
+pub struct EntityCache {
+    by_kind: RefCell<HashMap<EntityKind, Rc<Vec<EntityKey>>>>,
+}
+
+impl EntityCache {
+    /// An empty cache; make one per frame.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The entities of `kind` in key order, fetched on first use.
+    pub fn get(&self, ctx: &VizCtx, kind: EntityKind) -> Rc<Vec<EntityKey>> {
+        self.by_kind
+            .borrow_mut()
+            .entry(kind)
+            .or_insert_with(|| Rc::new(ctx.world.entities(kind)))
+            .clone()
+    }
+}
+
 /// What a widget has to draw for: the entities, or the note that the
 /// combination of `each` and `kind` has no meaning.
 enum Target {
-    Entities(Vec<EntityKey>),
+    Entities(Rc<Vec<EntityKey>>),
     NeedsChip,
 }
 
 /// Draw one widget into `area`. The caller has already clipped `area` to
-/// the buffer.
-pub fn draw(buf: &mut Buffer, area: Rect, w: &WidgetDef, inst: &Inst, ctx: &VizCtx) {
+/// the buffer. `cache` is the frame's [`EntityCache`].
+pub fn draw(
+    buf: &mut Buffer,
+    area: Rect,
+    w: &WidgetDef,
+    inst: &Inst,
+    ctx: &VizCtx,
+    cache: &EntityCache,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    // `log` reads events, not entities: it never resolves a target.
+    if let WidgetDef::Log(b) = w {
+        return log(buf, area, b, ctx);
+    }
     let body = w.body();
-    let entities = match target(body, inst, ctx) {
+    let entities = match target(body, inst, ctx, cache) {
         Target::Entities(e) => e,
         Target::NeedsChip => {
             put(
@@ -101,7 +155,7 @@ pub fn draw(buf: &mut Buffer, area: Rect, w: &WidgetDef, inst: &Inst, ctx: &VizC
         WidgetDef::Text(b) => text(buf, area, b, inst, entities.first(), ctx),
         WidgetDef::Table(b) => table(buf, area, b, inst, &entities, ctx),
         WidgetDef::Grid(b) => grid(buf, area, b, inst, &entities, ctx),
-        WidgetDef::Log(b) => log(buf, area, b, ctx),
+        WidgetDef::Log(_) => unreachable!("handled above"),
     }
 }
 
@@ -110,12 +164,12 @@ pub fn draw(buf: &mut Buffer, area: Rect, w: &WidgetDef, inst: &Inst, ctx: &VizC
 // ---------------------------------------------------------------------
 
 /// The entities a widget reads (see the module comment).
-fn target(body: &WidgetBody, inst: &Inst, ctx: &VizCtx) -> Target {
+fn target(body: &WidgetBody, inst: &Inst, ctx: &VizCtx, cache: &EntityCache) -> Target {
     let kind = body.kind.unwrap_or(KindName::Chip);
     match &inst.chip {
-        Some(chip) if kind == KindName::Chip => Target::Entities(vec![chip.clone()]),
+        Some(chip) if kind == KindName::Chip => Target::Entities(Rc::new(vec![chip.clone()])),
         Some(_) => Target::NeedsChip,
-        None => Target::Entities(ctx.world.entities(kind.entity_kind())),
+        None => Target::Entities(cache.get(ctx, kind.entity_kind())),
     }
 }
 
@@ -169,11 +223,19 @@ fn number(v: &Value) -> Option<f64> {
 }
 
 /// A number for display: no decimals when it is whole, otherwise one.
+/// Negative zero, and a small negative that rounds to zero, print without
+/// the sign (`0`, `0.0`).
 fn fmt_num(f: f64) -> String {
-    if f.fract() == 0.0 && f.abs() < 1e15 {
+    let f = if f == 0.0 { 0.0 } else { f };
+    let s = if f.fract() == 0.0 && f.abs() < 1e15 {
         format!("{f:.0}")
     } else {
         format!("{f:.1}")
+    };
+    match s.as_str() {
+        "-0" => "0".to_string(),
+        "-0.0" => "0.0".to_string(),
+        _ => s,
     }
 }
 
@@ -202,8 +264,8 @@ fn threshold_color(body: &WidgetBody, v: f64) -> Option<Color> {
 }
 
 /// The default colour of a value by its share of the scale: under half is
-/// `success`, under four fifths `warning`, above that `error`. Used by `grid` and `heat_strip` when no threshold
-/// applies.
+/// `success`, under four fifths `warning`, above that `error`. Used by `grid`
+/// and `heat_strip` only when the file gave a `max` (see [`neutral_or_heat`]).
 fn heat_color(frac: f64) -> Color {
     let name = if frac < 0.5 {
         ColorName::Success
@@ -213,6 +275,18 @@ fn heat_color(frac: f64) -> Color {
         ColorName::Error
     };
     name.color()
+}
+
+/// The default colour of a `grid` cell or `heat_strip` sample that reached no
+/// threshold: the heat ramp when the file gave a `max`, otherwise the neutral
+/// `primary`. Without `max` the scale would be the series' own peak, which
+/// would paint a reading near its peak red whatever its size.
+fn neutral_or_heat(body: &WidgetBody, frac: f64) -> Color {
+    if body.max.is_some() {
+        heat_color(frac)
+    } else {
+        colors::primary()
+    }
 }
 
 /// The value that fills a widget. Order: the widget's own `max`; else the
@@ -250,6 +324,12 @@ fn clip(s: &str, cols: usize) -> String {
         out.push(c);
     }
     out
+}
+
+/// The display width of `s`, capped at `cap` so it always fits a `u16`.
+/// (A text value from the bus has no length limit.)
+fn text_cols(s: &str, cap: u16) -> u16 {
+    UnicodeWidthStr::width(s).min(cap as usize) as u16
 }
 
 fn muted() -> Style {
@@ -301,9 +381,11 @@ fn gauge(
         );
         (0, if cols > 0 { cols + 1 } else { 0 })
     };
-    let value_cols = UnicodeWidthStr::width(value_text.as_str()) as u16;
+    let value_cols = text_cols(&value_text, area.width);
     // One space between the bar and the value.
-    let bar_w = area.width.saturating_sub(label_cols + value_cols + 1);
+    let bar_w = area
+        .width
+        .saturating_sub(label_cols.saturating_add(value_cols).saturating_add(1));
     if bar_w >= 1 {
         let frac = v.map_or(0.0, |v| (v / scale_max(body, entity, ctx)).clamp(0.0, 1.0));
         let filled = ((frac * bar_w as f64).round() as u16).min(bar_w);
@@ -378,8 +460,10 @@ fn series(
     if x > 0 {
         x += 1;
     }
-    let value_cols = UnicodeWidthStr::width(value_text.as_str()) as u16;
-    let strip_w = area.width.saturating_sub(x + value_cols + 1) as usize;
+    let value_cols = text_cols(&value_text, area.width);
+    let strip_w = area
+        .width
+        .saturating_sub(x.saturating_add(value_cols).saturating_add(1)) as usize;
     let shown = &hist[hist.len().saturating_sub(strip_w)..];
     let max = if body.max.is_some() {
         scale_max(body, entity, ctx)
@@ -399,12 +483,19 @@ fn series(
         let (sym, color) = if heat {
             (
                 "█",
-                threshold_color(body, v).unwrap_or_else(|| heat_color(frac)),
+                threshold_color(body, v).unwrap_or_else(|| neutral_or_heat(body, frac)),
             )
         } else {
             (BLOCKS[(frac * 7.0).round() as usize], base)
         };
-        put(buf, area, x + i as u16, 0, sym, Style::default().fg(color));
+        put(
+            buf,
+            area,
+            x.saturating_add(i as u16),
+            0,
+            sym,
+            Style::default().fg(color),
+        );
     }
     let vstyle = Style::default().fg(latest
         .and_then(|v| threshold_color(body, v))
@@ -412,7 +503,7 @@ fn series(
     put(
         buf,
         area,
-        x + shown.len() as u16 + 1,
+        x.saturating_add(shown.len() as u16).saturating_add(1),
         0,
         &value_text,
         vstyle,
@@ -570,7 +661,7 @@ fn grid(
     }
     let mut y = 0u16;
     for e in entities {
-        if x + 2 > area.width {
+        if x.saturating_add(2) > area.width {
             x = 0;
             y += 1;
         }
@@ -581,7 +672,7 @@ fn grid(
         match reading.as_ref().and_then(number) {
             Some(v) => {
                 let frac = (v / scale_max(body, Some(e), ctx)).clamp(0.0, 1.0);
-                let color = threshold_color(body, v).unwrap_or_else(|| heat_color(frac));
+                let color = threshold_color(body, v).unwrap_or_else(|| neutral_or_heat(body, frac));
                 put(buf, area, x, y, "██", Style::default().fg(color));
             }
             None => {
@@ -594,34 +685,104 @@ fn grid(
 
 /// The newest events, oldest first, one per line. `signal` filters them: any
 /// text matches the event's name (`KernelCompiled`, `Reset`, ...) ignoring
-/// case, and `*` shows every event. Events come from the bus, not from a
-/// signal, so `kind` is not used.
+/// ASCII case, and `*` shows every event. Events come from the bus, not from
+/// a signal, so `kind` is not used.
+///
+/// Cost: the world hands over a copy of its retained events (there is no
+/// cheaper call), so this clones them once per log widget. Beyond that the
+/// work is bounded by the area: the filter looks at each event's static
+/// name only, and just the last `area.height` matches are formatted.
 fn log(buf: &mut Buffer, area: Rect, body: &WidgetBody, ctx: &VizCtx) {
-    let want = body.signal.to_lowercase();
-    let lines: Vec<String> = ctx
-        .world
-        .events_since(0)
-        .into_iter()
-        .map(|(_, e)| format!("{e:?}"))
-        .filter(|d| {
-            let name = d.split([' ', '(', '{']).next().unwrap_or("");
-            want == "*" || name.to_lowercase().contains(&want)
-        })
+    let events = ctx.world.events_since(0);
+    let all = body.signal == "*";
+    let matches: Vec<&Event> = events
+        .iter()
+        .map(|(_, e)| e)
+        .filter(|e| all || contains_ignore_case(event_name(e), &body.signal))
         .collect();
-    if lines.is_empty() {
+    if matches.is_empty() {
         put(buf, area, 0, 0, "no events", muted());
         return;
     }
     let room = area.height as usize;
-    for (i, l) in lines[lines.len().saturating_sub(room)..].iter().enumerate() {
-        let l: String = l.chars().filter(|c| !c.is_control()).collect();
+    for (i, e) in matches[matches.len().saturating_sub(room)..]
+        .iter()
+        .enumerate()
+    {
+        let line: String = event_line(e).chars().filter(|c| !c.is_control()).collect();
         put(
             buf,
             area,
             0,
             i as u16,
-            &l,
+            &line,
             Style::default().fg(colors::text_primary()),
         );
+    }
+}
+
+/// Does `hay` contain `needle`, ignoring ASCII case? An empty needle matches.
+fn contains_ignore_case(hay: &str, needle: &str) -> bool {
+    let (h, n) = (hay.as_bytes(), needle.as_bytes());
+    n.is_empty() || h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+}
+
+/// The event's name, as the bus spells it. Every variant is listed, so a new
+/// bus event fails to compile here and gets a name on purpose.
+fn event_name(e: &Event) -> &'static str {
+    match e {
+        Event::ModelLoading { .. } => "ModelLoading",
+        Event::ModelReady { .. } => "ModelReady",
+        Event::ModelGone { .. } => "ModelGone",
+        Event::RequestsCompleted { .. } => "RequestsCompleted",
+        Event::KernelCompiled { .. } => "KernelCompiled",
+        Event::Reset { .. } => "Reset",
+        Event::LinkChanged { .. } => "LinkChanged",
+        Event::LeaseGranted { .. } => "LeaseGranted",
+        Event::LeaseReleased { .. } => "LeaseReleased",
+        Event::EccTick { .. } => "EccTick",
+        Event::ViewChanged { .. } => "ViewChanged",
+        Event::Spark { .. } => "Spark",
+        Event::LinkPeer { .. } => "LinkPeer",
+    }
+}
+
+/// `n` chips, or `1 chip`.
+fn chips_phrase(n: usize) -> String {
+    format!("{n} chip{}", if n == 1 { "" } else { "s" })
+}
+
+/// One event as one readable line: its name, then the fields that matter in
+/// plain words. Events without a hand-written line fall back to the name and
+/// the derived `Debug` text of the event.
+fn event_line(e: &Event) -> String {
+    let name = event_name(e);
+    match e {
+        Event::KernelCompiled { chip, source } => match chip {
+            Some(c) => format!("{name}: {source} on {}", short_name(c)),
+            None => format!("{name}: {source}"),
+        },
+        Event::LinkChanged { chip, mask } => {
+            format!(
+                "{name}: {} links {mask:#06x} ({} up)",
+                short_name(chip),
+                mask.count_ones()
+            )
+        }
+        Event::RequestsCompleted { model, n } => {
+            format!("{name}: {n} on {}", short_name(model))
+        }
+        Event::Reset { chips } => format!("{name}: {}", chips_phrase(chips.len())),
+        Event::ModelReady { model, chips } => {
+            format!(
+                "{name}: {} on {}",
+                short_name(model),
+                chips_phrase(chips.len())
+            )
+        }
+        Event::ModelGone { model } => format!("{name}: {}", short_name(model)),
+        Event::ViewChanged { view } => format!("{name}: {view}"),
+        // The rest: name plus the derived text. Rare in a log widget.
+        other => format!("{other:?}"),
     }
 }

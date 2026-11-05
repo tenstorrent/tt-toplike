@@ -56,16 +56,24 @@ layout:
             color: red
 
   # A row that repeats once per chip. `each: chip` is the only value so far.
-  # height: fill takes whatever height is left.
-  - height: fill
+  # In a label, {chip} stands for the chip's short name, so each row says
+  # which chip it shows. A sparkline needs one line, so the height is 1.
+  - height: 1
     each: chip
     cells:
       - widget: sparkline
         signal: power_w
-        label: Power
+        label: "{chip} power"
+        max: 300.0
+        thresholds:
+          - at: 200.0
+            color: yellow
+          - at: 260.0
+            color: red
 
-  # A table of current readings.
-  - height: 6
+  # height: fill takes whatever height is left. A table uses it: it lists
+  # one line per chip, largest value first.
+  - height: fill
     cells:
       - widget: table
         signal: temp_c
