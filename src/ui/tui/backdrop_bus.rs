@@ -426,7 +426,7 @@ mod tests {
             assert!(text(default.last().unwrap()).ends_with(&want), "{mode:?}");
             for c in [None, SCENE, SKY, CLOUDS] {
                 for est in [false, true] {
-                    let lines = overlay_lines_with(OverlayPanel::Legend, mode, cols, (c, est));
+                    let lines = overlay_lines_with(OverlayPanel::Legend, mode, cols, (c, est), &[]);
                     assert!(
                         overlay_rows_needed(lines.len())
                             <= overlay_row_target(OverlayPanel::Legend),

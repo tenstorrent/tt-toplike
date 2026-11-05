@@ -50,6 +50,7 @@ pub(crate) mod inference_bus;
 pub(crate) mod inference_panel;
 pub(crate) mod saga_view;
 mod saga_why;
+mod viz_host;
 
 use crate::animation::{
     ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis, TrainView,
@@ -144,6 +145,11 @@ enum DisplayMode {
     /// also takes `y` for "why", `[` `]` for the party's focus and `z` for
     /// zoom (see `saga_key_for`).
     Saga,
+    /// A plugin view (`crate::viz`), by its registry handle. Everything a
+    /// plugin needs (render, cycle, legend, help) lives in `viz_host`; each
+    /// arm here is a one-line call into it. Reached with `v` after Die 3D,
+    /// `/mode <id>`, `/viz <id>` or `--viz <id>`; Esc leaves to `prev_mode`.
+    Plugin(crate::viz::VizHandle),
 }
 
 /// Every mode, for tests that must cover each one.
@@ -189,6 +195,9 @@ fn next_display_mode(m: DisplayMode) -> DisplayMode {
         DisplayMode::Die3d => DisplayMode::Insights,
         // Saga too, with `S`.
         DisplayMode::Saga => DisplayMode::Insights,
+        // Plugins follow Die 3D in the cycle; `viz_host::next_mode_in`
+        // decides that. This table alone, with no plugin list, leaves.
+        DisplayMode::Plugin(_) => DisplayMode::Insights,
     }
 }
 
@@ -477,6 +486,8 @@ fn view_name(mode: DisplayMode) -> &'static str {
         DisplayMode::Training => "training",
         DisplayMode::Die3d => "die3d",
         DisplayMode::Saga => "saga",
+        // Every plugin view publishes as "plugin" (no backdrop takes it).
+        DisplayMode::Plugin(_) => "plugin",
     }
 }
 
@@ -857,6 +868,10 @@ pub fn install_panic_hook() {
             log::warn!("saga driver thread panicked: {info}");
             return;
         }
+        // A plugin's render panic is caught and logged by `viz_host`.
+        if viz_host::in_plugin_render() {
+            return;
+        }
         // Stop the start-up splash first, without letting it clear the
         // screen, so it cannot draw over or erase the message below.
         splash::abandon();
@@ -1182,18 +1197,18 @@ fn run_app(
 
     crate::startup_log::phase("loop setup");
     // UI state - initialize from CLI --mode option if provided
-    let mut display_mode = cli
-        .mode
-        .map(display_mode_for)
-        .unwrap_or(DisplayMode::Insights); // default is now Insights
-                                           // ── Unattended rotation (`--rotate`, `R`) ───────────────────────────────
-                                           // `rotate_since` is the moment the current view became visible; each tick
-                                           // compares its age against `linger_for(display_mode, …)`. Any explicit
-                                           // mode change resets it (see the mode-transition choke point) so a view
-                                           // you just navigated to gets its whole dwell rather than a leftover
-                                           // sliver. The two activity flags below are refreshed by the Training and
-                                           // InferenceMonitor update arms while those views are on screen — which is
-                                           // exactly when the rotation needs them, so nothing is probed off-view.
+    // Plugin views (`viz_host`): register, scan the YAML folders, then
+    // `--viz` / `--mode` pick the first view. An unknown `--viz` ends here.
+    let mut viz_host = viz_host::VizHost::new(&loaded_config.viz);
+    let mut display_mode = viz_host.start_mode(cli).map_err(TTTopError::Config)?;
+    // ── Unattended rotation (`--rotate`, `R`) ───────────────────────────────
+    // `rotate_since` is the moment the current view became visible; each tick
+    // compares its age against `linger_for(display_mode, …)`. Any explicit
+    // mode change resets it (see the mode-transition choke point) so a view
+    // you just navigated to gets its whole dwell rather than a leftover
+    // sliver. The two activity flags below are refreshed by the Training and
+    // InferenceMonitor update arms while those views are on screen — which is
+    // exactly when the rotation needs them, so nothing is probed off-view.
     let mut rotate_enabled = cli.rotate;
     let mut rotate_since = Instant::now();
     let mut train_active = false;
@@ -1328,6 +1343,7 @@ fn run_app(
     let mut cmd_buf = String::new();
     // (text, is_error)
     let mut cmd_message: Option<(String, bool)> = crate::config::status_message(loaded_config);
+    cmd_message = cmd_message.or_else(|| viz_host.status_problem());
     // The view `cmd_message` belongs to, if it belongs to one, and the
     // animation clock its lifetime runs on: the nominal frame time of each
     // tick, so a stalled loop does not age it.
@@ -2070,7 +2086,10 @@ fn run_app(
                 // reads its published state when it draws. Here the view's
                 // own animation clock moves on.
                 DisplayMode::Saga => saga_frame = saga_frame.wrapping_add(1),
+                // A plugin's state moves in `viz_host.tick` below.
+                DisplayMode::Plugin(_) => {}
             }
+            viz_host.tick(Instant::now(), display_mode, || tui_bus.read());
             // The Saga view's memories follow the story in every view (see
             // `saga_party` above), and each floor takes the temperature of
             // its own chip from the backend, matched by its bus key.
@@ -2379,8 +2398,11 @@ fn run_app(
             // The bus as Die 3D and the Insights inset read it this frame
             // (their effects are timed by its clock). Taken only for those
             // two screens.
-            let bus_world = matches!(display_mode, DisplayMode::Die3d | DisplayMode::Insights)
-                .then(|| tui_bus.read());
+            let bus_world = matches!(
+                display_mode,
+                DisplayMode::Die3d | DisplayMode::Insights | DisplayMode::Plugin(_)
+            )
+            .then(|| tui_bus.read());
             let bus_world = bus_world
                 .as_ref()
                 .map(|w| w as &dyn tt_toplike_bus::WorldRead);
@@ -2393,6 +2415,7 @@ fn run_app(
             // The splash (if it is up) stops and clears before the first frame.
             splash::first_frame();
             let draw_start = Instant::now();
+            let mut viz_outcome = None;
             terminal
                 .draw(|f| {
                     // Clear frame with explicit black background for tmux compatibility
@@ -2402,6 +2425,9 @@ fn run_app(
                     );
 
                     match display_mode {
+                        DisplayMode::Plugin(h) => {
+                            viz_outcome = Some(viz_host.render(h, f, bus_world))
+                        }
                         DisplayMode::Insights => {
                             render_insights(
                                 f,
@@ -2550,7 +2576,8 @@ fn run_app(
 
                     // ── Floating overlay panel (legend / help / explain) ───────
                     if let Some(kind) = overlay {
-                        render_overlay_panel_with(f, kind, display_mode, backdrop_legend);
+                        let plugins = viz_host.help_rows(kind);
+                        render_overlay_panel_with(f, kind, display_mode, backdrop_legend, &plugins);
                     }
 
                     // ── Reset takeover (full-screen, drawn over everything) ──
@@ -2559,6 +2586,16 @@ fn run_app(
                     }
                 })
                 .map_err(|e| TTTopError::Terminal(e.to_string()))?;
+            // A plugin that crashed or went away closes: back to Insights,
+            // with the reason on the status line for a few seconds.
+            if let Some(why) = viz_host::active(display_mode)
+                .zip(viz_outcome)
+                .and_then(|(h, o)| viz_host.leave_message(h, &o))
+            {
+                display_mode = DisplayMode::Insights;
+                cmd_message = Some((why, false));
+                cmd_message_view = ViewMessage::tag(&cmd_message, display_mode, message_clock_s);
+            }
             perf_meter.record_frame(draw_start.elapsed());
             crate::startup_log::frame(draw_start.elapsed(), draw_start - iter_start);
         } // end if do_draw
@@ -3067,6 +3104,12 @@ fn run_app(
                                     if should_quit {
                                         return Ok(());
                                     }
+                                    // `/mode <id>` and `/viz <id>` for plugins.
+                                    let (msg, is_err) = viz_host.command_fallthrough(
+                                        &cmd_buf,
+                                        (msg, is_err),
+                                        &mut display_mode,
+                                    );
                                     // Empty message (e.g. /help opens overlay) →
                                     // don't leave a blank command bar on screen.
                                     cmd_message = if msg.is_empty() {
@@ -3380,6 +3423,9 @@ fn run_app(
                                 } else if display_mode == DisplayMode::Saga {
                                     // Back out of Saga (see the `S` handler above).
                                     display_mode = back_target(display_mode, prev_mode);
+                                } else if viz_host::active(display_mode).is_some() {
+                                    // Back out of a plugin view, as from Saga.
+                                    display_mode = back_target(display_mode, prev_mode);
                                 } else {
                                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_some() {
@@ -3421,7 +3467,8 @@ fn run_app(
                                     }
                                     _ => {}
                                 }
-                                display_mode = next_display_mode(display_mode);
+                                // Die 3D and plugins go on to the next plugin.
+                                display_mode = viz_host.next_mode(display_mode);
                                 log::info!("Switched to {:?} mode", display_mode);
                             }
                             KeyCode::Char(crate::animation::backdrop::KEY) => {
@@ -4509,6 +4556,13 @@ fn render_global_statusbar(
         ]);
     }
 
+    // A plugin view: its title and the key out of it.
+    hotkeys.extend(viz_host::statusbar_group(
+        mode,
+        key_style,
+        Style::default().fg(label_fg),
+    ));
+
     // Insights-specific nav appended when in that mode.
     if matches!(mode, DisplayMode::Insights) {
         hotkeys.push(vec![
@@ -5031,7 +5085,7 @@ fn overlay_row_target(kind: OverlayPanel) -> usize {
 /// terminal) so legend/help text is never clipped; height grows with content.
 #[cfg(test)]
 fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
-    render_overlay_panel_with(f, kind, mode, default_backdrop_legend(mode));
+    render_overlay_panel_with(f, kind, mode, default_backdrop_legend(mode), &[]);
 }
 
 #[cfg(test)]
@@ -5051,6 +5105,8 @@ fn render_overlay_panel_with(
     kind: OverlayPanel,
     mode: DisplayMode,
     backdrop: (crate::animation::backdrop::Choice, bool),
+    // (id, title) of each enabled plugin view, for the help panel.
+    plugins: &[(String, String)],
 ) {
     let area = f.area();
     // Enforce minimum terminal size — skip if it would leave no room.
@@ -5059,7 +5115,7 @@ fn render_overlay_panel_with(
     }
 
     // Prose panels wrap to the budget `overlay_wrap_cols` sets for this width.
-    let lines = overlay_lines_with(kind, mode, overlay_wrap_cols(area.width), backdrop);
+    let lines = overlay_lines_with(kind, mode, overlay_wrap_cols(area.width), backdrop, plugins);
 
     // Title + accent per panel kind (used for the header and to size the panel).
     let (title, border_color) = match kind {
@@ -5146,7 +5202,7 @@ fn render_overlay_panel_with(
 /// needs to respect the panel width itself).  Each line is prefixed with `║ ` (2 cols).
 #[cfg(test)]
 fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line<'static>> {
-    overlay_lines_with(kind, mode, cols, default_backdrop_legend(mode))
+    overlay_lines_with(kind, mode, cols, default_backdrop_legend(mode), &[])
 }
 
 /// [`overlay_lines`] with the view's backdrop as it is now: the legend ends
@@ -5156,6 +5212,9 @@ fn overlay_lines_with(
     mode: DisplayMode,
     cols: usize,
     backdrop: (crate::animation::backdrop::Choice, bool),
+    // (id, title) of each enabled plugin view: the help panel's "Plugin
+    // views" section (`viz_host::plugin_views_section`); empty, no section.
+    plugins: &[(String, String)],
 ) -> Vec<Line<'static>> {
     let bg = colors::rgb(8, 14, 22);
     let bar = colors::rgb(40, 55, 70);
@@ -5244,6 +5303,9 @@ fn overlay_lines_with(
                     ]),
                 ]
             };
+            if let DisplayMode::Plugin(h) = mode {
+                return viz_host::help_overlay(h, [bar, bg, dim, lbl, head], cols, keys(key));
+            }
             if mode == DisplayMode::Die3d {
                 // In the Waffler, its own keys and every one of its
                 // commands, from the view's table so a command cannot exist
@@ -5312,6 +5374,9 @@ fn overlay_lines_with(
             let settings = format!("{waffler} settings (3, then /help)");
             let mut help = vec![sep!("Keys")];
             help.extend(keys(key));
+            help.extend(viz_host::plugin_views_section(
+                plugins, bar, bg, head, key, dim,
+            ));
             help.extend([
                 sep!("Commands  (/ to open)"),
                 cmd(&[
@@ -5430,6 +5495,7 @@ fn overlay_lines_with(
                 DisplayMode::Die3d => die3d_legend_lines(bar, bg, dim),
                 DisplayMode::Saga => saga_view::legend_lines(bar, bg, dim),
                 DisplayMode::Arcade => arcade_legend_lines(bar, bg, dim),
+                DisplayMode::Plugin(h) => viz_host::legend_overlay(h, bar, bg, dim),
             };
             if crate::animation::backdrop::takes_backdrop(view_name(mode)) {
                 v.push(ln!(vec![Span::styled(
@@ -5613,6 +5679,7 @@ fn overlay_lines_with(
                 DisplayMode::Saga => {
                     explain_lines(bar, bg, dim, lbl, saga_view::EXPLAIN_TEXT, cols)
                 }
+                DisplayMode::Plugin(h) => viz_host::explain_overlay(h, [bar, bg, dim, lbl], cols),
                 DisplayMode::Training => with_bus(
                     &[
                         "Training — Robot Brain Food",
@@ -6974,7 +7041,7 @@ fn explain_lines(
     bg: ratatui::style::Color,
     dim: ratatui::style::Color,
     lbl: ratatui::style::Color,
-    text: &[&'static str],
+    text: &[&str],
     cols: usize,
 ) -> Vec<Line<'static>> {
     wrap_overlay_text(text, cols)
@@ -10369,6 +10436,11 @@ mod display_mode_tests {
         }
         assert!(!ROTATION.contains(&DisplayMode::Saga));
         assert_eq!(statusbar_mode_name(DisplayMode::Saga), "Saga");
+        // The `v` key goes through `viz_host::next_mode_in`; with no plugin
+        // enabled it is this same table for every mode.
+        for m in super::ALL_DISPLAY_MODES {
+            assert_eq!(super::viz_host::next_mode_in(m, &[]), next_display_mode(m));
+        }
     }
 
     #[test]
@@ -10404,6 +10476,11 @@ mod display_mode_tests {
     #[test]
     fn v_from_die3d_leaves_to_insights() {
         assert_eq!(next_display_mode(DisplayMode::Die3d), DisplayMode::Insights);
+        // Also through the plugin-aware cycle, when no plugin is enabled.
+        assert_eq!(
+            super::viz_host::next_mode_in(DisplayMode::Die3d, &[]),
+            DisplayMode::Insights
+        );
     }
 
     #[test]
