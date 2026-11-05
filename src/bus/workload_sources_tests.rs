@@ -618,6 +618,9 @@ fn a_log_built_from_a_process_list_with_secrets_never_contains_them() {
         }
     }
     assert!(bus.flush(std::time::Duration::from_secs(5)));
+    // Close the bus before reading its log: Windows refuses to read a file
+    // another handle still has open for writing.
+    drop(bus);
     let mut bytes = Vec::new();
     for f in std::fs::read_dir(dir.path()).unwrap() {
         bytes.extend(std::fs::read(f.unwrap().path()).unwrap());
@@ -797,6 +800,9 @@ fn a_log_built_from_property_command_lines_never_contains_their_secrets() {
         bus.publish("processes", p);
     }
     assert!(bus.flush(std::time::Duration::from_secs(5)));
+    // Close the bus before reading its log: Windows refuses to read a file
+    // another handle still has open for writing.
+    drop(bus);
     let mut bytes = Vec::new();
     for f in std::fs::read_dir(dir.path()).unwrap() {
         bytes.extend(std::fs::read(f.unwrap().path()).unwrap());

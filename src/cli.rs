@@ -2116,6 +2116,8 @@ mod tests {
         }
     }
 
+    // Asserts Unix path strings (`/run/user/...`, `/tmp/...`); Windows paths differ.
+    #[cfg(unix)]
     #[test]
     fn bus_socket_default_is_in_a_private_directory() {
         assert_eq!(
@@ -2140,6 +2142,8 @@ mod tests {
         let _ = cli;
     }
 
+    // Asserts Unix path strings (`/run/user/...`, `/tmp/...`); Windows paths differ.
+    #[cfg(unix)]
     #[test]
     fn bus_dir_default_follows_xdg_state_home_then_home() {
         assert_eq!(
