@@ -868,8 +868,10 @@ pub fn install_panic_hook() {
             log::warn!("saga driver thread panicked: {info}");
             return;
         }
-        // A plugin's render panic is caught and logged by `viz_host`.
-        if viz_host::in_plugin_render() {
+        // A panic in plugin code is caught by `viz_host`, which turns the
+        // plugin off; the UI stays up.
+        if viz_host::hook_skips_restore() {
+            log::warn!("viz plugin panicked: {info}");
             return;
         }
         // Stop the start-up splash first, without letting it clear the
@@ -912,6 +914,44 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         ));
     }
 
+    // Disable stderr log output BEFORE anything below logs, and so before
+    // raw mode. Once the terminal is in raw mode, a stray `\n` from a log
+    // line doesn't return the cursor to column 0, so any log emitted between
+    // raw-mode-enable and this call would "staircase" diagonally across the
+    // screen. It is first here because the config read and the plugin scan
+    // below log their problems. Logs still reach the in-app message buffer
+    // (shown in the Insights panel); stderr is re-enabled on exit and on
+    // every early return below.
+    crate::logging::disable_stderr();
+
+    // The config file is read here, once, before raw mode: reading it
+    // after `enable_raw_mode` would leave a blank raw-mode screen if the
+    // read ever stalled. `config::read_config_file` reads only a regular
+    // file of at most 256 KiB. Every problem goes to the log and the first
+    // to the status line (see `cmd_message` in `run_app`), and a bad
+    // `[arcade]` keeps the default layout. Pinned by
+    // `config_read_tests::the_config_is_read_before_raw_mode`. It is read
+    // before the bus opens, because the bus header records the saga's
+    // season (below).
+    let mut loaded_config = crate::config::load_config();
+    // `--arcade-layout NAME` wins over `[arcade] layout`.
+    crate::config::choose_layout(&mut loaded_config, cli.arcade_layout.as_deref());
+
+    // Plugin views (`viz_host`): register them, scan the YAML folders, and
+    // turn `--viz` / `--mode` into the first view. All of it happens before
+    // the backend, the bus, the saga and raw mode start, so an unknown
+    // `--viz` exits with its message on an untouched terminal and nothing
+    // (a `--record` log, a served socket) has begun. Pinned by
+    // `config_read_tests::plugins_are_resolved_before_anything_starts`.
+    let mut viz = viz_host::VizHost::new(&loaded_config.viz);
+    let start_mode = match viz.start_mode(cli) {
+        Ok(m) => m,
+        Err(msg) => {
+            crate::logging::enable_stderr();
+            return Err(TTTopError::Config(msg));
+        }
+    };
+
     // The start-up splash (`splash`): it draws only if the first frame takes
     // longer than 150 ms, and the guard gives the screen back on an error.
     let splash_guard = splash::start();
@@ -934,35 +974,21 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     } else {
         splash::Step::LookingForChips
     });
-    let mut backend =
-        factory::create_backend(backend_type, config.clone(), cli).map_err(TTTopError::Backend)?;
+    let mut backend = match factory::create_backend(backend_type, config.clone(), cli) {
+        Ok(b) => b,
+        Err(e) => {
+            crate::logging::enable_stderr();
+            return Err(TTTopError::Backend(e));
+        }
+    };
 
     log::info!("TUI started with {:?} backend", backend_type);
     crate::startup_log::phase("backend ready");
-
-    // Disable stderr log output BEFORE entering raw mode. Once the terminal is
-    // in raw mode, a stray `\n` from a log line doesn't return the cursor to
-    // column 0, so any log emitted between raw-mode-enable and this call would
-    // "staircase" diagonally across the screen. Logs still reach the in-app
-    // message buffer (shown in the Insights panel); stderr is re-enabled on exit.
-    crate::logging::disable_stderr();
 
     // The panic hook, then the signal bus, in that order (see
     // `start_bus_after_panic_hook`). Both before raw mode, so a bus that
     // cannot start (a log directory another process holds, `--bus-attach`
     // to a dead socket) reports on a normal terminal.
-    // The config file is read here, once, before raw mode: reading it
-    // after `enable_raw_mode` would leave a blank raw-mode screen if the
-    // read ever stalled. `config::read_config_file` reads only a regular
-    // file of at most 256 KiB. Every problem goes to the log and the first
-    // to the status line (see `cmd_message` in `run_app`), and a bad
-    // `[arcade]` keeps the default layout. Pinned by
-    // `config_read_tests::the_config_is_read_before_raw_mode`. It is read
-    // before the bus opens, because the bus header records the saga's
-    // season (below).
-    let mut loaded_config = crate::config::load_config();
-    // `--arcade-layout NAME` wins over `[arcade] layout`.
-    crate::config::choose_layout(&mut loaded_config, cli.arcade_layout.as_deref());
     let mut bus_opts =
         crate::bus::tui_bus::TuiBusOptions::from_cli(cli, backend_type, &backend.backend_info());
     // The bus header records the season this TUI's saga uses, in ticks, so
@@ -1023,6 +1049,8 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         &mut tui_bus,
         &loaded_config,
         saga.as_ref(),
+        viz,
+        start_mode,
     );
 
     // Stop the splash if no frame was ever drawn, before the screen is
@@ -1069,6 +1097,10 @@ fn run_app(
     // The saga's driver, started in `run_tui`; `None` when `[saga] enabled
     // = false` or it could not start (the Saga view says which).
     saga: Option<&crate::saga::SagaDriver>,
+    // The plugin host and the first view, both made in `run_tui` before
+    // raw mode (`--viz` / `--mode` already resolved).
+    mut viz_host: viz_host::VizHost,
+    start_mode: DisplayMode,
 ) -> Result<(), TTTopError> {
     let update_interval = Duration::from_millis(cli.interval);
     let mut last_update = Instant::now();
@@ -1197,10 +1229,8 @@ fn run_app(
 
     crate::startup_log::phase("loop setup");
     // UI state - initialize from CLI --mode option if provided
-    // Plugin views (`viz_host`): register, scan the YAML folders, then
-    // `--viz` / `--mode` pick the first view. An unknown `--viz` ends here.
-    let mut viz_host = viz_host::VizHost::new(&loaded_config.viz);
-    let mut display_mode = viz_host.start_mode(cli).map_err(TTTopError::Config)?;
+    // The first view: `--viz` or `--mode`, resolved in `run_tui`.
+    let mut display_mode = start_mode;
     // ── Unattended rotation (`--rotate`, `R`) ───────────────────────────────
     // `rotate_since` is the moment the current view became visible; each tick
     // compares its age against `linger_for(display_mode, …)`. Any explicit
@@ -14845,6 +14875,41 @@ mod config_read_tests {
         assert!(
             !src[run_app..app_end].contains("config::load_config"),
             "run_app reads no config file"
+        );
+    }
+
+    /// The plugin host is built and `--viz` resolved in `run_tui`, before
+    /// the backend, the bus, the saga and raw mode start, so an unknown id
+    /// exits on an untouched terminal with nothing begun; `run_app` builds
+    /// no host.
+    #[test]
+    fn plugins_are_resolved_before_anything_starts() {
+        let src = include_str!("mod.rs");
+        let run_tui = src.find("\npub fn run_tui(").expect("run_tui");
+        let run_app = src.find("\nfn run_app(").expect("run_app");
+        let body = &src[run_tui..run_app];
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("run_tui has no `{needle}`"))
+        };
+        let host = at("viz_host::VizHost::new(");
+        let start = at("viz.start_mode(cli)");
+        assert!(host < start, "the host exists before --viz is resolved");
+        for later in [
+            "splash::start()",
+            "factory::create_backend(",
+            "start_bus_after_panic_hook(&",
+            "crate::saga::start_for_tui(",
+            "enable_raw_mode().map_err(",
+        ] {
+            assert!(start < at(later), "--viz is resolved before `{later}`");
+        }
+        let app_end = src[run_app..]
+            .find("\n}\n")
+            .map_or(src.len(), |i| run_app + i);
+        assert!(
+            !src[run_app..app_end].contains("VizHost::new"),
+            "run_app builds no plugin host"
         );
     }
 }

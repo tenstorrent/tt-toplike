@@ -46,7 +46,7 @@ impl Viz for Stub {
     }
     fn render(&mut self, buf: &mut Buffer, area: Rect, _ctx: &VizCtx) {
         self.renders.fetch_add(1, Ordering::SeqCst);
-        self.saw_flag.store(in_plugin_render(), Ordering::SeqCst);
+        self.saw_flag.store(hook_skips_restore(), Ordering::SeqCst);
         if self.panics {
             panic!("boom in {}", self.id);
         }
@@ -182,10 +182,13 @@ fn panicking_render_is_caught_marks_entry_failed_and_reports_crashed() {
     let RenderOutcome::Crashed(msg) = &out else {
         panic!("expected Crashed, got {out:?}");
     };
-    assert!(msg.contains("panicked: boom in vh-panics"), "{msg}");
+    assert!(
+        msg.contains("panicked in render: boom in vh-panics"),
+        "{msg}"
+    );
     // The panic hook's flag was up during render and is down after.
     assert!(p.saw_flag.load(Ordering::SeqCst), "flag not set in render");
-    assert!(!in_plugin_render(), "flag left set after the panic");
+    assert!(!hook_skips_restore(), "flag left set after the panic");
     // The entry is failed and its viz dropped.
     let e = entry(p.h).expect("still listed");
     assert_eq!(e.status, EntryStatus::Failed(msg.clone()));
@@ -199,7 +202,7 @@ fn panicking_render_is_caught_marks_entry_failed_and_reports_crashed() {
     assert_eq!(again, RenderOutcome::Gone);
     assert_eq!(p.renders.load(Ordering::SeqCst), 1);
     let m = host.leave_message(p.h, &again).unwrap();
-    assert!(m.contains("unavailable: panicked: boom"), "{m}");
+    assert!(m.contains("unavailable: panicked in render: boom"), "{m}");
 }
 
 #[test]
@@ -600,4 +603,219 @@ fn help_lists_plugin_views_only_when_one_is_enabled() {
     assert!(plugin_views_section(&[], c, c, c, c, c).is_empty());
     // The host offers rows only for the help panel.
     assert!(host().help_rows(OverlayPanel::Legend).is_empty());
+}
+
+/// A viz that panics in one named method, counts every call into it, and
+/// records whether the registry lock was held on this thread when it was
+/// dropped.
+struct Faulty {
+    id: String,
+    panic_in: &'static str,
+    calls: Arc<AtomicUsize>,
+    dropped_under_lock: Arc<std::sync::Mutex<Option<bool>>>,
+}
+
+impl Faulty {
+    fn hit(&self, method: &str) {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.panic_in == method {
+            panic!("{method} blew up");
+        }
+    }
+}
+
+impl Drop for Faulty {
+    fn drop(&mut self) {
+        let mut d = self.dropped_under_lock.lock().unwrap();
+        if d.is_none() {
+            *d = Some(registry::this_thread_holds_global());
+        }
+    }
+}
+
+impl Viz for Faulty {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn title(&self) -> &str {
+        "Faulty"
+    }
+    fn min_size(&self) -> (u16, u16) {
+        self.hit("min_size");
+        (1, 1)
+    }
+    fn signals(&self) -> Vec<SignalSpec> {
+        self.hit("signals");
+        vec![SignalSpec {
+            kind: tt_toplike_bus::EntityKind::Chip,
+            name: "vh_faulty".into(),
+        }]
+    }
+    fn render(&mut self, _buf: &mut Buffer, _area: Rect, _ctx: &VizCtx) {
+        self.hit("render");
+    }
+    fn legend(&self) -> Vec<String> {
+        self.hit("legend");
+        vec!["legend".into()]
+    }
+    fn explain(&self) -> String {
+        self.hit("explain");
+        "explain".into()
+    }
+    fn help(&self) -> String {
+        self.hit("help");
+        "help".into()
+    }
+    fn configure(&mut self, _cfg: &toml_edit::Table) {
+        self.hit("configure");
+    }
+}
+
+/// Every plugin method the host calls is guarded: a panic in any of them
+/// does not unwind out of the host, turns the plugin off (Failed, no viz),
+/// drops the viz outside the registry lock, and the next call does not
+/// reach the plugin (so it cannot panic again).
+#[test]
+fn a_panic_in_any_plugin_method_turns_the_plugin_off_and_does_not_unwind() {
+    let methods = [
+        "min_size",
+        "render",
+        "signals",
+        "legend",
+        "explain",
+        "help",
+        "configure",
+    ];
+    for method in methods {
+        let id = format!("vh-faulty-{}", method.replace('_', "-"));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(std::sync::Mutex::new(None));
+        let (c, d, i) = (calls.clone(), dropped.clone(), id.clone());
+        let h = registry::register(
+            &id,
+            "Faulty",
+            Source::Folder,
+            false,
+            Box::new(move || {
+                Box::new(Faulty {
+                    id: i.clone(),
+                    panic_in: method,
+                    calls: c.clone(),
+                    dropped_under_lock: d.clone(),
+                })
+            }),
+        )
+        .unwrap();
+        let mut per_viz = BTreeMap::new();
+        per_viz.insert(id.clone(), toml_edit::Table::new());
+        let config = VizSettings {
+            enable: vec![id.clone()],
+            per_viz,
+        };
+        let mut host = VizHost::with_loader(Loader::new(Vec::new()), &config);
+        let world = || {
+            crate::viz::testkit::WorldBuilder::new()
+                .sample("0000:01:00.0", "vh_faulty", 1.0)
+                .build()
+        };
+        let area = Rect::new(0, 0, 20, 4);
+        let c = Color::Reset;
+        // Each call returns normally, whether or not the plugin panics.
+        let mut exercise = |host: &mut VizHost| match method {
+            "min_size" | "render" => {
+                let mut buf = Buffer::empty(area);
+                let _ = host.render_into(h, &mut buf, area, None);
+            }
+            "signals" => {
+                for _ in 0..HISTORY_EVERY {
+                    host.tick(Instant::now(), DisplayMode::Plugin(h), world);
+                }
+            }
+            "legend" => {
+                let lines = legend_overlay(h, c, c, c);
+                assert!(!lines.is_empty(), "{method}: a fallback line");
+            }
+            "explain" => {
+                let _ = explain_overlay(h, [c; 4], 60);
+            }
+            "help" => {
+                let _ = help_overlay(h, [c; 5], 60, Vec::new());
+            }
+            "configure" => host.configure(h),
+            _ => unreachable!(),
+        };
+        exercise(&mut host);
+        assert!(!hook_skips_restore(), "{method}: flag left set");
+        let e = entry(h).expect("still listed");
+        let EntryStatus::Failed(msg) = &e.status else {
+            panic!("{method}: entry not failed: {:?}", e.status);
+        };
+        assert!(
+            msg.starts_with(&format!("panicked in {method}: {method} blew up")),
+            "{method}: {msg}"
+        );
+        assert!(!drawable(h), "{method}: the viz is still there");
+        assert!(!host.plugins().contains(&h), "{method}: still in the cycle");
+        assert_eq!(
+            *dropped.lock().unwrap(),
+            Some(false),
+            "{method}: the viz was not dropped, or was dropped under the registry lock"
+        );
+        // Again: the plugin is not reached, so it cannot panic again.
+        let before = calls.load(Ordering::SeqCst);
+        exercise(&mut host);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            before,
+            "{method}: called again"
+        );
+    }
+}
+
+#[test]
+fn the_panic_hook_skips_the_restore_only_inside_a_plugin_call() {
+    assert!(
+        skips_restore(true),
+        "a plugin panic: leave the terminal alone"
+    );
+    assert!(!skips_restore(false), "any other panic: the normal path");
+    assert!(!hook_skips_restore(), "outside a plugin call");
+    // Inside one, the stub sees it set (see the panicking-render test too).
+    let p = stub("vh-hook-flag", (1, 1), false, &[]);
+    let area = Rect::new(0, 0, 20, 4);
+    let mut buf = Buffer::empty(area);
+    assert_eq!(
+        host().render_into(p.h, &mut buf, area, None),
+        RenderOutcome::Drawn
+    );
+    assert!(p.saw_flag.load(Ordering::SeqCst));
+    assert!(!hook_skips_restore());
+}
+
+#[test]
+fn help_rows_list_the_enabled_plugins() {
+    let p = stub("vh-help-rows", (1, 1), false, &[]);
+    let config = VizSettings {
+        enable: vec!["vh-help-rows".into()],
+        per_viz: Default::default(),
+    };
+    let host = VizHost::with_loader(Loader::new(Vec::new()), &config);
+    let rows = host.help_rows(OverlayPanel::Help);
+    assert!(
+        rows.contains(&("vh-help-rows".to_string(), "Stub View".to_string())),
+        "{rows:?}"
+    );
+    assert!(host.help_rows(OverlayPanel::Legend).is_empty());
+    let _ = p;
+}
+
+#[test]
+fn the_status_bar_title_comes_from_the_cache() {
+    let p = stub("vh-title-cache", (1, 1), false, &[]);
+    assert_eq!(name_of(p.h), "Stub View");
+    // Removed from the registry: the cached names still say who it was.
+    assert!(registry::remove(p.h));
+    assert_eq!(name_of(p.h), "Stub View");
+    assert_eq!(id_of(p.h), "vh-title-cache");
+    assert_eq!(name_of(VizHandle(u32::MAX)), format!("#{}", u32::MAX));
 }

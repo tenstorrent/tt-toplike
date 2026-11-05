@@ -20,6 +20,12 @@
 //!   [`legend_overlay`], [`explain_overlay`], [`help_overlay`] and
 //!   [`plugin_views_section`].
 //!
+//! Every call into plugin code (`min_size`, `render`, `signals`, `legend`,
+//! `explain`, `help`, `configure`, and the viz's `Drop` after a failure) goes
+//! through one guard, [`call`]: a panic there turns the plugin off and the
+//! TUI goes on. The host never calls `id` or `title`; it reads both from the
+//! registry listing.
+//!
 //! Most of the logic is in plain functions that take the enabled list as an
 //! argument ([`cycle_list`], [`next_mode_in`], [`command_in`],
 //! [`resolve_start`]), so the tests in `viz_host_tests.rs` can check it
@@ -28,7 +34,7 @@
 use super::{next_display_mode, DisplayMode, OverlayPanel, STATUS_BAR_ROWS};
 use crate::config::VizSettings;
 use crate::viz::declarative::loader::{Change, Loader};
-use crate::viz::{registry, EntryStatus, History, Source, VizCtx, VizEntry, VizHandle};
+use crate::viz::{registry, EntryStatus, History, Source, Viz, VizCtx, VizEntry, VizHandle};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -39,6 +45,7 @@ use ratatui::{
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tt_toplike_bus::{HeaderKind, LocalView, Value, World, WorldRead};
 
@@ -59,8 +66,8 @@ pub(super) enum RenderOutcome {
     /// The view area is smaller than the plugin's `min_size`. A centred
     /// "needs W x H (have w x h)" line was drawn and `render` was not called.
     TooSmall,
-    /// The plugin's `render` panicked. The entry is now marked failed and
-    /// its viz dropped; the string is the failure message.
+    /// The plugin panicked in `min_size` or `render`. The entry is now
+    /// marked failed and its viz dropped; the string is the failure message.
     Crashed(String),
     /// There is no viz behind the handle: the YAML file was deleted, or the
     /// entry failed (earlier panic, or a file that never loaded).
@@ -68,33 +75,137 @@ pub(super) enum RenderOutcome {
 }
 
 thread_local! {
-    /// True while this thread is inside a plugin's `render`. The TUI panic
-    /// hook checks it ([`in_plugin_render`]): a plugin panic is caught here,
-    /// so the hook must not restore the terminal for it.
-    static IN_RENDER: Cell<bool> = const { Cell::new(false) };
+    /// True while this thread is running plugin code under [`call`]. The TUI
+    /// panic hook checks it ([`hook_skips_restore`]): a plugin panic is
+    /// caught here, so the hook must not restore the terminal for it.
+    static IN_PLUGIN: Cell<bool> = const { Cell::new(false) };
 }
 
-/// True while the calling thread is running a plugin's `render` under the
-/// host's panic guard. Read by `install_panic_hook` in `mod.rs`.
-pub(super) fn in_plugin_render() -> bool {
-    IN_RENDER.with(Cell::get)
+/// True while the calling thread is running plugin code under [`call`].
+fn in_plugin_call() -> bool {
+    IN_PLUGIN.with(Cell::get)
 }
 
-/// Sets [`IN_RENDER`] for its lifetime. Clearing it in `drop` means a
-/// panicking render clears it too, as the panic unwinds through the guard.
-struct RenderFlag;
+/// The panic hook's decision for a panic raised while `in_plugin` is the
+/// state of [`IN_PLUGIN`]: `true` means the panic will be caught by
+/// [`call`], so the hook logs it and leaves the terminal alone.
+fn skips_restore(in_plugin: bool) -> bool {
+    in_plugin
+}
 
-impl RenderFlag {
-    fn set() -> RenderFlag {
-        IN_RENDER.with(|c| c.set(true));
-        RenderFlag
+/// [`skips_restore`] for the calling thread. Called by `install_panic_hook`
+/// in `mod.rs`.
+pub(super) fn hook_skips_restore() -> bool {
+    skips_restore(in_plugin_call())
+}
+
+/// Sets [`IN_PLUGIN`] for its lifetime. Clearing it in `drop` means a
+/// panicking plugin call clears it too, as the panic unwinds through it.
+struct PluginFlag;
+
+impl PluginFlag {
+    fn set() -> PluginFlag {
+        IN_PLUGIN.with(|c| c.set(true));
+        PluginFlag
     }
 }
 
-impl Drop for RenderFlag {
+impl Drop for PluginFlag {
     fn drop(&mut self) {
-        IN_RENDER.with(|c| c.set(false));
+        IN_PLUGIN.with(|c| c.set(false));
     }
+}
+
+/// What one guarded call into a plugin returned.
+#[derive(Debug, PartialEq)]
+enum Call<R> {
+    /// The plugin method returned this.
+    Done(R),
+    /// There is no viz behind the handle; no plugin code ran.
+    Gone,
+    /// The plugin method panicked. The entry is marked failed, its viz
+    /// dropped and one line logged; the string is the failure message.
+    Panicked(String),
+}
+
+/// Run `f` on the viz behind `h`: the one way the host calls plugin code.
+///
+/// `f` runs under `catch_unwind`, with [`IN_PLUGIN`] set so the TUI panic
+/// hook does not restore the terminal. On a panic the entry is marked
+/// failed with "panicked in `what`: ..." and its viz dropped (see
+/// [`fail`]), so the same viz cannot panic again. `what` names the method,
+/// for the message.
+fn call<R>(h: VizHandle, what: &str, f: impl FnOnce(&mut dyn Viz) -> R) -> Call<R> {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let _flag = PluginFlag::set();
+        registry::with_viz(h, f)
+    }));
+    match result {
+        Ok(Some(r)) => Call::Done(r),
+        Ok(None) => Call::Gone,
+        Err(payload) => {
+            let msg = format!("panicked in {what}: {}", panic_text(payload.as_ref()));
+            fail(h, &msg);
+            Call::Panicked(msg)
+        }
+    }
+}
+
+/// Mark `h` failed with `msg`, drop its viz, and log one line.
+///
+/// The registry rule: no plugin code runs inside the global registry lock.
+/// `registry::mark_failed` drops the slot's pointer under that lock, so a
+/// second pointer is taken first; the slot's copy is then not the last one,
+/// and the viz (whose `Drop` is plugin code) is dropped here, after the lock
+/// is released, under the same guard as any other plugin call.
+fn fail(h: VizHandle, msg: &str) {
+    let keep = registry::with_global(|r| r.viz_arc(h));
+    registry::mark_failed(h, msg);
+    log::error!("viz `{}` {msg}; it is turned off", id_of(h));
+    let dropped = catch_unwind(AssertUnwindSafe(move || {
+        let _flag = PluginFlag::set();
+        drop(keep);
+    }));
+    if dropped.is_err() {
+        log::error!("viz `{}` also panicked while being dropped", id_of(h));
+    }
+}
+
+/// The (id, title) of each handle seen, so the status bar does not list and
+/// sort the registry every frame, and a removed handle's id is still known
+/// for the message that closes its view. Handles are never reused, so a
+/// cached row cannot belong to another viz. [`VizHost::tick`] forgets a row
+/// when its YAML file is reloaded (the title may have changed).
+static NAMES: OnceLock<Mutex<HashMap<VizHandle, (String, String)>>> = OnceLock::new();
+
+/// The cached (id, title) of `h`, filled from the registry on first use.
+/// `None` for a handle never registered.
+fn names(h: VizHandle) -> Option<(String, String)> {
+    let cache = NAMES.get_or_init(Default::default);
+    if let Some(n) = cache.lock().unwrap_or_else(|e| e.into_inner()).get(&h) {
+        return Some(n.clone());
+    }
+    // Read the registry without holding the cache lock.
+    let e = entry(h)?;
+    let n = (e.id, e.title);
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(h)
+        .or_insert_with(|| n.clone());
+    Some(n)
+}
+
+/// Drop the cached names of `h` (its file was reloaded).
+fn forget_names(h: VizHandle) {
+    if let Some(cache) = NAMES.get() {
+        cache.lock().unwrap_or_else(|e| e.into_inner()).remove(&h);
+    }
+}
+
+/// The id of `h` for messages, or `#n` for a handle never seen.
+fn id_of(h: VizHandle) -> String {
+    names(h).map_or_else(|| format!("#{}", h.0), |n| n.0)
 }
 
 /// The TUI's plugin state: the YAML loader, the history plugins read, and
@@ -117,9 +228,6 @@ pub(super) struct VizHost {
     per_viz: BTreeMap<String, toml_edit::Table>,
     /// One config problem per unknown id in `[viz] enable`.
     problems: Vec<String>,
-    /// The id behind each handle drawn so far, for the message shown after
-    /// the handle is removed (the registry no longer knows it then).
-    ids: HashMap<VizHandle, String>,
 }
 
 impl VizHost {
@@ -127,7 +235,8 @@ impl VizHost {
     /// once per process and are logged here), scan the YAML folders, then
     /// check `[viz] enable` against what loaded.
     ///
-    /// Reads the plugin folders on disk. Called once by `run_app`.
+    /// Reads the plugin folders on disk. Called once by `run_tui`, before
+    /// the backend, the bus and raw mode start.
     pub(super) fn new(config: &VizSettings) -> VizHost {
         for e in crate::viz::init() {
             log::warn!("viz plugin not registered: {e}");
@@ -175,7 +284,6 @@ impl VizHost {
             enabled: deduped.enable.into_iter().collect(),
             per_viz: config.per_viz.clone(),
             problems,
-            ids: HashMap::new(),
         }
     }
 
@@ -201,8 +309,8 @@ impl VizHost {
     /// The first view, from `--mode` and `--viz` (`--viz` wins; see
     /// `cli::effective_start`). A known `--viz` id is enabled for this run
     /// even when it is off by default. An unknown one (the empty string
-    /// too) is an error whose text lists every registered id; `run_app`
-    /// returns it, so the TUI exits with that message.
+    /// too) is an error whose text lists every registered id; `run_tui`
+    /// returns it before touching the terminal, so the TUI exits with it.
     pub(super) fn start_mode(&mut self, cli: &crate::cli::Cli) -> Result<DisplayMode, String> {
         let start = crate::cli::effective_start(cli.mode, cli.viz.as_deref());
         let entries = registry::entries();
@@ -216,12 +324,15 @@ impl VizHost {
     }
 
     /// Hand the viz behind `h` its `[viz.<id>]` table, if the config has one.
+    /// The id comes from the registry, so no plugin code runs unless there
+    /// is a table to hand over.
     fn configure(&self, h: VizHandle) {
-        registry::with_viz(h, |v| {
-            if let Some(t) = self.per_viz.get(v.id()) {
-                v.configure(t);
-            }
-        });
+        let Some((id, _)) = names(h) else {
+            return;
+        };
+        if let Some(t) = self.per_viz.get(&id) {
+            let _ = call(h, "configure", |v| v.configure(t));
+        }
     }
 
     /// Once per data tick, in every mode.
@@ -245,7 +356,11 @@ impl VizHost {
             self.last_poll = Some(now);
             self.polls += 1;
             for c in self.loader.poll() {
-                // An edited or new file gets its `[viz.<id>]` table again.
+                // An edited or new file gets its `[viz.<id>]` table again,
+                // and an edited one may have a new title.
+                if let Change::Updated(h) = c {
+                    forget_names(h);
+                }
                 if let Change::Added(h) | Change::Updated(h) = c {
                     self.configure(h);
                 }
@@ -261,7 +376,7 @@ impl VizHost {
     /// Record the current value of each signal `h` declares, for every
     /// entity of the signal's kind that has a numeric reading.
     fn record(&mut self, h: VizHandle, world: &dyn WorldRead) {
-        let Some(specs) = registry::with_viz(h, |v| v.signals()) else {
+        let Call::Done(specs) = call(h, "signals", |v| v.signals()) else {
             return;
         };
         let mut done: Vec<(tt_toplike_bus::EntityKind, &str)> = Vec::new();
@@ -351,9 +466,9 @@ impl VizHost {
     /// * No viz behind `h`: `Gone`, nothing drawn.
     /// * `area` smaller than its `min_size`: a centred "needs W x H (have
     ///   w x h)" line and `TooSmall`; the plugin's `render` is not called.
-    /// * Otherwise `render` runs under `catch_unwind`. A panic marks the
-    ///   entry failed and drops its viz (so it cannot panic again next
-    ///   frame), logs one line, and returns `Crashed`.
+    /// * `min_size` and `render` run through [`call`]. A panic in either
+    ///   marks the entry failed and drops its viz (so it cannot panic again
+    ///   next frame), logs one line, and returns `Crashed`.
     ///
     /// `world` is `None` only if the caller took no bus snapshot; the
     /// plugin then sees an empty world.
@@ -364,12 +479,14 @@ impl VizHost {
         area: Rect,
         world: Option<&dyn WorldRead>,
     ) -> RenderOutcome {
-        let Some((id, (min_w, min_h))) =
-            registry::with_viz(h, |v| (v.id().to_string(), v.min_size()))
-        else {
-            return RenderOutcome::Gone;
+        // Cache who `h` is while it is still registered, so the message after
+        // a removal can name it. A cache hit on every later frame.
+        let _ = names(h);
+        let (min_w, min_h) = match call(h, "min_size", |v| v.min_size()) {
+            Call::Done(size) => size,
+            Call::Gone => return RenderOutcome::Gone,
+            Call::Panicked(msg) => return RenderOutcome::Crashed(msg),
         };
-        self.ids.insert(h, id.clone());
         if area.width < min_w || area.height < min_h {
             draw_needs(buf, area, (min_w, min_h));
             return RenderOutcome::TooSmall;
@@ -388,20 +505,11 @@ impl VizHost {
             tick: self.ticks,
             now_mono_ns: world.now_mono_ns(),
         };
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let _flag = RenderFlag::set();
-            registry::with_viz(h, |v| v.render(buf, area, &ctx))
-        }));
-        match result {
-            Ok(Some(())) => RenderOutcome::Drawn,
+        match call(h, "render", |v| v.render(buf, area, &ctx)) {
+            Call::Done(()) => RenderOutcome::Drawn,
             // Removed between the size check and the render.
-            Ok(None) => RenderOutcome::Gone,
-            Err(payload) => {
-                let msg = format!("panicked: {}", panic_text(payload.as_ref()));
-                registry::mark_failed(h, &msg);
-                log::error!("viz `{id}` {msg}; its view is closed");
-                RenderOutcome::Crashed(msg)
-            }
+            Call::Gone => RenderOutcome::Gone,
+            Call::Panicked(msg) => RenderOutcome::Crashed(msg),
         }
     }
 
@@ -409,12 +517,7 @@ impl VizHost {
     /// or `Crashed`), or `None` when the view stays. The frame loop shows
     /// it for a few seconds over Insights.
     pub(super) fn leave_message(&self, h: VizHandle, outcome: &RenderOutcome) -> Option<String> {
-        let id = || {
-            self.ids
-                .get(&h)
-                .cloned()
-                .unwrap_or_else(|| format!("#{}", h.0))
-        };
+        let id = || id_of(h);
         match outcome {
             RenderOutcome::Drawn | RenderOutcome::TooSmall => None,
             RenderOutcome::Crashed(msg) => Some(format!("viz crashed: {} ({msg})", id())),
@@ -434,6 +537,7 @@ impl VizHost {
 /// True when the registry holds a drawable viz behind `h`. A placeholder
 /// (a YAML file that never loaded) and a crashed plugin have none; a file
 /// that broke after loading keeps its last good viz and stays drawable.
+/// The closure runs no plugin code, so it needs no [`call`] guard.
 fn drawable(h: VizHandle) -> bool {
     registry::with_viz(h, |_| ()).is_some()
 }
@@ -443,9 +547,10 @@ fn entry(h: VizHandle) -> Option<VizEntry> {
     registry::entries().into_iter().find(|e| e.handle == h)
 }
 
-/// The plugin's title for the status bar, or `#n` once it is gone.
+/// The plugin's title for the status bar, or `#n` for a handle never seen.
+/// Cached (see [`NAMES`]), so a frame does not list the registry.
 pub(super) fn name_of(h: VizHandle) -> String {
-    entry(h).map_or_else(|| format!("#{}", h.0), |e| e.title)
+    names(h).map_or_else(|| format!("#{}", h.0), |n| n.1)
 }
 
 /// The plugins in the `v` cycle: entries enabled by default or listed in
@@ -674,7 +779,10 @@ pub(super) fn legend_overlay(
     bg: Color,
     dim: Color,
 ) -> Vec<Line<'static>> {
-    let lines = registry::with_viz(h, |v| v.legend()).unwrap_or_default();
+    let lines = match call(h, "legend", |v| v.legend()) {
+        Call::Done(lines) => lines,
+        Call::Gone | Call::Panicked(_) => Vec::new(),
+    };
     let lines = if lines.is_empty() {
         vec!["  (this view has no legend)".to_string()]
     } else {
@@ -689,8 +797,10 @@ pub(super) fn legend_overlay(
 /// The text lines of the explain panel (`!`) for plugin `h`: its title, a
 /// blank line, then its `explain()` text, one entry per line of it.
 fn explain_text(h: VizHandle) -> Vec<String> {
-    let body = registry::with_viz(h, |v| v.explain())
-        .unwrap_or_else(|| "This view is no longer available.".to_string());
+    let body = match call(h, "explain", |v| v.explain()) {
+        Call::Done(text) => text,
+        Call::Gone | Call::Panicked(_) => "This view is no longer available.".to_string(),
+    };
     let mut text = vec![name_of(h), String::new()];
     text.extend(body.lines().map(str::to_string));
     text
@@ -726,7 +836,10 @@ pub(super) fn help_overlay(
             )],
         )
     };
-    let body = registry::with_viz(h, |v| v.help()).unwrap_or_default();
+    let body = match call(h, "help", |v| v.help()) {
+        Call::Done(text) => text,
+        Call::Gone | Call::Panicked(_) => String::new(),
+    };
     let mut text: Vec<&str> = body.lines().collect();
     text.push("Esc leaves this view; v goes to the next one.");
     let mut out = vec![heading(format!("{} keys", name_of(h)))];

@@ -285,7 +285,43 @@ static GLOBAL: OnceLock<RwLock<Registry>> = OnceLock::new();
 pub(crate) fn with_global<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
     let lock = GLOBAL.get_or_init(|| RwLock::new(Registry::new()));
     let mut guard = lock.write().unwrap_or_else(|e| e.into_inner());
+    #[cfg(test)]
+    let _held = HeldHere::set();
     f(&mut guard)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test builds only: true while this thread is inside [`with_global`].
+    static HELD_HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Test builds only: sets [`HELD_HERE`] for its lifetime.
+#[cfg(test)]
+struct HeldHere;
+
+#[cfg(test)]
+impl HeldHere {
+    fn set() -> HeldHere {
+        HELD_HERE.with(|c| c.set(true));
+        HeldHere
+    }
+}
+
+#[cfg(test)]
+impl Drop for HeldHere {
+    fn drop(&mut self) {
+        HELD_HERE.with(|c| c.set(false));
+    }
+}
+
+/// Test builds only: true when the calling thread holds the global
+/// registry lock. Tests use it to check that plugin code (a viz's `Drop`)
+/// never runs under that lock. Per thread, so other tests running in
+/// parallel cannot make it true.
+#[cfg(test)]
+pub(crate) fn this_thread_holds_global() -> bool {
+    HELD_HERE.with(std::cell::Cell::get)
 }
 
 /// [`Registry::register`] on the global registry. Called by plugin
