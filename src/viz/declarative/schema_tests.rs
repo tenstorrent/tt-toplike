@@ -726,3 +726,14 @@ fn load_succeeds_on_the_reference_in_both_formats() {
         reference()
     );
 }
+
+/// Plain `!` text in a title or a legend line is not a YAML tag. Tag
+/// rejection (`has_tag`) looks at the parsed tree, so text that merely holds
+/// or starts with `!` inside a quoted string must still load.
+#[test]
+fn bang_in_quoted_text_is_not_a_yaml_tag() {
+    let text = "version: 1\nid: hot\ntitle: \"Hot!\"\nlegend: [\"!! careful\"]\nlayout:\n  - cells:\n      - widget: gauge\n        signal: s\n";
+    let def = load(Path::new("hot.yaml"), text).expect("plain ! text loads");
+    assert_eq!(def.title, "Hot!");
+    assert_eq!(def.legend, vec!["!! careful".to_string()]);
+}

@@ -8,7 +8,78 @@
 use super::{history::History, Viz, VizCtx};
 use ratatui::{buffer::Buffer, layout::Rect};
 use std::path::Path;
-use tt_toplike_bus::WorldRead;
+use tt_toplike_bus::{
+    EntityKey, Event, HeaderKind, LocalView, Payload, Provenance, Record, Sample, Value, World,
+    WorldRead,
+};
+
+/// Builds a small world for a viz test from public bus types (the bus's own
+/// `testutil` is private to that crate).
+///
+/// ```ignore
+/// let view = WorldBuilder::new()
+///     .sample("0000:01:00.0", "power_w", 90.0)
+///     .event(Event::Reset { chips: vec![] })
+///     .build();
+/// ```
+///
+/// Each call applies one record with the next sequence number. The clock is
+/// one nanosecond per record, so readings are never stale at `build()`.
+/// Reused by the declarative renderer's tests and by the example plugins.
+#[derive(Default)]
+pub struct WorldBuilder {
+    world: World,
+    seq: u64,
+}
+
+impl WorldBuilder {
+    /// An empty world.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn apply(mut self, payload: Payload) -> Self {
+        self.seq += 1;
+        self.world.apply(&Record {
+            seq: self.seq,
+            t_mono_ns: self.seq,
+            t_wall_ms: self.seq,
+            source: "test".into(),
+            payload,
+        });
+        self
+    }
+
+    /// A numeric reading of `signal` on the chip at PCI address `bus_id`.
+    pub fn sample(self, bus_id: &str, signal: &str, v: f64) -> Self {
+        self.entity_sample(EntityKey::chip(bus_id), signal, Value::F64(v))
+    }
+
+    /// A reading of any value type on any entity.
+    pub fn entity_sample(self, entity: EntityKey, signal: &str, value: Value) -> Self {
+        self.apply(Payload::Sample(Sample {
+            entity,
+            signal: signal.into(),
+            value,
+            prov: Provenance::Measured,
+        }))
+    }
+
+    /// A bus event.
+    pub fn event(self, e: Event) -> Self {
+        self.apply(Payload::Event(e))
+    }
+
+    /// The finished world, as the read view a `VizCtx` takes.
+    pub fn build(self) -> LocalView {
+        LocalView {
+            seq: self.seq,
+            world: self.world,
+            now_mono_ns: self.seq.max(1),
+            header_kind: HeaderKind::Live,
+        }
+    }
+}
 
 /// Render `viz` into a `w` x `h` buffer and return it as text: one line per
 /// row, trailing spaces trimmed, rows joined with `\n`. Tick 0, and the

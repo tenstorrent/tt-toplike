@@ -17,9 +17,13 @@
 
 pub mod schema;
 pub mod validate;
+pub mod viz;
+pub mod widgets;
 
 #[cfg(test)]
 mod schema_tests;
+#[cfg(test)]
+mod widgets_tests;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -29,6 +33,7 @@ pub use schema::{
     WidgetDef,
 };
 pub use validate::validate;
+pub use viz::DeclarativeViz;
 
 /// Why a definition could not be loaded.
 ///
