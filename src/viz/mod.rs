@@ -18,14 +18,32 @@
 
 pub mod ctx;
 pub mod history;
+pub mod plugins;
 pub mod registry;
 pub mod testkit;
 
 #[cfg(test)]
 mod history_tests;
 #[cfg(test)]
+mod plugins_tests;
+#[cfg(test)]
 mod registry_tests;
 
 pub use ctx::{SignalSpec, Viz, VizCtx};
 pub use history::History;
 pub use registry::{EntryStatus, RegisterError, Registry, Source, VizEntry, VizHandle};
+
+/// Register every Rust plugin folder, once per process.
+///
+/// The folders are found at build time (see `build.rs` and
+/// `src/viz/plugins/README.md`). The first call registers them and returns
+/// the errors, if any, for the caller to log; later calls do nothing and
+/// return an empty list. YAML plugins are loaded separately and are not part
+/// of this call.
+pub fn init() -> Vec<RegisterError> {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    let mut errors = Vec::new();
+    ONCE.call_once(|| errors = plugins::register_all());
+    errors
+}

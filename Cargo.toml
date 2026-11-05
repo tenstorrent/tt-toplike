@@ -14,6 +14,7 @@ license = "Apache-2.0"
 description = "Real-time hardware monitoring for Tenstorrent silicon"
 repository = "https://github.com/tenstorrent/tt-toplike"
 readme = "README.md"
+build = "build.rs"
 keywords = ["tenstorrent", "monitoring", "tui", "hardware", "telemetry"]
 categories = ["command-line-utilities", "visualization"]
 
