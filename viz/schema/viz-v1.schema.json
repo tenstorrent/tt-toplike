@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/tenstorrent/tt-toplike/viz/schema/viz-v1.schema.json",
+  "title": "tt-toplike viz definition, version 1",
+  "description": "Written by hand to match src/viz/declarative/schema.rs. The test schema_file_accepts_the_reference_and_rejects_the_unknown_widget_fixture checks it against the reference fixtures. When a field changes in the Rust types, change it here too.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "id", "title", "layout"],
+  "properties": {
+    "version": { "const": 1 },
+    "id": {
+      "type": "string",
+      "maxLength": 48,
+      "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+    },
+    "title": { "type": "string", "minLength": 1 },
+    "min_size": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "integer", "minimum": 1, "maximum": 65535 },
+        { "type": "integer", "minimum": 1, "maximum": 65535 }
+      ],
+      "items": false,
+      "minItems": 2
+    },
+    "legend": { "type": "array", "items": { "type": "string" } },
+    "explain": { "type": "string" },
+    "layout": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": { "$ref": "#/$defs/row" }
+    }
+  },
+  "$defs": {
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cells"],
+      "properties": {
+        "height": {
+          "oneOf": [
+            { "type": "integer", "minimum": 1, "maximum": 65535 },
+            { "const": "fill" }
+          ]
+        },
+        "each": { "const": "chip" },
+        "cells": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": { "$ref": "#/$defs/cell" }
+        }
+      }
+    },
+    "cell": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["widget", "signal"],
+      "properties": {
+        "weight": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "widget": {
+          "enum": ["gauge", "sparkline", "table", "log", "grid", "heat_strip", "text"]
+        },
+        "signal": { "type": "string", "minLength": 1 },
+        "kind": {
+          "enum": [
+            "chip", "board", "tile", "model", "process", "lease", "host",
+            "dram_channel", "eth_port", "training_run"
+          ]
+        },
+        "label": { "type": "string" },
+        "max": { "type": "number", "exclusiveMinimum": 0 },
+        "thresholds": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/threshold" }
+        }
+      }
+    },
+    "threshold": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["at", "color"],
+      "properties": {
+        "at": { "type": "number" },
+        "color": {
+          "enum": [
+            "primary", "secondary", "success", "error", "warning", "info",
+            "text", "muted", "border",
+            "red", "yellow", "green", "cyan", "blue", "magenta", "white", "gray"
+          ]
+        }
+      }
+    }
+  }
+}

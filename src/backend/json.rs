@@ -1715,6 +1715,47 @@ mod tests {
     }
 
     #[test]
+    fn a_tt_smi_snapshot_with_a_live_mask_sends_no_link_peer() {
+        // A real backend over a real tt-smi snapshot: the chip has a live
+        // Ethernet mask, and tt-smi names no peers, so the bus source must
+        // write the mask and no `LinkPeer`. This goes red if the JSON parse
+        // ever fills `eth_peers`, or if the source starts inventing peers
+        // from the mask.
+        use crate::bus::source::{BackendSource, PollCtx, Source};
+        use tt_toplike_bus::{EntityKey, Event, Payload};
+        let mut b = JSONBackend::new("");
+        let json_devs = b.parse_json(TTSMI_52_JSON).unwrap();
+        b.update_from_json_pub(json_devs).unwrap();
+        let smbus = b.smbus_telemetry(0).expect("smbus for the chip");
+        assert!(smbus.eth_live_status.is_some(), "the snapshot has a mask");
+        assert!(smbus.eth_peers.is_none(), "tt-smi names no peers");
+        let mut src = BackendSource::new();
+        let chip = EntityKey::chip("0000:01:00.0");
+        for poll in 0..3 {
+            let mut out = Vec::new();
+            src.poll(
+                &PollCtx { backend: &b },
+                std::time::Instant::now(),
+                &mut |p| out.push(p),
+            );
+            assert!(
+                !out.iter()
+                    .any(|p| matches!(p, Payload::Event(Event::LinkPeer { .. }))),
+                "a real backend names no Ethernet peers"
+            );
+            if poll == 0 {
+                // The chip was keyed and its mask was sent, so the check
+                // above looked at a poll that spoke about links. (The mask
+                // is a slow-lane value: later polls repeat it only on a
+                // change.)
+                assert!(out.iter().any(|p| matches!(p,
+                    Payload::Sample(s) if s.entity == chip
+                        && s.signal == crate::bus::signals::ETH_LIVE_MASK)));
+            }
+        }
+    }
+
+    #[test]
     fn test_52_harvesting_state_parsed() {
         let result = parse_smbus_from_json(TTSMI_52_JSON);
         let smbus = result.get(&0).expect("device 0 missing");

@@ -1,7 +1,7 @@
 # tt-toplike Quick Start
 
-**Version**: 0.13.17
-**Last Updated**: October 14, 2026
+**Version**: 0.19.0
+**Last Updated**: November 4, 2026
 
 ---
 
@@ -34,7 +34,7 @@ tt-toplike --mode arcade
 tt-toplike -m arcade
 ```
 - All three visualizations stacked: Starfield (top) / Memory Castle (middle) / Memory Flow (bottom)
-- Hero character (`@`) that moves with live telemetry (X = current, Y = power, color = temperature)
+- While a model serves, the top row is a duel: the chip's `@` lunges on power spikes, the inference snake on finished requests
 - Topology diagram in the header: chip-to-chip links shown for carrier boards (p300/n300), suppressed for independent PCIe cards (p150a/n150)
 - >8 chips: compact mini-bar (one character per chip) instead of the detailed diagram
 
@@ -104,6 +104,23 @@ tt-toplike --mode training    # or press t in any mode (aliases: train, tt-train
 - Shows only what tt-train actually emits live (step, loss, step time, cache entries) — no gradient norms or MFU live, but derives its own tokens/sec and ETA from what it can read. `l` for the legend, `/explain` for the mapping overlay
 - `Esc` backs out to where you came from. Deliberately excluded from the `v` cycle, like `i`
 - `--mode training` launches straight into it, for scripts, kiosks and systemd units — it takes no target either way, since the view finds the run itself
+
+### Saga (`S`)
+```bash
+tt-toplike --mode saga    # or press S in any mode
+```
+- A party of heroes quests through a dungeon built from the box's own signals. Each chip is a floor with its own hero, and a new world begins when a model becomes ready, a chip resets, a model goes away, a training run starts or the box has been quiet for a season
+- With more than one chip, every floor is on screen at once as a grid of tiles. `[` `]` move the focus from floor to floor, and `z` shows the focused floor alone. A hero can cross an Ethernet portal into the floor of the linked chip (a `~` marks a crossing built from estimated readings, as under `--mock`; on real hardware the far end of a link is unknown until a link source exists)
+- One chronicle tells what happens on every floor, each line tagged with its floor (`F3`). `y` says in a sentence what set each line off
+- `S` or `Esc` leaves. Not in the `v` cycle or the rotation. `[saga]` in `config.toml` sets `enabled`, `names` and `season_minutes`. See [docs/saga.md](docs/saga.md)
+
+### Your own view (viz plugins)
+```bash
+tt-toplike viz new my-view --yaml    # one YAML file, reloaded when you save it
+tt-toplike viz list                  # every view, its source and status
+tt-toplike --mock 4 --viz my-view    # try it with no hardware
+```
+- A view can also be a Rust folder (`tt-toplike viz new my-view`, in a checkout). The shipped examples are hidden until you ask for them with `--viz <id>` or `[viz] enable = [...]` in `config.toml`; `example-pulse` is in the binary and `thermal-board` is found when you run inside a checkout. The reference, with every widget and field: [docs/viz-plugins.md](docs/viz-plugins.md)
 
 ### Rotate every view (`--rotate` / `R`)
 ```bash
@@ -204,6 +221,7 @@ tt-toplike --host --mode arcade             # your real CPU/RAM in arcade mode (
 | `v` | Cycle visualization modes: Insights → Flow → Starfield → Castle → Arcade → Defrag → Inference → Insights |
 | `i` | Open the Inference Server Monitor from any view; `i` while in it jumps to Insights, `Esc` backs out to where you came from. Also at the tail of the `v` cycle |
 | `t` | Open the Training view from any view — auto-attaches to a running tt-train process with no further input; `Esc` backs out. Excluded from the `v` cycle, like `i` |
+| `S` | Open Saga from any view; `S` or `Esc` leaves, `y` shows each chronicle line's cause, `[` `]` move the focus between floors and `z` zooms to one |
 | `l` | Toggle legend overlay for the current view |
 | `b` | Cycle backend live: Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them |
 | `r` | Force refresh |
@@ -242,7 +260,16 @@ tt-toplike --mock --mock-devices 2   # or fully simulated, to verify the binary 
 
 ### tmux / SSH terminal colors
 tt-toplike uses `Color::Reset` backgrounds throughout — no grey boxes.
-For best results, ensure your terminal emulator supports 24-bit color.
+It draws in 24-bit color when `COLORTERM` is `truecolor` or `24bit`, except inside tmux, where it
+uses 256 colors: a tmux server keeps the `COLORTERM` of the session that started it, which can be
+wrong for the terminal you are in now, and macOS Terminal.app over SSH shows 24-bit fills as the wrong
+background. To settle it by hand, set `TT_TOPLIKE_COLOR=truecolor` or `TT_TOPLIKE_COLOR=256`; it beats
+every guess. For full color in tmux, use a terminal that supports it, set `TT_TOPLIKE_COLOR=truecolor`
+and add this to `~/.tmux.conf`:
+
+```
+set -as terminal-features ',*:RGB'
+```
 
 ### Board labels look wrong
 If you have independent PCIe cards (p150a, n150) and see "Board 0 → [Dev0, Dev1]"

@@ -1,0 +1,117 @@
+//! Events the saga core publishes.
+//!
+//! Each [`SagaEvent`] becomes one `saga.*` kind on the bus (spec section 6):
+//! `WorldBorn` is `saga.world_born` and `WorldEnded` is `saga.world_ended`.
+//! The core only makes these values. Publishing them is the host's job.
+//!
+//! The world events come from Task 1.8 and the hero and quest events
+//! (`HeroBorn`, `QuestStarted`, `QuestDone`) from Task 1.9. Later tasks add
+//! variants to the same enum: the chronicle's `Beat` (Task 1.10, now
+//! here), the crossing's `HeroCrossed` and `CrossingFailed` (Task B.4 of
+//! the party plan), and monster and treasure events (phase 2). To add one, add a
+//! variant with named fields, starting with `world: u64` so every event says
+//! which world it belongs to. The enum derives only `Debug`, `Clone` and
+//! `PartialEq`, so a later variant may carry an `f32` intensity without
+//! changing the derives.
+
+use tt_toplike_bus::EntityKey;
+
+use crate::chronicle::Tone;
+use crate::hero::Cause;
+use crate::quest::Verb;
+
+/// The kind of place a world is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Biome {
+    /// The usual world: a dungeon on the chips' floors. A model reaching
+    /// `Ready` makes one on that model's chips.
+    Dungeon,
+    /// A training run's world. It lasts while the run's signals keep coming.
+    Forge,
+    /// The world that follows a quiet season.
+    Dream,
+}
+
+/// Why a world ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndWhy {
+    /// The model whose `Ready` made this dungeon went away (`ModelGone`).
+    ModelDown,
+    /// A chip of this world was reset.
+    Reset,
+    /// The machine was quiet for a whole season.
+    Season,
+    /// The hero died. Hero death arrives with combat in phase 2 (plan task
+    /// 2.2); the lifecycle never raises this one.
+    HeroDied,
+    /// A signal asked for a new world while this one was current: a model
+    /// became ready, or a training run started. The new world took this
+    /// world's place.
+    Superseded,
+    /// This forge's training run sent no training signal for 600 ticks, so
+    /// the run is over and its forge closed.
+    RunEnded,
+}
+
+/// One event the saga publishes. See the module comment for how to extend it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SagaEvent {
+    /// World `world` began. World ids count up from 1.
+    WorldBorn { world: u64, biome: Biome },
+    /// World `world` ended. When a new world follows at once, its
+    /// `WorldBorn` comes right after this event.
+    WorldEnded { world: u64, why: EndWhy },
+    /// A hero named `name` was born in world `world`, on floor `floor` (an
+    /// index into the world's floors).
+    HeroBorn { world: u64, name: String, floor: u8 },
+    /// The hero on floor `floor` set out on a quest: `verb`, about
+    /// `target`, because of `reason`.
+    QuestStarted {
+        world: u64,
+        floor: u8,
+        verb: Verb,
+        target: Option<EntityKey>,
+        reason: Cause,
+    },
+    /// The hero on floor `floor` reached the goal of its `verb` quest.
+    QuestDone { world: u64, floor: u8, verb: Verb },
+    /// The chronicle wrote a line (`saga.beat`): the floor it belongs to,
+    /// its tone, its text, and the signal behind it. A hero's or a quest's
+    /// line carries the hero's floor. A world's line (born or ended) carries
+    /// `None`. See [`crate::chronicle`].
+    Beat {
+        world: u64,
+        floor: Option<u8>,
+        tone: Tone,
+        text: String,
+        cause: Cause,
+    },
+    /// Member `member` stepped into the portal of port `from_port` on floor
+    /// `from_floor`, bound for the portal of port `to_port` on floor
+    /// `to_floor` (the party addendum, section 8.4). It is in transit now
+    /// and arrives [`crate::hero::TRANSIT_TICKS`] ticks later, unless the
+    /// link goes down first (then [`SagaEvent::CrossingFailed`] follows).
+    /// `cause` is the crossing quest's reason: a `ModelReady` or a
+    /// `LinkChanged`.
+    HeroCrossed {
+        world: u64,
+        member: u8,
+        from_floor: u8,
+        from_port: u8,
+        to_floor: u8,
+        to_port: u8,
+        cause: Cause,
+    },
+    /// A live bit of member `member`'s link cleared while it was in
+    /// transit, so it is back on the portal of port `port` on floor
+    /// `floor`, where it stepped in (the addendum, section 8.5). `cause` is
+    /// the record that cleared the bit: a `toplike.eth.live_mask` sample or
+    /// a `LinkChanged` event.
+    CrossingFailed {
+        world: u64,
+        member: u8,
+        floor: u8,
+        port: u8,
+        cause: Cause,
+    },
+}

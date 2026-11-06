@@ -14,15 +14,22 @@
 //! - Variable power consumption (with random fluctuations)
 //! - Temperature changes correlated with power
 //! - DDR training status progression
-//! - ARC firmware heartbeats
+//! - ARC firmware heartbeats (a counter per device that advances on every
+//!   update)
 //! - Multiple device architectures
 
 use crate::backend::{BackendConfig, TelemetryBackend};
 use crate::error::{BackendError, BackendResult};
-use crate::models::telemetry::{DeviceLimits, FirmwaresInfo, GddrTempPair};
+use crate::models::telemetry::{DeviceLimits, EthPeer, FirmwaresInfo, GddrTempPair};
 use crate::models::{Architecture, Device, SmbusTelemetry, Telemetry};
 use chrono::Utc;
 use std::collections::HashMap;
+
+/// The Ethernet ports the mock's peer ring may use: the low 12, the ports a
+/// Blackhole chip has and the ports Saga binds to Blackhole portals. A ring
+/// port outside these could never be a portal, so a `--mock` run would show
+/// no crossing.
+const LOW_PORTS: u64 = 0xFFF;
 
 /// Pre-defined mock hardware scenarios for testing at various scales.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -85,6 +92,41 @@ pub struct MockBackend {
 
     /// Base temperature values for each device
     base_temp: HashMap<usize, f32>,
+
+    /// The ARC heartbeat of each device, by index. It counts up by one on
+    /// every update (see [`next_heartbeat`]), as a real chip's does: a
+    /// constant value looks stalled to anything that watches it advance.
+    heartbeats: Vec<u32>,
+}
+
+/// The heartbeat after `h`: one more, and back to 1 after `u32::MAX`. It
+/// never becomes 0, the value every reader takes as a stalled ARC.
+fn next_heartbeat(h: u32) -> u32 {
+    h.checked_add(1).unwrap_or(1)
+}
+
+/// Whether the mock's ring link at chip `device_idx` is dark at update
+/// `update`. It scripts a flap so that a `--mock` saga can show a crossing:
+/// a hero crosses when a link comes up, and a mock whose mask never changes
+/// would never offer one.
+///
+/// Each chip's ring port goes dark for 8 to 12 s and comes back, again and
+/// again. Mock time is the update count, and one update is one tick, 0.1 s
+/// at the default 10 Hz, so the numbers below are in tenths of a second.
+///
+/// * The cycle is 600, 700 or 800 updates (60, 70 or 80 s), by chip.
+/// * The dark stretch is 80 to 120 updates (8 to 12 s), by chip.
+/// * The first fall is at update 100 plus a per-chip offset inside the
+///   cycle, so chips do not flap together and nothing is dark at the start.
+///
+/// It is a function of the chip and the update count alone, so the same
+/// mock time gives the same answer in every run.
+fn ring_link_is_dark(device_idx: usize, update: usize) -> bool {
+    let i = device_idx;
+    let cycle = 600 + 100 * (i % 3);
+    let dark = 80 + 10 * (i % 5);
+    let first = 100 + (i * 173) % cycle;
+    update >= first && (update - first) % cycle < dark
 }
 
 impl MockBackend {
@@ -110,6 +152,7 @@ impl MockBackend {
             update_count: 0,
             base_power: HashMap::new(),
             base_temp: HashMap::new(),
+            heartbeats: Vec::new(),
         }
     }
 
@@ -125,6 +168,7 @@ impl MockBackend {
             update_count: 0,
             base_power: HashMap::new(),
             base_temp: HashMap::new(),
+            heartbeats: Vec::new(),
         }
     }
 
@@ -157,6 +201,7 @@ impl MockBackend {
             update_count: 0,
             base_power: HashMap::new(),
             base_temp: HashMap::new(),
+            heartbeats: Vec::new(),
         }
     }
 
@@ -229,6 +274,17 @@ impl MockBackend {
             self.base_power.insert(idx, base_power);
             self.base_temp.insert(idx, base_temp);
         }
+        // Each device's heartbeat starts at 1 and counts up per update.
+        self.heartbeats = vec![1; self.device_count];
+    }
+
+    /// Test hook: set one device's last ARC heartbeat reading (0 is a stalled
+    /// ARC). The next `update` writes a fresh counting-up value again.
+    #[cfg(test)]
+    pub(crate) fn set_heartbeat_for_test(&mut self, device_idx: usize, heartbeat: Option<u32>) {
+        if let Some(t) = self.telemetry.get_mut(&device_idx) {
+            t.heartbeat = heartbeat;
+        }
     }
 
     /// Generate realistic telemetry for a device
@@ -276,7 +332,8 @@ impl MockBackend {
             power: Some(power),
             asic_temperature: Some(temperature),
             aiclk: Some(aiclk),
-            heartbeat: Some(1), // Always healthy in mock
+            // Counts up per update, never 0: a healthy, advancing ARC.
+            heartbeat: Some(self.heartbeats.get(device_idx).copied().unwrap_or(1)),
             timestamp: Utc::now(),
             board_power,
         }
@@ -307,6 +364,44 @@ impl MockBackend {
 
         // ETH live status: ~75% ports live (alternating bit pattern)
         let eth_live = 0xAAAAAAAAAAAAAAAA_u64;
+
+        // Ethernet peers: a ring. This chip's highest live port among the
+        // low 12 (`LOW_PORTS`) is wired to the next chip's lowest live port
+        // among the low 12, and the last chip closes the ring on chip 0.
+        // With the mask above that is port 11 to port 1. Both ends stay in
+        // the low 12 so that Saga can bind them to Blackhole portals and a
+        // `--mock` run can show a crossing. Every mock chip has the same
+        // live mask, so the answer does not change from one update to the
+        // next. One chip has no neighbour, so it reports none, and a chip
+        // with no live low port reports none either. (An event carries no
+        // provenance; the source that turns this into `LinkPeer` events is
+        // the mock's `Estimated` one, so a log marks them as made up.)
+        let low_live = eth_live & LOW_PORTS;
+        let ring_port = (low_live != 0).then(|| (63 - low_live.leading_zeros()) as u8);
+        let eth_peers = if let (true, Some(port)) = (self.device_count > 1, ring_port) {
+            let next = &self.devices[(device_idx + 1) % self.device_count];
+            Some(vec![EthPeer {
+                port,
+                peer_bus_id: next.bus_id.clone(),
+                peer_port: low_live.trailing_zeros() as u8,
+            }])
+        } else {
+            None
+        };
+
+        // The scripted flap (see `ring_link_is_dark`): the near end of the
+        // ring link drops out of the mask for a short stretch. The peers
+        // above were taken from the steady mask, so the wiring is the same
+        // while the port is dark; the far end's bit stays up. Like every
+        // mock reading, the source marks it `Estimated`.
+        let eth_live = match ring_port {
+            Some(port)
+                if self.device_count > 1 && ring_link_is_dark(device_idx, self.update_count) =>
+            {
+                eth_live & !(1u64 << port)
+            }
+            _ => eth_live,
+        };
 
         let harvesting_state = if is_harvested {
             Some(1_u32)
@@ -443,6 +538,7 @@ impl MockBackend {
             gddr_uncorr_errs: None,
             harvesting_state,
             eth_live_status: Some(eth_live),
+            eth_peers,
             enabled_eth: None,
             enabled_gddr: None,
             enabled_l2cpu: None,
@@ -498,6 +594,9 @@ impl TelemetryBackend for MockBackend {
 
     fn update(&mut self) -> BackendResult<()> {
         self.update_count += 1;
+        for h in &mut self.heartbeats {
+            *h = next_heartbeat(*h);
+        }
 
         // Update telemetry for all devices
         for idx in 0..self.device_count {
@@ -586,6 +685,134 @@ mod tests {
     }
 
     #[test]
+    fn the_mock_reports_a_ring_of_peers() {
+        let n = 4;
+        let mut backend = MockBackend::new(n);
+        backend.init().unwrap();
+        for i in 0..n {
+            let s = backend.smbus_telemetry(i).unwrap();
+            let mask = s.eth_live_status.unwrap();
+            let peers = s.eth_peers.as_ref().expect("the mock reports peers");
+            assert_eq!(peers.len(), 1, "one ring link leaves each chip");
+            let p = &peers[0];
+            let next = &backend.devices()[(i + 1) % n];
+            let live = |port: u8| (mask >> port) & 1 == 1;
+            // Highest live port among the low 12 here, to the next chip's
+            // lowest live port among the low 12. Saga binds Blackhole
+            // portals only to ports 0 to 11, so a ring port outside them
+            // could never be crossed in a `--mock` run.
+            let low = mask & LOW_PORTS;
+            assert_eq!(p.port as u32, 63 - low.leading_zeros());
+            assert!(live(p.port));
+            assert!(p.port < 12, "the near end is a Blackhole portal port");
+            let next_mask = backend
+                .smbus_telemetry(next.index)
+                .unwrap()
+                .eth_live_status
+                .unwrap();
+            assert_eq!(p.peer_port as u32, (next_mask & LOW_PORTS).trailing_zeros());
+            assert!(p.peer_port < 12, "the far end is a Blackhole portal port");
+            assert_eq!(p.peer_bus_id, next.bus_id, "the ring closes on chip 0");
+        }
+        // One chip has nobody to link to.
+        let mut one = MockBackend::new(1);
+        one.init().unwrap();
+        assert!(one.smbus_telemetry(0).unwrap().eth_peers.is_none());
+        // Updating does not change the answer.
+        let before = backend.smbus_telemetry(2).unwrap().eth_peers.clone();
+        backend.update().unwrap();
+        assert_eq!(backend.smbus_telemetry(2).unwrap().eth_peers, before);
+    }
+
+    /// The live mask of chip `i`, as the mock reports it now.
+    fn mask_of(b: &MockBackend, i: usize) -> u64 {
+        b.smbus_telemetry(i).unwrap().eth_live_status.unwrap()
+    }
+
+    #[test]
+    fn the_mock_flaps_one_ring_link_on_a_slow_schedule() {
+        // Four chips, 3,000 updates (five minutes of mock time at 10 Hz).
+        let n = 4;
+        let mut backend = MockBackend::new(n);
+        backend.init().unwrap();
+        let steady = mask_of(&backend, 0);
+        let ring_port = backend
+            .smbus_telemetry(0)
+            .unwrap()
+            .eth_peers
+            .as_ref()
+            .unwrap()[0]
+            .port;
+        let peers_before: Vec<_> = (0..n)
+            .map(|i| backend.smbus_telemetry(i).unwrap().eth_peers.clone())
+            .collect();
+        let mut series: Vec<Vec<u64>> = vec![Vec::new(); n];
+        for _ in 0..3_000 {
+            backend.update().unwrap();
+            for (i, s) in series.iter_mut().enumerate() {
+                s.push(mask_of(&backend, i));
+            }
+            // The ring itself never changes: the peers stay as wired.
+            for (i, before) in peers_before.iter().enumerate() {
+                assert_eq!(&backend.smbus_telemetry(i).unwrap().eth_peers, before);
+            }
+        }
+        let mut first_drop = Vec::new();
+        for (i, s) in series.iter().enumerate() {
+            // Only the ring port's bit ever differs from the steady mask,
+            // and it only ever goes down.
+            let bit = 1u64 << ring_port;
+            assert!(s.iter().all(|m| *m == steady || *m == steady & !bit));
+            // Runs of "down": each is 80 to 120 updates (8 to 12 s), and
+            // there are several, so the flap repeats.
+            let mut runs = Vec::new();
+            let mut start = None;
+            for (t, m) in s.iter().enumerate() {
+                match (m & bit == 0, start) {
+                    (true, None) => start = Some(t),
+                    (false, Some(a)) => {
+                        runs.push((a, t - a));
+                        start = None;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(runs.len() >= 3, "chip {i} flaps again and again: {runs:?}");
+            for (a, len) in &runs {
+                assert!(
+                    (80..=120).contains(len),
+                    "chip {i} is dark {len} updates from {a}"
+                );
+            }
+            // A slow cycle: starts are 600 to 800 updates apart.
+            for w in runs.windows(2) {
+                let gap = w[1].0 - w[0].0;
+                assert!((600..=800).contains(&gap), "chip {i}: {gap} between flaps");
+            }
+            // It is not dark at the start, so the first sight is whole.
+            assert_eq!(s[0], steady);
+            first_drop.push(runs[0].0);
+        }
+        first_drop.sort_unstable();
+        first_drop.dedup();
+        assert_eq!(first_drop.len(), n, "the chips do not flap together");
+        // Deterministic: the same mock time gives the same masks.
+        let mut again = MockBackend::new(n);
+        again.init().unwrap();
+        for t in 0..3_000 {
+            again.update().unwrap();
+            assert_eq!(mask_of(&again, 0), series[0][t]);
+        }
+        // One chip has no ring and no flap.
+        let mut one = MockBackend::new(1);
+        one.init().unwrap();
+        for _ in 0..1_500 {
+            one.update().unwrap();
+            assert_eq!(mask_of(&one, 0), steady);
+        }
+    }
+
+    #[test]
     fn test_mock_backend_smbus() {
         let mut backend = MockBackend::new(1);
         backend.init().unwrap();
@@ -611,6 +838,43 @@ mod tests {
 
         // Device 2: Blackhole (12 channels)
         assert_eq!(backend.devices()[2].memory_channels(), 12);
+    }
+
+    /// The ARC heartbeat counts up on every update, separately per device,
+    /// as a real chip's does (ledger ruling R18). A constant heartbeat looks
+    /// stalled to anything that watches it advance (the saga core marks a
+    /// chip stalled when its `toplike.heartbeat` has not changed for 20
+    /// ticks). It is never 0, the value every reader takes as stalled.
+    #[test]
+    fn the_heartbeat_counts_up_on_every_update() {
+        let mut backend = MockBackend::new(3);
+        backend.init().unwrap();
+        let beats = |b: &MockBackend| -> Vec<u32> {
+            (0..3)
+                .map(|i| b.telemetry(i).unwrap().heartbeat.unwrap())
+                .collect()
+        };
+        let mut last = beats(&backend);
+        assert!(last.iter().all(|&h| h > 0), "{last:?}");
+        for _ in 0..50 {
+            backend.update().unwrap();
+            let now = beats(&backend);
+            for (i, (a, b)) in last.iter().zip(&now).enumerate() {
+                assert_eq!(*b, a + 1, "device {i} did not count up by one");
+            }
+            last = now;
+        }
+        for i in 0..3 {
+            assert!(backend.telemetry(i).unwrap().arc_healthy());
+        }
+    }
+
+    /// At the top of its range the counter wraps to 1, skipping 0.
+    #[test]
+    fn the_heartbeat_wraps_past_zero() {
+        assert_eq!(next_heartbeat(1), 2);
+        assert_eq!(next_heartbeat(u32::MAX - 1), u32::MAX);
+        assert_eq!(next_heartbeat(u32::MAX), 1);
     }
 
     #[test]

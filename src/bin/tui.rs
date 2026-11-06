@@ -13,7 +13,6 @@
 //! - Adaptive baseline learning for universal hardware sensitivity
 //! - Dark-mode optimized color palette
 
-#[cfg(feature = "remote")]
 use std::io::IsTerminal;
 
 use tt_toplike::{
@@ -26,6 +25,21 @@ use tt_toplike::{
 use tt_toplike::backend::luwen::LuwenBackend;
 
 fn main() {
+    // `tt-toplike viz ...` (new, list) is handled before the flag parser, so
+    // no other invocation parses any differently. It needs no backend, no
+    // terminal and no hardware.
+    let argv: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if let Some(rest) = tt_toplike::viz::cli::viz_intercept(&argv) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let code = tt_toplike::viz::cli::run(
+            &rest,
+            &mut std::io::stdout().lock(),
+            &mut std::io::stderr().lock(),
+            &cwd,
+        );
+        std::process::exit(code);
+    }
+
     // Parse command-line arguments.
     //
     // `mut` only in the `remote` build: the `--remote` arm rewrites `cli.remote`
@@ -43,11 +57,71 @@ fn main() {
         std::process::exit(1);
     }
 
+    // --check-config: print every problem in the config files and exit,
+    // non-zero when there is one. Needs no backend and no TTY.
+    if cli.check_config {
+        let mut loaded = tt_toplike::config::load_config();
+        tt_toplike::config::choose_layout(&mut loaded, cli.arcade_layout.as_deref());
+        let mut out = std::io::stdout().lock();
+        let code = tt_toplike::config::write_check_report(&loaded, &mut out);
+        std::process::exit(code);
+    }
+
+    // --bus-inspect: print a summary of a recorded signal-bus log and exit.
+    // Needs no backend and no TTY, and prints no banner, so the output can be
+    // piped. Exit 1 when the log cannot be read or the output fails, other
+    // than a closed pipe.
+    if let Some(path) = &cli.bus_inspect {
+        // --saga-digest: the saga the log tells, as one number, in place of
+        // the summary. Same output and exit rules as the summary.
+        if cli.saga_digest {
+            let stdout = std::io::stdout();
+            let mut out = std::io::BufWriter::new(stdout.lock());
+            let code =
+                tt_toplike::saga::digest::digest_command(path, &mut out, &mut std::io::stderr());
+            drop(out);
+            if code != 0 {
+                std::process::exit(code);
+            }
+            return;
+        }
+        let filter = tt_toplike_bus::inspect::Filter {
+            entity: cli.entity.clone(),
+            signal: cli.signal.clone(),
+        };
+        // A closed pipe on stdout (`| head`) is success, and an error
+        // message is written without `eprintln!`, which would panic when
+        // stderr is the same closed pipe (`2>&1 | head`).
+        let stdout = std::io::stdout();
+        let mut out = std::io::BufWriter::new(stdout.lock());
+        let code = tt_toplike_bus::inspect::inspect_command(
+            path,
+            &filter,
+            &mut out,
+            &mut std::io::stderr(),
+        );
+        // Dropping a BufWriter flushes again and ignores the error, so a
+        // second broken pipe here is silent.
+        drop(out);
+        if code != 0 {
+            std::process::exit(code);
+        }
+        return;
+    }
+
+    // The TUI hosts the signal bus itself (`--record`, `--bus-dir`,
+    // `--bus-retain`, `--bus-socket`) or attaches to a headless host's
+    // (`--bus-attach`, or the start-up probe of the default socket); see
+    // `tt_toplike::bus::tui_bus`. `Cli::validate` already refused `--replay`
+    // without `--headless`: a replay is served by a headless host and read
+    // with `--bus-attach`.
+
     // Initialize logging with appropriate level
     init_logging(cli.log_level());
 
-    // Print startup banner (suppressed under --bench to keep output machine-parseable)
-    if !cli.bench {
+    // Print startup banner (suppressed under --bench to keep output
+    // machine-parseable, and for a replay, which reads no backend)
+    if !cli.bench && cli.replay.is_none() {
         println!("🦀 tt-toplike v{}", env!("CARGO_PKG_VERSION"));
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("Backend: {}", cli.backend_name());
@@ -93,22 +167,23 @@ fn main() {
         return;
     }
 
-    // `--serve` without a TTY (piped output, backgrounded, run under a process
-    // supervisor, etc.): a headless telemetry publisher, no TUI at all. This is
-    // the "run as a service" path — contrast with `--serve` at a real TTY,
-    // which starts the TUI AND a publisher together (a later task, wired inside
-    // `run_tui`). Dispatch here, before backend selection, since the headless
-    // path builds and drives its own backend rather than handing off to
-    // `run_with_backend`/`run_tui`.
-    #[cfg(feature = "remote")]
-    if cli.serve.is_some() && !std::io::stdout().is_terminal() {
-        run_headless_serve(&cli, config.clone());
-        return;
-    }
     #[cfg(not(feature = "remote"))]
     if cli.serve.is_some() {
         eprintln!("Error: --serve not available (build with --features remote)");
         std::process::exit(1);
+    }
+
+    // `--headless`, and `--serve` without a TTY (piped output, backgrounded,
+    // run under a process supervisor): no TUI at all. Both run the same loop
+    // (`tt_toplike::bus::headless`). `--headless` records the bus and serves
+    // its socket; the no-TTY `--serve` keeps its old behaviour, a memory-only
+    // bus that feeds the `/telemetry` broadcast. Contrast with `--serve` at a
+    // real TTY, which starts the TUI AND a publisher together (wired inside
+    // `run_tui`). Dispatch here, before backend selection, since the headless
+    // path builds and drives its own backend.
+    if cli.headless || (cli.serve.is_some() && !std::io::stdout().is_terminal()) {
+        run_headless_main(&cli, config.clone());
+        return;
     }
 
     // Select and initialize backend based on CLI arguments
@@ -331,46 +406,105 @@ fn run_with_backend<B: TelemetryBackend>(backend: &mut B, cli: &Cli) {
     }
 }
 
-/// Headless `--serve`: no TUI, no terminal — just poll the backend and fan
-/// its telemetry out over `/telemetry` until the process is killed.
+/// The headless loop: `--headless`, and `--serve` with no TTY.
 ///
-/// This is the "run as a background service" counterpart to the TTY path
-/// (which starts the TUI *and* a publisher together — wired inside `run_tui`
-/// in a later task). Every panic-risk edge here degrades to a logged warning
-/// and "keep looping" rather than crashing the service: a single failed
-/// `backend.update()` (e.g. a transient `tt-smi` hiccup) shouldn't take the
-/// whole publisher down, since other clients may still be relying on the
-/// last-broadcast frame.
-///
-/// Ctrl-C handling: deliberately a plain loop with no `SIGINT` handler. There
-/// is nothing to flush or persist on shutdown — the publisher's `Drop` (never
-/// reached on a hard kill) only matters for a graceful in-process shutdown,
-/// and the OS reclaiming the socket on process exit is sufficient for this
-/// v1. A future revision can add a signal handler if a clean "N clients said
-/// goodbye" log on shutdown becomes worth the extra dependency.
-#[cfg(feature = "remote")]
-fn run_headless_serve(cli: &Cli, config: BackendConfig) {
-    // Step 1: resolve the bind address. `cli.serve.is_some()` was already
-    // checked by the caller, but `parse_serve_bind` still owns validating the
-    // BIND[:PORT]/PORT/HOST shape (see cli::parse_serve_bind's doc comment).
-    let spec = cli.serve.as_deref().unwrap_or_default();
-    let bind = match tt_toplike::cli::parse_serve_bind(spec) {
-        Ok(addr) => addr,
+/// Runs until SIGTERM or SIGINT, then flushes the bus, removes the socket
+/// file and exits 0. Every failure before the loop starts (the backend, the
+/// `--serve` bind, a log directory or socket another process holds, a socket
+/// directory that is not private) prints one line and exits 1. Inside the
+/// loop a failed `backend.update()` is logged and the loop goes on, as the
+/// old `--serve` loop did: other clients may still rely on the last frame.
+fn run_headless_main(cli: &Cli, config: BackendConfig) {
+    use tt_toplike::bus::headless::{
+        install_stop_signals, run_headless, run_headless_replay, HeadlessConfig, LocalWorkloads,
+        NoWorkloads, Workloads,
+    };
+
+    #[cfg(unix)]
+    let socket = cli.headless.then(|| cli.bus_socket_path());
+    #[cfg(not(unix))]
+    let socket: Option<std::path::PathBuf> = None;
+    // First signal: stop the loop. Second: remove the socket and exit now.
+    let stop = match install_stop_signals(socket.clone()) {
+        Ok(f) => f,
         Err(e) => {
-            eprintln!("Error: invalid --serve address '{}': {}", spec, e);
+            eprintln!("Error: cannot watch for SIGTERM/SIGINT: {e}");
             std::process::exit(1);
         }
     };
+    // `synthetic`: the backend makes its values up (mock). Such a run
+    // writes to disk only into a directory named on the command line.
+    let bus_for = |synthetic: bool| {
+        if cli.headless {
+            cli.headless_bus_config(synthetic)
+        } else {
+            // The no-TTY `--serve` keeps its old footprint: nothing on disk.
+            tt_toplike_bus::BusConfig::default()
+        }
+    };
+    let describe = |bus: &tt_toplike_bus::BusConfig| {
+        let log = bus
+            .dir
+            .as_ref()
+            .map_or("memory only".to_string(), |d| d.display().to_string());
+        let sock = socket
+            .as_ref()
+            .map_or("none".to_string(), |p| p.display().to_string());
+        format!("bus log: {log}; bus socket: {sock}")
+    };
+    let interval = std::time::Duration::from_millis(cli.interval);
+    // A headless host runs no saga, but the TUIs attached to it and
+    // `--saga-digest` of its log do: its bus header records the season this
+    // box's `[saga]` settings and `--interval` give, in ticks (final review
+    // finding I4). A `--replay` host replaces it with the recorded log's.
+    let saga_settings = tt_toplike::config::load_config().saga;
+    let bus_for = |synthetic: bool| {
+        let mut bus = bus_for(synthetic);
+        tt_toplike::saga::config::write_season_tag(
+            &mut bus.header_tags,
+            &saga_settings,
+            cli.interval,
+        );
+        bus
+    };
 
-    // Step 2: build + init the backend exactly like the normal (TUI) path
-    // does via the factory, then prime it with one `update()` — mirroring
-    // `run_with_backend`'s init-then-update sequence — so a raw-JSON-capable
-    // backend (JSON/Hybrid/Ws) actually has a frame cached before the
-    // capability check below runs. Without this priming update, `snapshot_json()`
-    // would read `None` even for `--backend json` (its raw frame is only
-    // cached by `update()`, not `init()`), which would make every headless
-    // launch fail the very check meant to distinguish JSON/Hybrid from
-    // Mock/Host/Sysfs.
+    // --replay: play a recorded log and serve it. No backend.
+    if let Some(path) = &cli.replay {
+        let bus = bus_for(false);
+        println!(
+            "Headless replay of {} at speed {} ({}). Stop with SIGTERM or Ctrl-C.",
+            path.display(),
+            cli.effective_speed(),
+            describe(&bus)
+        );
+        let cfg = HeadlessConfig {
+            bus,
+            socket,
+            interval,
+            relay: false,
+            gozer: false,
+            synthetic: false,
+            backend_name: "replay".into(),
+        };
+        let done = |r: &Result<u64, String>| match r {
+            Ok(n) => println!("replay: played {n} records; serving until stopped"),
+            Err(e) => eprintln!("replay: stopped early: {e}"),
+        };
+        match run_headless_replay(path, cli.effective_speed(), cfg, &stop, done) {
+            Ok(r) => println!("stopped: bus head {}, flushed: {}", r.head, r.flushed),
+            Err(e) => {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    // Build + init the backend exactly like the TUI path does via the
+    // factory, then prime it with one `update()`, so a raw-JSON-capable
+    // backend (JSON/Hybrid/Ws) has a frame cached before the `--serve`
+    // capability check below runs (`snapshot_json()` is filled by
+    // `update()`; `init()` leaves it empty).
     let backend_type = cli.effective_backend();
     let mut backend = match tt_toplike::backend::factory::create_backend(backend_type, config, cli)
     {
@@ -384,95 +518,118 @@ fn run_headless_serve(cli: &Cli, config: BackendConfig) {
         eprintln!("✗ Failed to read telemetry: {}", e);
         std::process::exit(1);
     }
+    let relay = backend_type == BackendType::Remote;
+    // Auto-detect can fall back to mock: name what was actually built.
+    let backend_name = tt_toplike::cli::backend_tag(backend_type, &backend.backend_info());
+    let synthetic = backend_name == "mock";
+    let bus = bus_for(synthetic);
 
-    // Step 3: only a backend that can hand back verbatim `tt-smi -s` JSON
-    // (JSON, Hybrid, Ws) can be broadcast — the wire format IS that JSON, plus
-    // the additive `tt_toplike` extension. Mock/Host/Sysfs never populate
-    // `snapshot_json()` (see their `TelemetryBackend` impls / the trait's
-    // `None` default), so fail fast with a clear remedy rather than silently
-    // publishing nothing useful.
-    if backend.snapshot_json().is_none() {
-        eprintln!(
-            "Error: --serve needs the json or hybrid backend (tt-smi); \
-             relaunch with --backend hybrid or --backend json"
-        );
-        std::process::exit(1);
-    }
-
-    // Step 4: bind and start serving `/telemetry`.
-    let publisher = match tt_toplike::backend::TelemetryPublisher::spawn(bind) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("Error: failed to start --serve publisher: {}", e);
-            std::process::exit(1);
+    // `--serve`: only a backend that hands back verbatim `tt-smi -s` JSON
+    // (JSON, Hybrid, Ws) can be broadcast, because the wire format IS that
+    // JSON plus the additive `tt_toplike` extension. Fail fast with a remedy.
+    #[cfg(feature = "remote")]
+    let publisher = match cli.serve.as_deref() {
+        None => None,
+        Some(spec) => {
+            let bind = match tt_toplike::cli::parse_serve_bind(spec) {
+                Ok(addr) => addr,
+                Err(e) => {
+                    eprintln!("Error: invalid --serve address '{}': {}", spec, e);
+                    std::process::exit(1);
+                }
+            };
+            if backend.snapshot_json().is_none() {
+                eprintln!(
+                    "Error: --serve needs the json or hybrid backend (tt-smi); \
+                     relaunch with --backend hybrid or --backend json"
+                );
+                std::process::exit(1);
+            }
+            match tt_toplike::backend::TelemetryPublisher::spawn(bind) {
+                Ok(p) => {
+                    println!(
+                        "Serving telemetry on ws://{}/telemetry (headless, no TUI)",
+                        p.bind_addr()
+                    );
+                    Some(p)
+                }
+                Err(e) => {
+                    eprintln!("Error: failed to start --serve publisher: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
     };
-    log::info!(
-        "--serve: telemetry publisher listening on ws://{}/telemetry",
-        publisher.bind_addr()
-    );
-    println!(
-        "Serving telemetry on ws://{}/telemetry (headless — no TTY detected)",
-        publisher.bind_addr()
-    );
 
-    // Step 5: local process + inference-server monitors, mirroring how
-    // `run_tui` (src/ui/tui/mod.rs) constructs `host_proc_monitor` +
-    // `inference_monitor` — these feed the richer `tt_toplike` extension
-    // riding along on each broadcast frame. `InferenceServerMonitor` mirrors
-    // the TTY path's `#[cfg(target_os = "linux")]` gate (its `DockerProbe`
-    // backend targets Linux container hosts); non-Linux headless servers
-    // still broadcast processes, just with an always-empty inference list.
-    let mut host_proc_monitor = tt_toplike::workload::HostProcessMonitor::new();
-    host_proc_monitor.update();
-    let liveness_prober = tt_toplike::workload::LivenessProber::spawn();
-    liveness_prober.submit(host_proc_monitor.detected_runtimes());
-    #[cfg(target_os = "linux")]
-    let inference_monitor = tt_toplike::workload::InferenceServerMonitor::spawn();
-    #[cfg(target_os = "linux")]
-    inference_monitor.submit(host_proc_monitor.detected_inference_servers());
+    if cli.headless {
+        println!(
+            "Headless bus host on {} ({}). Stop with SIGTERM or Ctrl-C.",
+            backend.backend_info(),
+            describe(&bus)
+        );
+    }
 
-    // Headless has no fixed panel height (no TUI to size rows for), so cap
-    // generously rather than reusing the TUI's `PROC_PANEL_MAX_ROWS`.
-    const HEADLESS_PROC_ROWS_MAX: usize = 64;
+    // A relay's processes and models come from the remote frame; local
+    // monitors would name this box's processes against the remote chips.
+    // A mock run scans nothing real unless --mock-workloads asks for it.
+    let local =
+        tt_toplike::bus::headless::uses_local_workloads(relay, synthetic, cli.mock_workloads);
+    let mut workloads: Box<dyn Workloads> = if local {
+        Box::new(LocalWorkloads::new())
+    } else {
+        Box::new(NoWorkloads)
+    };
+    // gozer describes this box's real chips: not for mock, host or remote.
+    let gozer = cli.headless
+        && !matches!(
+            backend_type,
+            BackendType::Mock | BackendType::Host | BackendType::Remote
+        );
+    let cfg = HeadlessConfig {
+        bus,
+        socket,
+        interval,
+        relay,
+        gozer,
+        synthetic,
+        backend_name,
+    };
+
+    #[cfg(feature = "remote")]
     let mut last_client_log = std::time::Instant::now();
-
-    // Step 6: loop until killed. Each tick: refresh backend + monitors, build
-    // the enriched frame, broadcast it, and periodically log the connected
-    // client count (useful for confirming a remote peer actually attached
-    // without needing a debugger).
-    loop {
-        if let Err(e) = backend.update() {
-            // A transient read failure shouldn't take the publisher down —
-            // clients just keep seeing the last-broadcast frame until the
-            // next successful update.
-            log::warn!("--serve: backend update failed: {}", e);
+    #[cfg(feature = "remote")]
+    let mut send = |frame: String| {
+        if let Some(p) = &publisher {
+            p.broadcast(frame);
+            // Log the client count every 10 s, to confirm a peer attached.
+            if last_client_log.elapsed() >= std::time::Duration::from_secs(10) {
+                log::info!("--serve: {} client(s) connected", p.client_count());
+                last_client_log = std::time::Instant::now();
+            }
         }
+    };
+    #[cfg(feature = "remote")]
+    let broadcast: Option<&mut dyn FnMut(String)> = if cli.serve.is_some() {
+        Some(&mut send)
+    } else {
+        None
+    };
+    #[cfg(not(feature = "remote"))]
+    let broadcast: Option<&mut dyn FnMut(String)> = None;
 
-        host_proc_monitor.update();
-        liveness_prober.submit(host_proc_monitor.detected_runtimes());
-        #[cfg(target_os = "linux")]
-        inference_monitor.submit(host_proc_monitor.detected_inference_servers());
-
-        let proc_rows =
-            host_proc_monitor.rows(HEADLESS_PROC_ROWS_MAX, &liveness_prober.fresh_verdicts());
-        #[cfg(target_os = "linux")]
-        let inference_snapshot = inference_monitor.snapshot();
-        #[cfg(not(target_os = "linux"))]
-        let inference_snapshot: Vec<tt_toplike::workload::inference_server::ServiceState> =
-            Vec::new();
-
-        let ext = tt_toplike::backend::build_extension(&proc_rows, &inference_snapshot);
-        let base_json = backend.snapshot_json().unwrap_or_default();
-        let frame = tt_toplike::backend::inject_extension(&base_json, &ext);
-        publisher.broadcast(frame);
-
-        if last_client_log.elapsed() >= std::time::Duration::from_secs(10) {
-            log::info!("--serve: {} client(s) connected", publisher.client_count());
-            last_client_log = std::time::Instant::now();
+    match run_headless(backend.as_mut(), workloads.as_mut(), cfg, broadcast, &stop) {
+        Ok(r) => {
+            if cli.headless {
+                println!(
+                    "stopped after {} ticks: bus head {}, flushed: {}",
+                    r.ticks, r.head, r.flushed
+                );
+            }
         }
-
-        std::thread::sleep(std::time::Duration::from_millis(cli.interval));
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
     }
 }
 

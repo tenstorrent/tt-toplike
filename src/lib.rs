@@ -80,9 +80,12 @@
 // Public modules - these are the stable API
 pub mod animation;
 pub mod backend;
+pub mod bus;
 pub mod error;
 pub mod logging;
 pub mod models;
+// The start-up timeline written when `TT_TOPLIKE_STARTUP_LOG` is set.
+pub mod startup_log;
 
 // Workload analysis. The module is always available because its `inference`
 // submodule (telemetry-based workload classification) is cross-platform and used
@@ -98,6 +101,15 @@ pub mod config;
 
 // UI module - contains both TUI and GUI implementations
 pub mod ui;
+
+// Saga, the quest view: the `[saga]` config and the driver thread that feeds
+// the saga core from the bus. TUI-side only, like the views that read it.
+#[cfg(feature = "tui")]
+pub mod saga;
+
+// Viz plugins: the trait, registry, history and test helpers. TUI-side only.
+#[cfg(feature = "tui")]
+pub mod viz;
 
 // Re-exports for convenience
 pub use backend::{BackendConfig, TelemetryBackend};

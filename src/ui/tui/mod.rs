@@ -9,18 +9,48 @@
 //! Supports two display modes:
 //! - Normal mode: Traditional table view with real-time telemetry
 //! - Visualization mode: Hardware-responsive starfield animation
+//!
+//! # The signal bus
+//!
+//! The TUI hosts the signal bus in this process ([`crate::bus::tui_bus`]),
+//! memory only unless `--record DIR`/`--bus-dir DIR` is given (then it
+//! records there, with `--bus-retain`), and serves it on `--bus-socket PATH`
+//! when given. At start-up it tries the default socket path once with a
+//! short timeout; when a `--headless` host answers there, the TUI attaches
+//! to it and hosts no bus of its own (chip telemetry still comes from its
+//! own backend). `--no-bus-attach` skips that probe; `--bus-attach PATH`
+//! attaches to PATH or fails. `--replay` stays a `--headless` mode: run
+//! `tt-toplike-tui --headless --replay PATH --bus-socket S` and then the TUI
+//! with `--bus-attach S`.
+//!
+//! The bus is driven on the loop's data tick (the same pass that calls
+//! `backend.update()`), never per render frame. Every display-mode change
+//! publishes `ViewChanged` once (`view_name` gives the names). An attached
+//! or replay bus is named in the status bar (`bus: <path>`, `bus: replay`);
+//! a local bus adds nothing there. Views read the world with
+//! [`crate::bus::tui_bus::TuiBus::read`].
 
 pub mod bench;
 pub use bench::BenchResult;
 pub mod chip_portrait;
 pub mod perf;
 pub use perf::PerfMeter;
+#[cfg(test)]
+mod arcade_traffic;
 pub(crate) mod proc_scan;
 pub(crate) mod reset_status;
+pub mod splash;
 pub mod throttle;
 pub use throttle::ThrottleState;
+mod backdrop_bus;
+mod grid_bus;
+mod hivemind_bus;
 mod hivemind_view;
+pub(crate) mod inference_bus;
 pub(crate) mod inference_panel;
+pub(crate) mod saga_view;
+mod saga_why;
+mod viz_host;
 
 use crate::animation::{
     ArcadeVisualization, DefragVis, HardwareStarfield, MemoryCastle, MemoryFlowVis, TrainView,
@@ -80,7 +110,7 @@ enum DisplayMode {
     MemoryCastle,
     /// Memory Flow Topology (full-screen DRAM motion visualization)
     MemoryFlow,
-    /// Arcade mode (unified visualization with all three modes + hero character)
+    /// Arcade mode (the views as panels of one screen, laid out by `[arcade]`)
     Arcade,
     /// Defrag view — model-loading visualization (inspired by disk defragmenters)
     Defrag,
@@ -100,11 +130,48 @@ enum DisplayMode {
     /// `InferenceMonitor` and `HivemindSweeper`); `t` toggles back out to
     /// `prev_mode`, as does Esc.
     Training,
+    /// Die 3D view — isometric Blackhole boards drawn from live telemetry.
+    /// Entered via `3` only (excluded from the `v`-cycle rotation and from
+    /// `--rotate`, like `Training`); `3` toggles back out to `prev_mode`, as
+    /// does Esc (to `Insights` when that is Die3d itself; see `back_target`).
+    /// While active it also takes `[ ] m c C B T X W H L` (see
+    /// `die3d_key_for`).
+    Die3d,
+    /// Saga: a party of heroes, one per chip's floor, questing through a
+    /// dungeon the machine's signals build (`saga_view`). Entered with `S`
+    /// only (`saga_view::ENTRY_KEY`; excluded from the `v` cycle, and not in
+    /// `--rotate` yet);
+    /// `S` toggles back out to `prev_mode`, as does Esc. While active it
+    /// also takes `y` for "why", `[` `]` for the party's focus and `z` for
+    /// zoom (see `saga_key_for`).
+    Saga,
+    /// A plugin view (`crate::viz`), by its registry handle. Everything a
+    /// plugin needs (render, cycle, legend, help) lives in `viz_host`; each
+    /// arm here is a one-line call into it. Reached with `v` after Die 3D,
+    /// `/mode <id>`, `/viz <id>` or `--viz <id>`; Esc leaves to `prev_mode`.
+    Plugin(crate::viz::VizHandle),
 }
 
-/// The `v` rotation. `InferenceMonitor`, `HivemindSweeper` and `Training`
-/// are entry-key-only modes and are never cycled into; a `v` pressed while
-/// one of them is active leaves to `Insights`.
+/// Every mode, for tests that must cover each one.
+#[cfg(test)]
+const ALL_DISPLAY_MODES: [DisplayMode; 12] = [
+    DisplayMode::Insights,
+    DisplayMode::Grid,
+    DisplayMode::Starfield,
+    DisplayMode::MemoryCastle,
+    DisplayMode::MemoryFlow,
+    DisplayMode::Arcade,
+    DisplayMode::Defrag,
+    DisplayMode::InferenceMonitor,
+    DisplayMode::HivemindSweeper,
+    DisplayMode::Training,
+    DisplayMode::Die3d,
+    DisplayMode::Saga,
+];
+
+/// The `v` rotation. `HivemindSweeper`, `Training` and `Saga` are entry-key-only
+/// modes and are never cycled into; a `v` pressed while one of them is active
+/// leaves to `Insights`. Die 3D is the last stop before the cycle wraps.
 fn next_display_mode(m: DisplayMode) -> DisplayMode {
     match m {
         DisplayMode::Insights | DisplayMode::Grid => DisplayMode::MemoryFlow,
@@ -117,29 +184,432 @@ fn next_display_mode(m: DisplayMode) -> DisplayMode {
         // cycling with `v` (the monitor is also still a direct toggle via
         // `i`).
         DisplayMode::Defrag => DisplayMode::InferenceMonitor,
-        DisplayMode::InferenceMonitor => DisplayMode::Insights,
+        DisplayMode::InferenceMonitor => DisplayMode::Die3d,
         // HivemindSweeper and Training are deliberately excluded from the
         // `v`-cycle rotation (only reachable via `~`/`t`), but `v` is a
         // global hotkey, so pressing it while either happens to be active
         // still needs to leave cleanly.
         DisplayMode::HivemindSweeper => DisplayMode::Insights,
         DisplayMode::Training => DisplayMode::Insights,
+        // Die3d ends the cycle (it is also entered directly with `3`).
+        DisplayMode::Die3d => DisplayMode::Insights,
+        // Saga too, with `S`.
+        DisplayMode::Saga => DisplayMode::Insights,
+        // Plugins follow Die 3D in the cycle; `viz_host::next_mode_in`
+        // decides that. This table alone, with no plugin list, leaves.
+        DisplayMode::Plugin(_) => DisplayMode::Insights,
     }
+}
+
+/// Rows at the bottom of the terminal that the global status bar draws over.
+/// Views that draw their own footer are sized to the terminal minus this.
+const STATUS_BAR_ROWS: usize = 1;
+
+/// Where Esc (or the entry key pressed again) leaves `mode` for: the saved
+/// `prev_mode`, unless that is `mode` itself, and then `Insights`.
+///
+/// `prev_mode` can equal the mode on show after a detour: in Die 3D, `i`
+/// opens the inference monitor and saves Die3d as the previous mode, and Esc
+/// from the monitor goes back to Die 3D with that saved mode unchanged.
+/// Going "back" to Die3d from Die3d would leave nothing, so the key would
+/// do nothing while the footer says `3 leave`.
+fn back_target(mode: DisplayMode, prev_mode: DisplayMode) -> DisplayMode {
+    if prev_mode == mode {
+        DisplayMode::Insights
+    } else {
+        prev_mode
+    }
+}
+
+/// The Die 3D view's area for a terminal of `width` x `height` cells, and
+/// the rows kept for the global status bar: (columns, rows, reserved rows).
+/// The scene is drawn above the status bar, so the view gets one row less
+/// than the terminal.
+fn die3d_area(width: u16, height: u16) -> (usize, usize, usize) {
+    (
+        width as usize,
+        (height as usize).saturating_sub(STATUS_BAR_ROWS),
+        STATUS_BAR_ROWS,
+    )
+}
+
+/// A full Die 3D view with the app's canvas background (black unless
+/// `TT_TOPLIKE_TRANSPARENT` is set). Every place the app makes one goes through
+/// here, so the views agree with the rest of the screen.
+fn new_die3d_view(cols: usize, rows: usize, reserved: usize) -> crate::animation::Die3dView {
+    crate::animation::Die3dView::with_reserved_rows(cols, rows, reserved)
+        .with_transparent(colors::canvas_transparent())
+        .with_theme(colors::current_theme())
+        // The cell style follows the hardware (`/cells` changes it). The
+        // Insights inset below keeps braille: it only fits a board that way.
+        .with_cell_mode(crate::animation::die3d::cellmode::CellMode::Auto)
+}
+
+/// The Insights inset, with the same background rule as [`new_die3d_view`].
+fn new_inset_view(cols: usize, rows: usize) -> crate::animation::Die3dView {
+    crate::animation::Die3dView::inset(cols, rows)
+        .with_transparent(colors::canvas_transparent())
+        .with_theme(colors::current_theme())
+}
+
+/// On a terminal resize, resize the Die 3D view in place when it is open.
+/// It keeps its switches, history, load calibration, clouds and camera; only
+/// its size and its size-dependent caches change (`Die3dView::resize`). With
+/// no view open there is nothing to do: the next entry makes one at the
+/// size of the moment.
+fn resize_die3d(die3d: &mut Option<crate::animation::Die3dView>, width: u16, height: u16) {
+    if let Some(view) = die3d.as_mut() {
+        let (cols, rows, reserved) = die3d_area(width, height);
+        view.resize(cols, rows, reserved);
+    }
+}
+
+/// The mode a `3` press leads to, and the `prev_mode` to keep: entering
+/// remembers where we came from, leaving goes back to it (to `Insights` when
+/// the saved mode is Die3d itself; see `back_target`). Pulled out of the key
+/// handler so the toggle can be tested without a terminal.
+fn die3d_toggle(mode: DisplayMode, prev_mode: DisplayMode) -> (DisplayMode, DisplayMode) {
+    if mode == DisplayMode::Die3d {
+        let back = back_target(mode, prev_mode);
+        (back, back)
+    } else {
+        (DisplayMode::Die3d, mode)
+    }
+}
+
+/// The mode an `S` press (`saga_view::ENTRY_KEY`) leads to, and the
+/// `prev_mode` to keep: the same toggle as [`die3d_toggle`], for Saga.
+fn saga_toggle(mode: DisplayMode, prev_mode: DisplayMode) -> (DisplayMode, DisplayMode) {
+    if mode == DisplayMode::Saga {
+        let back = back_target(mode, prev_mode);
+        (back, back)
+    } else {
+        (DisplayMode::Saga, mode)
+    }
+}
+
+/// Whether `c` is a Saga key in `mode`: `y` (`saga_view::WHY_KEY`, which
+/// shows each chronicle line's cause), `[` and `]` (move the party view's
+/// focus) and `z` (zoom), and only in Saga. Elsewhere they keep their
+/// meaning (Insights confirms a kill with `y`, Die 3D changes boards with
+/// `[` and `]`). The handler checks this before its general character
+/// arms.
+fn saga_key_for(mode: DisplayMode, c: char) -> bool {
+    mode == DisplayMode::Saga
+        && [
+            saga_view::WHY_KEY,
+            saga_view::PREV_FLOOR_KEY,
+            saga_view::NEXT_FLOOR_KEY,
+            saga_view::ZOOM_KEY,
+        ]
+        .contains(&c)
+}
+
+/// The party view's focus after `[` (`next` false) or `]` (`next` true) in
+/// a world of `floors` floors: one floor back or on, wrapping at the ends.
+/// A focus left past the last floor by a smaller world starts from the
+/// last floor.
+fn saga_focus_step(focus: usize, floors: usize, next: bool) -> usize {
+    let floors = floors.max(1);
+    let focus = focus.min(floors - 1);
+    if next {
+        (focus + 1) % floors
+    } else {
+        (focus + floors - 1) % floors
+    }
+}
+
+/// The Die 3D key `c` stands for in `mode`, if the view takes it. Outside
+/// `Die3d` it is always `None`, so these letters keep their meaning (or lack
+/// of one) everywhere else. The handler checks this before its general
+/// character arms.
+fn die3d_key_for(mode: DisplayMode, c: char) -> Option<crate::animation::die3d::Die3dKey> {
+    if mode == DisplayMode::Die3d {
+        crate::animation::die3d::key_to_die3d(c)
+    } else {
+        None
+    }
+}
+
+/// The arcade layout step `c` stands for in `mode`: `}` next and `{`
+/// previous in Arcade, `None` anywhere else and for any other key.
+fn arcade_step_for(mode: DisplayMode, c: char) -> Option<crate::animation::arcade_presets::Step> {
+    if mode == DisplayMode::Arcade {
+        crate::animation::arcade_presets::step_for(c)
+    } else {
+        None
+    }
+}
+
+/// What asks the arcade to change its layout: the `{` or `}` key, or the
+/// argument of an `/arcade` command.
+#[derive(Debug, Clone, Copy)]
+enum ArcadeInput<'a> {
+    Key(char),
+    Command(&'a str),
+}
+
+/// The arcade's state that `{`, `}` and `/arcade` change, as `run_app`
+/// holds it.
+struct ArcadeSwitch<'a> {
+    arcade: &'a mut Option<ArcadeVisualization>,
+    config: &'a mut crate::animation::arcade_layout::ArcadeConfig,
+    cycle: &'a mut crate::animation::arcade_presets::LayoutCycle,
+}
+
+/// The body of the `{` `}` key arm and of `/arcade`: step or select the
+/// layout, and lay the arcade out again. Returns the
+/// status-line message and whether it is an error, or `None` for a key
+/// that is not a layout key in `mode`.
+///
+/// After a relayout the new arcade gets one update from the state it
+/// carried over (services, training run, devices) before it is drawn, as
+/// a resize builds and updates in one tick. Without it, the first frame
+/// after a switch shows "no Tenstorrent device found" and "0 of 0 models"
+/// in the new panels.
+fn arcade_switch(
+    input: ArcadeInput<'_>,
+    mode: DisplayMode,
+    s: ArcadeSwitch<'_>,
+    backend: &dyn TelemetryBackend,
+) -> Option<(String, bool)> {
+    use crate::animation::arcade_presets as presets;
+    let (message, error, relayout) = match input {
+        ArcadeInput::Key(c) => {
+            let step = arcade_step_for(mode, c)?;
+            (presets::step_status(s.cycle, step), false, true)
+        }
+        ArcadeInput::Command(arg) => {
+            let r = presets::command(arg, s.cycle);
+            (r.message, r.error, r.relayout)
+        }
+    };
+    if relayout {
+        s.config.rows = s.cycle.current().rows.clone();
+        let config = &*s.config;
+        *s.arcade = s.arcade.take().map(|a| {
+            let (w, h) = (a.width(), a.height());
+            a.relayout(w, h, config, backend)
+        });
+    }
+    if let (true, Some(a)) = (relayout, s.arcade.as_mut()) {
+        a.update(backend);
+    }
+    Some((message, error))
+}
+
+/// How long an informational message that belongs to a view stays on the
+/// status line, in seconds of animation time.
+const VIEW_MESSAGE_SECS: f64 = 4.0;
+
+/// A status-line message that belongs to one view: a layout switch, the
+/// the `w` key, a `/backdrop` or `/arcade` reply. It goes
+/// away when that view is left, and an informational one after
+/// [`VIEW_MESSAGE_SECS`]. A global message (rotation, config problems,
+/// `/mode` errors) has no `ViewMessage` and stays as before.
+#[derive(Debug, Clone, PartialEq)]
+struct ViewMessage {
+    /// The message's text, to tell whether `cmd_message` still holds it.
+    text: String,
+    view: DisplayMode,
+    /// The animation time it was shown at.
+    at_s: f64,
+}
+
+impl ViewMessage {
+    /// Tag the message now in `msg` as belonging to `view`.
+    fn tag(msg: &Option<(String, bool)>, view: DisplayMode, now_s: f64) -> Option<ViewMessage> {
+        msg.as_ref().map(|(text, _)| ViewMessage {
+            text: text.clone(),
+            view,
+            at_s: now_s,
+        })
+    }
+}
+
+/// Clear `msg` when it belongs to a view (`tag`) and that view is no
+/// longer `mode`, or when it is informational and older than
+/// [`VIEW_MESSAGE_SECS`] of animation time. An error stays until the next
+/// command. A message the tag does not describe (another message has
+/// replaced it) is left alone and the tag dropped. Called every loop turn,
+/// at the mode-transition choke point.
+fn tidy_view_message(
+    msg: &mut Option<(String, bool)>,
+    tag: &mut Option<ViewMessage>,
+    mode: DisplayMode,
+    now_s: f64,
+) {
+    let Some(t) = tag.as_ref() else {
+        return;
+    };
+    match msg.as_ref() {
+        Some((text, error)) if *text == t.text => {
+            let left = t.view != mode;
+            let old = !*error && now_s - t.at_s >= VIEW_MESSAGE_SECS;
+            if left || old {
+                *msg = None;
+                *tag = None;
+            }
+        }
+        _ => *tag = None,
+    }
+}
+
+/// The Die 3D pan key `code` stands for in `mode`: an arrow key in the Die 3D
+/// view, `None` anywhere else so the arrows keep their other uses.
+fn die3d_pan_for(mode: DisplayMode, code: KeyCode) -> Option<crate::animation::die3d::Die3dKey> {
+    use crate::animation::die3d::Die3dKey;
+    if mode != DisplayMode::Die3d {
+        return None;
+    }
+    match code {
+        KeyCode::Left => Some(Die3dKey::PanLeft),
+        KeyCode::Right => Some(Die3dKey::PanRight),
+        KeyCode::Up => Some(Die3dKey::PanUp),
+        KeyCode::Down => Some(Die3dKey::PanDown),
+        _ => None,
+    }
+}
+
+/// The stable lowercase name a mode is published under in `ViewChanged`.
+fn view_name(mode: DisplayMode) -> &'static str {
+    match mode {
+        DisplayMode::Insights => "insights",
+        DisplayMode::Grid => "grid",
+        DisplayMode::Starfield => "starfield",
+        DisplayMode::MemoryCastle => "castle",
+        DisplayMode::MemoryFlow => "flow",
+        DisplayMode::Arcade => "arcade",
+        DisplayMode::Defrag => "defrag",
+        DisplayMode::InferenceMonitor => "inference",
+        DisplayMode::HivemindSweeper => "hivemind",
+        DisplayMode::Training => "training",
+        DisplayMode::Die3d => "die3d",
+        DisplayMode::Saga => "saga",
+        // Every plugin view publishes as "plugin" (no backdrop takes it).
+        DisplayMode::Plugin(_) => "plugin",
+    }
+}
+
+/// The status-bar hint for the bus: shown only when the bus is not this
+/// process's own live bus (attached to a headless host, or a replay), so a
+/// default run's status bar is unchanged. Borrows the label the bus keeps
+/// (rebuilt only when it changes), so a frame allocates nothing.
+fn bus_status_hint(bus: &crate::bus::tui_bus::TuiBus) -> Option<&str> {
+    let label = bus.bus_label_str();
+    (label != "bus: local").then_some(label)
+}
+
+/// Name shown in the global status bar for a mode that adds a hint there.
+/// `Die3d` and `Saga` do (the status bar shows `3 leave` or `S leave` next
+/// to the view's name); every other mode has none.
+fn statusbar_mode_name(mode: DisplayMode) -> &'static str {
+    match mode {
+        DisplayMode::Die3d => crate::animation::DIE3D_DISPLAY_NAME,
+        DisplayMode::Saga => saga_view::DISPLAY_NAME,
+        _ => "",
+    }
+}
+
+/// True when moving from `prev` to `next` leaves the Die 3D view. The loop's
+/// mode-transition choke point drops the view on this, so every exit (`3`,
+/// Esc, `v`, `g`, `i`, the rotation, `/mode`) starts the next entry afresh.
+fn leaves_die3d(prev: DisplayMode, next: DisplayMode) -> bool {
+    prev == DisplayMode::Die3d && next != DisplayMode::Die3d
+}
+
+/// True when moving from `prev` to `next` leaves the Insights screen. The
+/// mode-transition choke point drops the Die 3D inset on this, so each return
+/// to Insights starts a fresh inset.
+fn leaves_insights(prev: DisplayMode, next: DisplayMode) -> bool {
+    prev == DisplayMode::Insights && next != DisplayMode::Insights
+}
+
+/// True when any device is a Blackhole chip, the only kind the Die 3D scene
+/// draws. Without one the inset has nothing to show, so none is made.
+fn has_blackhole_chip(devices: &[crate::models::Device]) -> bool {
+    devices
+        .iter()
+        .any(|d| d.architecture == crate::models::Architecture::Blackhole)
+}
+
+/// Resize the Insights inset in place to `rect`, when it exists and the rect
+/// differs from its size. It keeps its camera, load calibration and history
+/// (`Die3dView::resize`). With no rect (the terminal is below the inset's
+/// threshold) the view is hidden and kept, so a drag-resize that dips below
+/// the threshold and back does not lose its state. Only the board waiting to
+/// become the busiest is forgotten, so it cannot take over on the first frame
+/// that shows again.
+fn resize_inset(inset: &mut Option<crate::animation::Die3dView>, rect: Option<Rect>) {
+    let Some(view) = inset.as_mut() else {
+        return;
+    };
+    match rect {
+        Some(rect) => {
+            if view.size() != (rect.width as usize, rect.height as usize) {
+                view.resize(rect.width as usize, rect.height as usize, 0);
+            }
+        }
+        None => view.clear_pending_board(),
+    }
+}
+
+/// Bring the Insights inset in line with where it would go now, and say
+/// whether it should be updated this tick.
+///
+/// - No Blackhole chip: the view is dropped and nothing is updated.
+/// - No rect (too small): the view is kept but hidden; not updated. Its
+///   pending busiest-board candidate is cleared.
+/// - A rect: the view is made if missing, resized if the rect changed, and
+///   updated.
+fn sync_inset(
+    inset: &mut Option<crate::animation::Die3dView>,
+    rect: Option<Rect>,
+    blackhole: bool,
+) -> bool {
+    if !blackhole {
+        *inset = None;
+        return false;
+    }
+    let Some(rect) = rect else {
+        resize_inset(inset, None);
+        return false;
+    };
+    if inset.is_none() {
+        *inset = Some(new_inset_view(rect.width as usize, rect.height as usize));
+    }
+    resize_inset(inset, Some(rect));
+    true
+}
+
+/// The inset's rect on a terminal of `width` x `height` showing `devices`
+/// (zoomed to the page at `fleet_zoom_start`, if any).
+fn inset_rect_for(
+    width: u16,
+    height: u16,
+    devices: &[crate::models::Device],
+    fleet_zoom_start: Option<usize>,
+) -> Option<Rect> {
+    insights_inset_rect(
+        Rect::new(0, 0, width, height),
+        insights_panel_devices(devices, fleet_zoom_start),
+    )
 }
 
 /// How long `--rotate`/`R` dwells on a view before advancing.
 const ROTATE_LINGER: Duration = Duration::from_secs(30);
 /// Arcade packs three visualizations into one screen, so it gets longer.
 const ROTATE_LINGER_ARCADE: Duration = Duration::from_secs(45);
-/// Training and the Inference Monitor are *about* a workload. With no run
-/// and no server to show, they are near-empty screens, so the rotation
-/// glances at them and moves on rather than parking on nothing.
+/// Training and the Inference Monitor are *about* a workload, and the rotation
+/// skips them while there is none (`rotation_visits`). This is for the case
+/// that is left: a run or server that ends while the view is on screen leaves
+/// a near-empty screen, so the rotation glances at it and moves on.
 const ROTATE_LINGER_IDLE: Duration = Duration::from_secs(10);
 
 /// The unattended rotation (`--rotate`, or `R` in-app).
 ///
 /// Unlike the `v` cycle this deliberately includes the entry-key-only views
-/// (`i`, `~`, `t`) — the whole point is to surface everything, including the
+/// (`i`, `~`, `t`, `3`) — the whole point is to surface everything, including the
 /// screens a passer-by would never know to press a key for.
 ///
 /// `Grid` is the one deliberate omission. It is not a distinct view but an
@@ -153,6 +623,7 @@ const ROTATION: &[DisplayMode] = &[
     DisplayMode::Starfield,
     DisplayMode::MemoryCastle,
     DisplayMode::Arcade,
+    DisplayMode::Die3d,
     DisplayMode::Defrag,
     DisplayMode::InferenceMonitor,
     DisplayMode::HivemindSweeper,
@@ -168,6 +639,155 @@ fn next_rotation_mode(m: DisplayMode) -> DisplayMode {
         Some(i) => ROTATION[(i + 1) % ROTATION.len()],
         None => ROTATION[0],
     }
+}
+
+/// How often the rotation looks at the workload views it is not on.
+const ROTATE_PROBE_EVERY: Duration = Duration::from_secs(3);
+
+/// Whether the rotation stops at `mode`. Training and the Inference Monitor are
+/// about a workload, so they are visited only while one exists: a model
+/// starting or serving, or a training run. Die 3D draws Blackhole boards only,
+/// so it is visited only when the box has one (`die3d`); on any other box it
+/// would show a hint line. Every other view draws live telemetry and is always
+/// visited.
+fn rotation_visits(mode: DisplayMode, training: bool, inference: bool, die3d: bool) -> bool {
+    match mode {
+        DisplayMode::Training => training,
+        DisplayMode::InferenceMonitor => inference,
+        DisplayMode::Die3d => die3d,
+        _ => true,
+    }
+}
+
+/// The next view in the rotation that [`rotation_visits`] accepts. Insights is
+/// always accepted, so this ends within one lap. A view that is not in
+/// `ROTATION` starts the rotation again, as `next_rotation_mode` does.
+fn next_rotation_mode_for(
+    m: DisplayMode,
+    training: bool,
+    inference: bool,
+    die3d: bool,
+) -> DisplayMode {
+    let mut next = next_rotation_mode(m);
+    for _ in 0..ROTATION.len() {
+        if rotation_visits(next, training, inference, die3d) {
+            return next;
+        }
+        next = next_rotation_mode(next);
+    }
+    // Unreachable while Insights is in ROTATION and always visited; the first
+    // view is a safe place to land if that ever changes.
+    ROTATION[0]
+}
+
+/// What the rotation knows about the workload views, refreshed while it is on
+/// another view. The views' own flags (`train_active`, `inference_active`) are
+/// only kept while their view is on screen, which is too late to decide
+/// whether to go there.
+///
+/// Training comes from the background scan worker (`note_trainer`), whose
+/// `/proc` walk stays off the render thread, and from a look at the bus's
+/// world every [`ROTATE_PROBE_EVERY`] for a training run (an attached host's
+/// trainer, which the local scan cannot see). Inference is a cheap read of the
+/// background monitor's snapshot (or the attached host's models), taken at the
+/// same probe.
+#[derive(Debug, Default)]
+struct RotationActivity {
+    /// A trainer found by the local scan.
+    training: bool,
+    /// A training run in the bus's world (`train_bus::run_on_bus`), as of the
+    /// last probe. An attached TUI's local scan finds nothing on a headless
+    /// host, so this is how the rotation learns of the host's run.
+    training_on_bus: bool,
+    inference: bool,
+    probed: Option<Instant>,
+}
+
+impl RotationActivity {
+    /// Whether it is time to look at inference again (the first time,
+    /// immediately).
+    fn due(&self) -> bool {
+        self.probed
+            .map_or(true, |t| t.elapsed() >= ROTATE_PROBE_EVERY)
+    }
+
+    /// The scan worker's trainer search: a trainer found means training is
+    /// going, a search that found none means it is not, and a scan that did not
+    /// search (`None`) says nothing.
+    fn note_trainer(&mut self, found: &Option<Option<crate::workload::train::TrainProcess>>) {
+        if let Some(result) = found {
+            self.training = result.is_some();
+        }
+    }
+
+    /// The probe taken every [`ROTATE_PROBE_EVERY`]: whether the bus's
+    /// `world` holds a training run, and, unless the Inference Monitor is on
+    /// screen (it keeps its own flag), whether anything serves (`inference`,
+    /// asked only then).
+    fn probe(
+        &mut self,
+        mode: DisplayMode,
+        world: &dyn tt_toplike_bus::WorldRead,
+        inference: impl FnOnce() -> bool,
+    ) {
+        self.probed = Some(Instant::now());
+        if mode != DisplayMode::InferenceMonitor {
+            self.inference = inference();
+        }
+        self.training_on_bus = crate::animation::train_bus::run_on_bus(world);
+    }
+
+    /// Whether Training is worth a visit: a local trainer, or a run on the bus.
+    fn wants_training(&self) -> bool {
+        self.training || self.training_on_bus
+    }
+}
+
+/// Whether the background scan should look for a trainer: Arcade follows a run
+/// (not under mock or remote, which build their lanes elsewhere), and so does
+/// the rotation, to know whether Training is worth a visit (not under mock,
+/// whose synthetic run always counts).
+fn scan_wants_trainer(mode: DisplayMode, rotating: bool, backend_type: BackendType) -> bool {
+    let arcade = mode == DisplayMode::Arcade
+        && backend_type != BackendType::Mock
+        && backend_type != BackendType::Remote;
+    arcade || (rotating && backend_type != BackendType::Mock)
+}
+
+/// Whether any service is starting or running: a row whose phase is not `Down`.
+/// A `Down` service (the container is there but its process or readiness is
+/// gone) is not a workload to look at, so a dead server does not earn the
+/// Inference Monitor a visit.
+fn inference_rows_active(rows: &[crate::workload::inference_server::ServiceState]) -> bool {
+    use crate::workload::inference_server::Phase;
+    rows.iter().any(|s| s.phase != Phase::Down)
+}
+
+/// Whether anything is starting or serving a model, read without leaving the
+/// current view: the background monitor's snapshot (a cheap read), the remote
+/// box's rows, or the mock roster. Linux only, as the monitor is: elsewhere
+/// there is nothing to look at, and the rotation treats it as idle.
+#[cfg(target_os = "linux")]
+fn peek_inference_active(
+    backend: &dyn crate::backend::TelemetryBackend,
+    backend_type: BackendType,
+    monitor: &crate::workload::InferenceServerMonitor,
+    mock_started: Instant,
+) -> bool {
+    #[cfg(feature = "remote")]
+    if backend_type == BackendType::Remote {
+        if let Some(list) = backend.remote_inference() {
+            let rows: Vec<_> = list.iter().map(remote_inference_to_service_state).collect();
+            return inference_rows_active(&rows);
+        }
+    }
+    let _ = backend;
+    if backend_type == BackendType::Mock {
+        return inference_rows_active(&crate::workload::inference_server::mock::mock_services(
+            mock_started.elapsed().as_secs_f32(),
+        ));
+    }
+    inference_rows_active(&monitor.snapshot())
 }
 
 /// How long to dwell on `mode`.
@@ -198,6 +818,8 @@ fn display_mode_for(mode: crate::cli::VisualizationMode) -> DisplayMode {
         V::Arcade => DisplayMode::Arcade,
         V::Hivemind => DisplayMode::HivemindSweeper,
         V::Training => DisplayMode::Training,
+        V::Die3d => DisplayMode::Die3d,
+        V::Saga => DisplayMode::Saga,
     }
 }
 
@@ -224,7 +846,65 @@ enum OverlayPanel {
 /// always kept; the rest are the busiest processes filling remaining slots).
 const PROC_PANEL_MAX_ROWS: usize = 12;
 
+/// Install the TUI's panic hook: it restores the terminal BEFORE the panic
+/// prints. Without it, a panic anywhere in the render/event loop unwinds
+/// straight past the normal cleanup, leaving the terminal in raw mode and the
+/// alternate screen, which makes every later shell command "staircase" until
+/// the user runs `reset`. Restoring first also lets the panic message print
+/// in cooked mode so the failure is visible.
+pub fn install_panic_hook() {
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        // The process-scan worker catches its own panics and keeps
+        // serving (see `proc_scan`), so the UI stays up. Log it and
+        // leave the terminal alone; restoring it here would drop the
+        // live UI out of the alternate screen.
+        if proc_scan::is_scan_thread() {
+            log::warn!("process scan thread panicked: {info}");
+            return;
+        }
+        // The saga driver catches its own panic too (`crate::saga::driver`).
+        if crate::saga::driver::is_saga_thread() {
+            log::warn!("saga driver thread panicked: {info}");
+            return;
+        }
+        // A panic in plugin code is caught by `viz_host`, which turns the
+        // plugin off; the UI stays up.
+        if viz_host::hook_skips_restore() {
+            log::warn!("viz plugin panicked: {info}");
+            return;
+        }
+        // Stop the start-up splash first, without letting it clear the
+        // screen, so it cannot draw over or erase the message below.
+        splash::abandon();
+        let _ = disable_raw_mode();
+        // Leave the alternate screen and turn focus reports off (the bytes
+        // crossterm's `LeaveAlternateScreen` and `DisableFocusChange` write),
+        // through the splash's writer so a test can see their order.
+        splash::emit_for_hook(b"\x1b[?1049l\x1b[?1004l");
+        crate::logging::enable_stderr();
+        original_hook(info);
+    }));
+}
+
+/// Install the TUI's panic hook, then start the signal bus.
+///
+/// The order matters. A hosted bus installs the quiet reducer hook
+/// (`tt_toplike_bus::install_quiet_reducer_hook`), which runs once per
+/// process and wraps whatever hook is current then. Installed after the TUI
+/// hook, it keeps a reducer panic (which the bus catches and survives) from
+/// reaching the TUI hook, which would drop the screen out of raw mode and
+/// print over the UI. Installed before, the TUI hook would replace it.
+pub fn start_bus_after_panic_hook(
+    opts: &crate::bus::tui_bus::TuiBusOptions,
+    backend: &dyn TelemetryBackend,
+) -> Result<crate::bus::tui_bus::TuiBus, String> {
+    install_panic_hook();
+    crate::bus::tui_bus::TuiBus::start(opts, backend)
+}
+
 pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
+    crate::startup_log::begin();
     // Check if we have a TTY available
     if !std::io::stdout().is_terminal() {
         return Err(TTTopError::Terminal(
@@ -233,6 +913,34 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
                 .to_string()
         ));
     }
+
+    // The config file is read here, once, before raw mode: reading it
+    // after `enable_raw_mode` would leave a blank raw-mode screen if the
+    // read ever stalled. `config::read_config_file` reads only a regular
+    // file of at most 256 KiB. Every problem goes to the log and the first
+    // to the status line (see `cmd_message` in `run_app`), and a bad
+    // `[arcade]` keeps the default layout. Pinned by
+    // `config_read_tests::the_config_is_read_before_raw_mode`. It is read
+    // before the bus opens, because the bus header records the saga's
+    // season (below).
+    let mut loaded_config = crate::config::load_config();
+    // `--arcade-layout NAME` wins over `[arcade] layout`.
+    crate::config::choose_layout(&mut loaded_config, cli.arcade_layout.as_deref());
+
+    // Plugin views (`viz_host`): register them, scan the YAML folders, and
+    // turn `--viz` / `--mode` into the first view. All of it happens before
+    // the backend, the bus, the saga and raw mode start, so an unknown
+    // `--viz` exits with its message on an untouched terminal and nothing
+    // (a `--record` log, a served socket) has begun. Stderr logging is still
+    // on here, so a plugin or YAML load warning prints on the normal
+    // terminal before the TUI starts. Pinned by
+    // `config_read_tests::plugins_are_resolved_before_anything_starts`.
+    let mut viz = viz_host::VizHost::new(&loaded_config.viz);
+    let start_mode = viz.start_mode(cli).map_err(TTTopError::Config)?;
+
+    // The start-up splash (`splash`): it draws only if the first frame takes
+    // longer than 150 ms, and the guard gives the screen back on an error.
+    let splash_guard = splash::start();
 
     // Create backend config
     let config = BackendConfig::new()
@@ -247,10 +955,16 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
 
     // Create initial backend
     let backend_type = cli.effective_backend();
+    splash::set_step(if backend_type == BackendType::Json {
+        splash::Step::ReadingTtSmi
+    } else {
+        splash::Step::LookingForChips
+    });
     let mut backend =
         factory::create_backend(backend_type, config.clone(), cli).map_err(TTTopError::Backend)?;
 
     log::info!("TUI started with {:?} backend", backend_type);
+    crate::startup_log::phase("backend ready");
 
     // Disable stderr log output BEFORE entering raw mode. Once the terminal is
     // in raw mode, a stray `\n` from a log line doesn't return the cursor to
@@ -259,29 +973,34 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
     // message buffer (shown in the Insights panel); stderr is re-enabled on exit.
     crate::logging::disable_stderr();
 
-    // Install a panic hook that restores the terminal BEFORE the panic prints.
-    // Without this, a panic anywhere in the render/event loop unwinds straight
-    // past the normal cleanup below, leaving the terminal in raw mode + the
-    // alternate screen — which makes every subsequent shell command "staircase"
-    // until the user runs `reset`. Restoring here also lets the panic message
-    // print in cooked mode so the failure is actually visible.
-    {
-        let original_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            // The process-scan worker catches its own panics and keeps
-            // serving (see `proc_scan`), so the UI stays up. Log it and
-            // leave the terminal alone; restoring it here would drop the
-            // live UI out of the alternate screen.
-            if proc_scan::is_scan_thread() {
-                log::warn!("process scan thread panicked: {info}");
-                return;
-            }
-            let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableFocusChange);
+    // The panic hook, then the signal bus, in that order (see
+    // `start_bus_after_panic_hook`). Both before raw mode, so a bus that
+    // cannot start (a log directory another process holds, `--bus-attach`
+    // to a dead socket) reports on a normal terminal.
+    let mut bus_opts =
+        crate::bus::tui_bus::TuiBusOptions::from_cli(cli, backend_type, &backend.backend_info());
+    // The bus header records the season this TUI's saga uses, in ticks, so
+    // a replay of its recording and `--saga-digest` use the same one (final
+    // review finding I4). A `--replay` host replaces it with the recorded
+    // log's.
+    crate::saga::config::write_season_tag(
+        &mut bus_opts.bus.header_tags,
+        &loaded_config.saga,
+        cli.interval,
+    );
+    splash::set_step(splash::Step::StartingBus);
+    let mut tui_bus = match start_bus_after_panic_hook(&bus_opts, backend.as_ref()) {
+        Ok(b) => b,
+        Err(e) => {
             crate::logging::enable_stderr();
-            original_hook(info);
-        }));
-    }
+            return Err(TTTopError::Config(e));
+        }
+    };
+
+    crate::startup_log::phase("bus started");
+    // The saga's driver runs from start-up, on or off screen, unless
+    // `[saga] enabled = false` (ledger ruling R24; see `crate::saga`).
+    let saga = crate::saga::start_for_tui(&loaded_config, &tui_bus, cli.interval);
 
     // Setup terminal
     enable_raw_mode().map_err(|e| {
@@ -306,8 +1025,25 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         .clear()
         .map_err(|e| TTTopError::Terminal(e.to_string()))?;
 
+    splash::handover();
+    crate::startup_log::phase("alt screen");
     // Create app state and run
-    let res = run_app(&mut terminal, &mut backend, backend_type, config, cli);
+    let res = run_app(
+        &mut terminal,
+        &mut backend,
+        backend_type,
+        config,
+        cli,
+        &mut tui_bus,
+        &loaded_config,
+        saga.as_ref(),
+        viz,
+        start_mode,
+    );
+
+    // Stop the splash if no frame was ever drawn, before the screen is
+    // restored below.
+    drop(splash_guard);
 
     // Re-enable stderr output before exiting
     crate::logging::enable_stderr();
@@ -324,6 +1060,16 @@ pub fn run_tui(cli: &Cli) -> Result<(), TTTopError> {
         .show_cursor()
         .map_err(|e| TTTopError::Terminal(e.to_string()))?;
 
+    // Drop the bus after the terminal is restored, so a slow shutdown never
+    // leaves the screen frozen in the alternate screen: a recording
+    // flushes, a served socket file is removed, and an attached follower
+    // gets at most half a second to stop (`RemoteWorld`'s drop). The saga
+    // driver stops first: it holds a clone of a hosted bus.
+    if let Some(d) = saga {
+        d.stop();
+    }
+    drop(tui_bus);
+
     res
 }
 
@@ -334,15 +1080,48 @@ fn run_app(
     mut backend_type: BackendType,
     config: BackendConfig,
     cli: &Cli,
+    tui_bus: &mut crate::bus::tui_bus::TuiBus,
+    loaded_config: &crate::config::LoadedConfig,
+    // The saga's driver, started in `run_tui`; `None` when `[saga] enabled
+    // = false` or it could not start (the Saga view says which).
+    saga: Option<&crate::saga::SagaDriver>,
+    // The plugin host and the first view, both made in `run_tui` before
+    // raw mode (`--viz` / `--mode` already resolved).
+    mut viz_host: viz_host::VizHost,
+    start_mode: DisplayMode,
 ) -> Result<(), TTTopError> {
     let update_interval = Duration::from_millis(cli.interval);
     let mut last_update = Instant::now();
 
     // Build animation config from CLI --profile flag, merged with any user config file overrides.
     // sensitivity is read at viz construction time and applied to the viz's internal AdaptiveBaseline.
+    // The config file was read in `run_tui`, before raw mode.
+    for p in &loaded_config.problems {
+        log::warn!("config: {p}");
+    }
+    let mut arcade_config = loaded_config.arcade.clone();
+    // Each view's backdrop (`[backdrop]`, `/backdrop`, the `w` key) and the
+    // one the TUI lays over the view on screen (see `backdrop_bus`). The
+    // settings live here, so they hold across a resize.
+    let mut backdrop_settings =
+        crate::animation::backdrop::BackdropSettings::new(loaded_config.backdrop.clone());
+    let mut shared_backdrop = backdrop_bus::SharedBackdrop::default();
+    let backdrop_started = Instant::now();
+    // The layouts `{` and `}` step through (`arcade_presets`). The choice
+    // lives here, so it holds across a resize and when the arcade is left
+    // and entered again; `arcade_config.rows` follows it.
+    let mut arcade_cycle = crate::animation::arcade_presets::LayoutCycle::new(
+        &loaded_config.layouts,
+        loaded_config.start_layout.as_deref(),
+    );
+    arcade_config.rows = arcade_cycle.current().rows.clone();
     let anim_cfg = {
-        use crate::config::{load_config_overrides, AnimConfig};
-        AnimConfig::from_profile(cli.profile).merge(load_config_overrides())
+        use crate::config::AnimConfig;
+        AnimConfig::from_profile(cli.profile).merge(crate::config::AnimConfigOverrides {
+            sensitivity: loaded_config.overrides.sensitivity,
+            max_particles_scale: loaded_config.overrides.max_particles_scale,
+            tt_smi_reset_behavior: None,
+        })
     };
 
     // UI refresh rates — animation modes target 60 FPS, data modes ~10 FPS.
@@ -367,41 +1146,34 @@ fn run_app(
 
     // The 2-second process scan (see `proc_scan`). `Scanner` owns the
     // cross-platform sysinfo process listing and, on Linux with
-    // `linux-procfs`, the /proc TT attribution and the serving probes. One
-    // synchronous scan here fills the panels for the first frame; after that
-    // the scanner moves to a worker thread (`scan_handle`, below) so the
-    // ~135 ms refresh never runs on this render/input thread.
-    let mut scanner = proc_scan::Scanner::new();
-    let initial_scan = {
-        use proc_scan::Scan;
-        scanner.scan(&proc_scan::ScanRequest {
-            // TT-attributed backends (Sysfs/Hybrid/Json/Luwen — anything but
-            // --host/--mock) show the TT-filtered list from the first frame.
-            only_tt: crate::cli::backend_shows_only_tt(backend_type),
-            // The prober has no verdicts before its first cycle.
-            verdicts: std::collections::HashMap::new(),
-            // No reset scan at start-up, as before.
-            want_processes: false,
-            want_trainer: false,
-        })
-    };
+    // `linux-procfs`, the /proc TT attribution and the serving probes. It
+    // runs on a worker thread (`scan_handle`) from the start, so the first
+    // frame does not wait for it: the first scan is asked for here and its
+    // result is applied by the loop like every later one, a few hundred
+    // milliseconds in (`TT_TOPLIKE_STARTUP_LOG` writes the timeline; see
+    // `crate::startup_log`).
+    crate::ui::tui::splash::set_step(crate::ui::tui::splash::Step::ScanningProcesses);
+    let mut scan_handle = proc_scan::ScannerHandle::spawn_with(proc_scan::Scanner::new);
+    scan_handle.request(proc_scan::ScanRequest {
+        // TT-attributed backends (Sysfs/Hybrid/Json/Luwen — anything but
+        // --host/--mock) show the TT-filtered list.
+        only_tt: crate::cli::backend_shows_only_tt(backend_type),
+        // The prober has no verdicts before its first cycle.
+        verdicts: std::collections::HashMap::new(),
+        // No reset scan and no trainer search in the first scan, as before.
+        want_processes: false,
+        want_trainer: false,
+        devices: proc_scan::device_keys(backend.devices()),
+    });
     // Background liveness prober: confirms server runtimes (vllm, ollama) via
-    // their local API off the render path. First cycle has no verdicts yet, so
-    // rows() relies on the cheap snapshot tier until the worker reports back.
+    // their local API off the render path. It gets its first targets when
+    // the first scan result is applied.
     let liveness_prober = crate::workload::LivenessProber::spawn();
-    liveness_prober.submit(initial_scan.runtimes);
     // Background inference-server monitor: probes detected TT inference-server
-    // containers (docker stats + /health) off the render path. Not yet read by
-    // any panel — used by the [i] panel in the next task.
+    // containers (docker stats + /health) off the render path. Its first
+    // targets also come with the first scan result.
     #[cfg(target_os = "linux")]
     let inference_monitor = crate::workload::InferenceServerMonitor::spawn();
-    #[cfg(target_os = "linux")]
-    inference_monitor.submit(initial_scan.inference_servers);
-    // Previous inference snapshot, for detecting the model-unload edge that
-    // triggers the Defrag EVICT animation.
-    #[cfg(target_os = "linux")]
-    let mut prev_inference_snapshot: Vec<crate::workload::inference_server::ServiceState> =
-        inference_monitor.snapshot();
     // Multi-model roster lines for the `[i]` view, recomputed each monitor tick
     // (in the InferenceMonitor update branch). Held here so the render pass —
     // which must reserve the same number of rows the snake was sized against —
@@ -416,20 +1188,17 @@ fn run_app(
     // Background model-catalog refresher: curl-refreshes the compatibility
     // catalog off the render path; feeds the cold-trail starfield screensaver.
     let catalog_refresher = crate::workload::CatalogRefresher::spawn();
-    // Linux `/proc` builds also keep the start-up serving metrics; the
-    // loop's `serving_metrics` is seeded from them further down.
-    #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-    let initial_serving_metrics = initial_scan.serving_metrics;
-    let mut proc_rows: Vec<ProcRow> = initial_scan.proc_rows;
-    // From here on every scan runs on the worker. The loop asks for one at
-    // the 2 s cadence and applies each result when it arrives.
-    let mut scan_handle = proc_scan::ScannerHandle::spawn(scanner);
+    // Empty until the first scan result is applied.
+    let mut proc_rows: Vec<ProcRow> = Vec::new();
+    // The loop asks for the next scan 2 s from now and applies each result
+    // when it arrives.
     let mut last_proc_rows_update = Instant::now();
 
     // Host CPU / RAM monitoring — sampled on the same 2s cadence as processes.
     // Cross-platform: the bars are useful on macOS too. sysinfo needs two calls
-    // separated in time to compute meaningful CPU%; we call it twice at init
-    // (with a tiny sleep) so the first frame shows real data rather than zeros.
+    // separated in time to compute a CPU%. The first is made here; the second
+    // when the first scan result arrives (`host_cpu_primed`), so start-up
+    // does not sleep for it. Until then the CPU bar reads 0.
     let (mut sys_monitor, mut host_cpu_pct, mut host_mem_used, mut host_mem_total) = {
         use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
         let mut s = System::new_with_specifics(
@@ -439,39 +1208,67 @@ fn run_app(
         );
         s.refresh_cpu_usage();
         s.refresh_memory();
-        // A brief pause lets the kernel accumulate CPU ticks for a real sample.
-        std::thread::sleep(Duration::from_millis(200));
-        s.refresh_cpu_usage();
-        s.refresh_memory();
         let cpu = s.global_cpu_usage();
         let used = s.used_memory();
         let tot = s.total_memory();
         (s, cpu, used, tot)
     };
+    let mut host_cpu_primed = false;
 
+    crate::startup_log::phase("loop setup");
     // UI state - initialize from CLI --mode option if provided
-    let mut display_mode = cli
-        .mode
-        .map(display_mode_for)
-        .unwrap_or(DisplayMode::Insights); // default is now Insights
-                                           // ── Unattended rotation (`--rotate`, `R`) ───────────────────────────────
-                                           // `rotate_since` is the moment the current view became visible; each tick
-                                           // compares its age against `linger_for(display_mode, …)`. Any explicit
-                                           // mode change resets it (see the mode-transition choke point) so a view
-                                           // you just navigated to gets its whole dwell rather than a leftover
-                                           // sliver. The two activity flags below are refreshed by the Training and
-                                           // InferenceMonitor update arms while those views are on screen — which is
-                                           // exactly when the rotation needs them, so nothing is probed off-view.
+    // The first view: `--viz` or `--mode`, resolved in `run_tui`.
+    let mut display_mode = start_mode;
+    // ── Unattended rotation (`--rotate`, `R`) ───────────────────────────────
+    // `rotate_since` is the moment the current view became visible; each tick
+    // compares its age against `linger_for(display_mode, …)`. Any explicit
+    // mode change resets it (see the mode-transition choke point) so a view
+    // you just navigated to gets its whole dwell rather than a leftover
+    // sliver. The two activity flags below are refreshed by the Training and
+    // InferenceMonitor update arms while those views are on screen — which is
+    // exactly when the rotation needs them, so nothing is probed off-view.
     let mut rotate_enabled = cli.rotate;
     let mut rotate_since = Instant::now();
     let mut train_active = false;
     let mut inference_active = false;
+    let mut rotation_activity = RotationActivity::default();
     let mut starfield: Option<HardwareStarfield> = None;
     let mut memory_castle: Option<MemoryCastle> = None;
     let mut memory_flow: Option<MemoryFlowVis> = None;
     let mut arcade: Option<ArcadeVisualization> = None;
     let mut defrag: Option<DefragVis> = None;
     let mut train_view: Option<TrainView> = None;
+    // Die 3D view and the clock it runs on: the view takes seconds since it
+    // was made, so one `Instant` lives beside it.
+    let mut die3d: Option<crate::animation::Die3dView> = None;
+    let mut die3d_started = Instant::now();
+    // Saga: whether each chronicle line shows its cause (`y`), and a frame
+    // counter for the view's small animations (portals, the waiting dots),
+    // advanced once per data tick while the view is on screen. The story
+    // itself runs on the driver's thread (`saga`).
+    let mut saga_why = false;
+    let mut saga_frame: u64 = 0;
+    // The party view's focused floor (`[` and `]`) and whether it draws
+    // that floor alone (`z`). View state only: the story never sees it.
+    let mut saga_focus: usize = 0;
+    let mut saga_zoom = false;
+    // What the Saga view remembers between frames, one memory per floor:
+    // the cells its heroes have lit, their trails and the floor's chip's
+    // temperature (`saga_view::PartyMemory`). Fed on every update in every
+    // view, so the maps are still remembered when Saga comes back on
+    // screen. The view draws a tile per floor from it; the arcade panel
+    // draws the lead's floor.
+    let mut saga_party = saga_view::PartyMemory::new();
+    // The Die 3D inset beside the Insights process table (see
+    // `insights_inset_rect`), with its own clock. It exists only on Insights,
+    // once there is room and a Blackhole chip; it is hidden but kept while
+    // the terminal is too small, and dropped on leaving Insights.
+    let mut insights_inset: Option<crate::animation::Die3dView> = None;
+    // What the bus puts on the Grid cells and the Insights panel rules
+    // (`grid_bus`), read at the data rate.
+    let mut grid_bus = grid_bus::GridBus::default();
+    let mut insights_flags = grid_bus::ChipFlags::default();
+    let mut insights_inset_started = Instant::now();
     let mut train_monitor: Option<TrainMonitor> = None;
     // Arcade's activity lanes. A training run is found by the background scan
     // worker (it reads `/proc/<pid>/maps`, which must not run on this thread);
@@ -496,6 +1293,9 @@ fn run_app(
     let mut mock_train: Option<MockTrainRun> = None;
     let mut mock_train_state: Option<crate::workload::train::TrainState> = None;
     let mut prev_display_mode = display_mode;
+    // The starting view goes on the bus; every change after it is published
+    // at the mode-transition choke point below.
+    tui_bus.note_view(view_name(display_mode));
     // The mode to return to when `i`/`I`/`Esc` exits the dedicated
     // `DisplayMode::InferenceMonitor` view — captured at entry so `i` (or
     // `Esc`) always lands back wherever the user came from, not a hardcoded
@@ -541,6 +1341,8 @@ fn run_app(
     // advanced once per animated redraw in the draw branch below, driven by
     // total board activity (`FeedAgg::total_rate`).
     let mut kitt = hivemind_view::KittScanner::new();
+    // What the sweeper last read from the bus (see `hivemind_bus`).
+    let mut hm_bus = hivemind_bus::HivemindBus::default();
     // Stashed argv from a first `/wrap <argv…>` — `/wrap` is the one command
     // in this subsystem with a real side effect (it spawns the given
     // command), so it's gated behind a confirmation: typing the exact same
@@ -557,7 +1359,14 @@ fn run_app(
     // so it works from every mode without mode-specific plumbing.
     let mut cmd_mode = false;
     let mut cmd_buf = String::new();
-    let mut cmd_message: Option<(String, bool)> = None; // (text, is_error)
+    // (text, is_error)
+    let mut cmd_message: Option<(String, bool)> = crate::config::status_message(loaded_config);
+    cmd_message = cmd_message.or_else(|| viz_host.status_problem());
+    // The view `cmd_message` belongs to, if it belongs to one, and the
+    // animation clock its lifetime runs on: the nominal frame time of each
+    // tick, so a stalled loop does not age it.
+    let mut cmd_message_view: Option<ViewMessage> = None;
+    let mut message_clock_s = 0.0f64;
 
     // `/remote` discovery picker: boxes from the most recent `/remote` (no-arg)
     // discovery, retained so `/remote <n>` can select by list position. Empty
@@ -659,7 +1468,7 @@ fn run_app(
     let mut inference_engine = InferenceEngine::new();
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     let mut serving_metrics: std::collections::HashMap<i32, ServingMetrics> =
-        initial_serving_metrics;
+        std::collections::HashMap::new();
     // Cross-platform: the unified render path reads these. They're only mutated
     // by the Linux-gated process-navigation / kill key handlers; off-Linux they
     // stay at their defaults (cursor 0, no kill dialog).
@@ -702,9 +1511,7 @@ fn run_app(
     // takeover gets no takeover of its own (see `reset_status`).
     let reset_behavior = crate::cli::resolve_reset_behavior(
         cli.tt_smi_reset_behavior,
-        crate::config::load_config_overrides()
-            .tt_smi_reset_behavior
-            .as_deref(),
+        loaded_config.overrides.tt_smi_reset_behavior.as_deref(),
     );
     let mut reset_status = reset_status::ResetStatus::new();
     let mut reset_detector = crate::workload::reset_detect::ResetDetector::new();
@@ -728,6 +1535,7 @@ fn run_app(
     let mut last_takeover_tick = Instant::now();
 
     loop {
+        let iter_start = Instant::now();
         // Decide whether to advance animations this iteration.
         // nvtop-style trick: input always polls at INPUT_POLL_MS (16 ms) so
         // keystrokes are never delayed.  Viz updates are gated separately so
@@ -753,6 +1561,9 @@ fn run_app(
                 // comet crosses the sky. At the 10 FPS data rate all of that
                 // reads as stepping rather than moving.
                 | DisplayMode::Training
+                // Camera cuts, the chaos effect and the scene's own motion
+                // are timed in fractions of a second.
+                | DisplayMode::Die3d
         ) || (display_mode == DisplayMode::Defrag && defrag_is_animated);
         let render_interval = if is_anim_mode {
             throttle_state.effective_anim_interval(ui_poll_rate_anim)
@@ -770,6 +1581,7 @@ fn run_app(
             } else {
                 last_data_render = Instant::now();
             }
+            message_clock_s += render_interval.as_secs_f64();
         }
 
         // Whether to redraw this iteration: on the mode's FPS tick, or once
@@ -843,6 +1655,9 @@ fn run_app(
                         starfield = Some(sf);
                     }
                     if let Some(ref mut sf) = starfield {
+                        // The bus: clusters, labels, comets, twinkle, ECC
+                        // flares, sparks and resets (see `starfield_bus`).
+                        sf.set_bus(Some(&tui_bus.read()), backend.devices());
                         sf.update_from_telemetry(backend);
                     }
                 }
@@ -860,6 +1675,9 @@ fn run_app(
                         memory_castle = Some(mc);
                     }
                     if let Some(ref mut tg) = memory_castle {
+                        // The bus: wings, banners, messengers, torches,
+                        // cracks and reset flashes (see `castle_bus`).
+                        tg.set_bus(Some(&tui_bus.read()), backend);
                         tg.update(backend);
                     }
                 }
@@ -875,6 +1693,9 @@ fn run_app(
                         memory_flow = Some(mf);
                     }
                     if let Some(ref mut mf) = memory_flow {
+                        // The bus: lane states, weight stream, pulses, ECC
+                        // flashes, model row (see `memory_flow_bus`).
+                        mf.set_bus(Some(&tui_bus.read()), backend.devices());
                         mf.update(backend);
                     }
                 }
@@ -889,8 +1710,13 @@ fn run_app(
                     }
                     if arcade.is_none() {
                         // Create new Arcade visualization
-                        let mut arc =
-                            ArcadeVisualization::new(size.width as usize, size.height as usize);
+                        // Laid out by the `[arcade]` config (the default
+                        // layout without one; see `arcade_layout`).
+                        let mut arc = ArcadeVisualization::with_config(
+                            size.width as usize,
+                            size.height as usize,
+                            &arcade_config,
+                        );
                         arc.initialize_from_devices(backend.devices());
                         // Forward sensitivity so --profile paranoid (or any non-default profile)
                         // takes effect inside Arcade just like it does in the standalone modes.
@@ -945,8 +1771,17 @@ fn run_app(
                             train_watch.update(latest_trainer.take());
                             train_watch.state().cloned()
                         };
+                    // Attached to a headless host: the host's models, as the
+                    // `i` view draws them.
+                    let world_rows = inference_bus::attached_rows(tui_bus, backend.as_ref());
+                    // Attached: the hero duel's serving stats are the host's,
+                    // from the same rows as the lanes.
+                    let serving =
+                        crate::animation::arcade_bus::duel_serving(serving, world_rows.as_deref());
                     #[cfg(target_os = "linux")]
-                    let service_rows = if backend_type == BackendType::Mock {
+                    let service_rows = if let Some(r) = world_rows {
+                        r
+                    } else if backend_type == BackendType::Mock {
                         crate::workload::inference_server::mock::mock_services(
                             mock_started.elapsed().as_secs_f32(),
                         )
@@ -958,7 +1793,7 @@ fn run_app(
                     #[cfg(not(target_os = "linux"))]
                     let service_rows: Vec<
                         crate::workload::inference_server::ServiceState,
-                    > = Vec::new();
+                    > = world_rows.unwrap_or_default();
                     let activities = activity_tracker.update(
                         train_state.as_ref(),
                         &service_rows,
@@ -968,15 +1803,62 @@ fn run_app(
                     if let Some(ref mut arc) = arcade {
                         arc.set_serving(serving);
                         arc.set_activities(activities);
+                        // The Training and inference panels; the Die 3D
+                        // panel's clock.
+                        arc.set_services(service_rows);
+                        arc.set_train_state(train_state);
+                        arc.set_clock(arcade_clock.elapsed().as_secs_f64());
+                        // The bus: gauges, labels, hits, heartbeat, sparks
+                        // and reset flashes (see `arcade_bus`).
+                        arc.set_bus(Some(&tui_bus.read()), backend);
+                        // The Saga panel: the driver's last state and the
+                        // memory of the lead's floor (a layout without one
+                        // ignores it).
+                        let feed = saga_panel_feed(saga, loaded_config.saga.enabled);
+                        let memory = match &feed {
+                            saga_view::PanelFeed::Live { state, .. } => saga_party.lead(state),
+                            _ => saga_view::SagaMemory::none(),
+                        };
+                        arc.set_saga(feed, memory);
                         arc.update(backend);
                     }
                 }
                 DisplayMode::Insights => {
                     // Ingestion now happens in the backend update block (runs at ~10 Hz,
-                    // not 60 FPS), so nothing to do here.
+                    // not 60 FPS). The Die 3D inset and the panels' model rules are fed here.
+                    insights_flags =
+                        grid_bus::ChipFlags::from_world(&tui_bus.read(), backend.devices())
+                            .with_attached(tui_bus.is_attached());
+                    let rect = inset_rect_for(
+                        size.width,
+                        size.height,
+                        backend.devices(),
+                        fleet_zoom_start,
+                    );
+                    if insights_inset.is_none() {
+                        insights_inset_started = Instant::now();
+                    }
+                    if sync_inset(
+                        &mut insights_inset,
+                        rect,
+                        has_blackhole_chip(backend.devices()),
+                    ) {
+                        if let Some(view) = insights_inset.as_mut() {
+                            // `/theme` may have changed since the last tick.
+                            view.set_theme(colors::current_theme());
+                            // The inset draws the bus's fill and pulses, no text.
+                            let world = tui_bus.read();
+                            view.update(
+                                backend,
+                                Some(&world),
+                                insights_inset_started.elapsed().as_secs_f64(),
+                            );
+                        }
+                    }
                 }
                 DisplayMode::Grid => {
-                    // Grid mode doesn't need special init
+                    // The bus: model text, bring-up bar, pulses, sparks, resets.
+                    grid_bus.update(&tui_bus.read(), backend.devices());
                 }
                 DisplayMode::InferenceMonitor => {
                     // Feed the unified snake a fresh view of the world; it owns
@@ -989,8 +1871,14 @@ fn run_app(
                     // state. Substitute a synthetic roster that walks the
                     // real lifecycle; every label carries a `(mock)` suffix
                     // so its serving numbers can't read as real ones.
+                    // Attached to a headless host: the rows come from its
+                    // world (see `inference_bus`), so the local rows below
+                    // are not computed.
+                    let world_rows = inference_bus::attached_rows(tui_bus, backend.as_ref());
                     #[cfg(target_os = "linux")]
-                    let local_rows = if backend_type == BackendType::Mock {
+                    let local_rows = if world_rows.is_some() {
+                        Vec::new()
+                    } else if backend_type == BackendType::Mock {
                         crate::workload::inference_server::mock::mock_services(
                             mock_started.elapsed().as_secs_f32(),
                         )
@@ -1031,6 +1919,14 @@ fn run_app(
                         Vec<crate::workload::inference_server::ServiceState>,
                         bool,
                     ) = (local_rows, false);
+                    // Attached to a headless host: draw that host's models
+                    // from its world (see `inference_bus`). A local bus keeps
+                    // the rows above. The host's rows are not a local probe,
+                    // so they count as remote data for the fallback note.
+                    let (rows, has_remote_rows) = match world_rows {
+                        Some(world_rows) => (world_rows, true),
+                        None => (rows, has_remote_rows),
+                    };
                     let catalog = catalog_refresher.snapshot();
                     let arch = backend
                         .devices()
@@ -1085,11 +1981,16 @@ fn run_app(
                             )),
                         );
                     }
+                    // A lost host: its last models stay, marked stale.
+                    if let Some(note) = inference_bus::stale_note(tui_bus) {
+                        inference_bus::mark_stale(&mut inference_roster, note);
+                    }
                     let roster_h = inference_roster.len();
-                    // Drives the rotation's dwell (see `train_active`): with
-                    // no service detected the snake is just roaming an empty
-                    // catalog, so `--rotate` gives it the short glance.
-                    inference_active = !rows.is_empty();
+                    // Drives the rotation's dwell (see `train_active`): a
+                    // server that goes away while this view is on screen
+                    // leaves the snake roaming an empty catalog, so `--rotate`
+                    // gives it the short glance and moves on.
+                    inference_active = inference_rows_active(&rows);
                     // Education band: describe the featured *loading* service.
                     band_rotation = band_rotation.wrapping_add(1);
                     inference_band = {
@@ -1132,6 +2033,10 @@ fn run_app(
                         defrag = Some(DefragVis::new(size.width as usize, size.height as usize));
                     }
                     if let Some(ref mut dv) = defrag {
+                        // The bus: phase and fill per model, eviction on an
+                        // unload, bursts and sparks (see `defrag_bus`).
+                        let world = tui_bus.read();
+                        dv.set_bus(Some(&world), backend, !tui_bus.is_attached());
                         dv.update(backend);
                     }
                 }
@@ -1142,6 +2047,8 @@ fn run_app(
                     if let Some(h) = hivemind.as_mut() {
                         h.poll();
                     }
+                    // The bus strip, bus feed rows and the scanner's bus input.
+                    hm_bus.update(tui_bus, backend.as_ref());
                 }
                 DisplayMode::Training => {
                     if train_view.is_none() {
@@ -1161,18 +2068,118 @@ fn run_app(
                     }
                     if let Some(ref mut tm) = train_monitor {
                         tm.poll();
-                        // Drives the rotation's dwell: with no run attached
-                        // this screen is an empty-state card, so `--rotate`
-                        // glances and moves on. Re-read every tick, so a run
+                        // Drives the rotation's dwell: a run that ends while
+                        // this view is on screen leaves an empty-state card, so
+                        // `--rotate` glances and moves on. Re-read every tick, so a run
                         // that the (≤2s) rescan only just found extends the
                         // dwell instead of being cut short.
                         train_active = tm.state().proc.is_some();
                     }
                     if let Some(ref mut tv) = train_view {
+                        // The bus: a run seen through the world, step pulses,
+                        // the sky's pace, the run's chips and the models beside
+                        // it (see `train_bus`).
+                        tv.set_bus(Some(&tui_bus.read()), backend);
+                        train_active |= tv.shows_bus_run();
                         tv.update();
                     }
                 }
+                DisplayMode::Die3d => {
+                    // The scene is drawn above the global status bar, so the
+                    // view gets one row less than the terminal (`die3d_area`).
+                    let dv = die3d.get_or_insert_with(|| {
+                        die3d_started = Instant::now();
+                        let (cols, rows, reserved) = die3d_area(size.width, size.height);
+                        new_die3d_view(cols, rows, reserved)
+                    });
+                    dv.set_theme(colors::current_theme());
+                    // Die 3D reads the bus: model flags, the bring-up fill,
+                    // pulses, per-channel GDDR rows and sparks, and the bus
+                    // label when it is not the plain local one.
+                    dv.set_bus_label(Some(tui_bus.bus_label_str()));
+                    let world = tui_bus.read();
+                    dv.update(backend, Some(&world), die3d_started.elapsed().as_secs_f64());
+                }
+                // The story runs on the driver's thread; the view only
+                // reads its published state when it draws. Here the view's
+                // own animation clock moves on.
+                DisplayMode::Saga => saga_frame = saga_frame.wrapping_add(1),
+                // A plugin's state moves in `viz_host.tick` below.
+                DisplayMode::Plugin(_) => {}
             }
+            viz_host.tick(Instant::now(), display_mode, || tui_bus.read());
+            // The Saga view's memories follow the story in every view (see
+            // `saga_party` above), and each floor takes the temperature of
+            // its own chip from the backend, matched by its bus key.
+            if let Some(d) = saga {
+                let state = d.published().state;
+                saga_party.observe(&state);
+                // Each device's bus key is built once per update, so a
+                // floor's lookup compares keys and allocates nothing.
+                let keys: Vec<(tt_toplike_bus::EntityKey, usize)> = backend
+                    .devices()
+                    .iter()
+                    .map(|dev| (tt_toplike_bus::EntityKey::chip(&dev.bus_id), dev.index))
+                    .collect();
+                saga_party.set_heats(&state, |chip| {
+                    keys.iter()
+                        .find(|(key, _)| key == chip)
+                        .and_then(|&(_, index)| backend.telemetry(index))
+                        .and_then(|t| t.asic_temperature)
+                });
+            }
+
+            // The backdrops (see `backdrop_bus`): the views' own painters
+            // follow their settings, and the TUI's layer is fed for the view
+            // on screen.
+            snake.set_atmosphere(backdrop_bus::own_painter(&backdrop_settings, "inference"));
+            if let Some(tv) = train_view.as_mut() {
+                tv.set_sky(backdrop_bus::own_painter(&backdrop_settings, "training"));
+            }
+            if let Some(dv) = die3d.as_mut() {
+                dv.set_clouds(backdrop_bus::own_painter(&backdrop_settings, "die3d"));
+            }
+            shared_backdrop.update(
+                &backdrop_settings,
+                view_name(display_mode),
+                overlay == Some(OverlayPanel::Legend),
+                |want_rows| {
+                    // The scene follows the rows the arcade and `i` use.
+                    #[cfg(target_os = "linux")]
+                    let local_rows = || inference_monitor.snapshot();
+                    #[cfg(not(target_os = "linux"))]
+                    let local_rows = Vec::new;
+                    // The synthetic roster's clock exists on Linux alone (see
+                    // `mock_started`); elsewhere the mock has no roster.
+                    #[cfg(target_os = "linux")]
+                    let mock_rows = || {
+                        crate::workload::inference_server::mock::mock_services(
+                            mock_started.elapsed().as_secs_f32(),
+                        )
+                    };
+                    #[cfg(not(target_os = "linux"))]
+                    let mock_rows = Vec::new;
+                    let rows = if !want_rows {
+                        Vec::new()
+                    } else if let Some(r) = inference_bus::attached_rows(tui_bus, backend.as_ref())
+                    {
+                        r
+                    } else if backend_type == BackendType::Mock {
+                        mock_rows()
+                    } else if backend_type == BackendType::Remote {
+                        Vec::new()
+                    } else {
+                        local_rows()
+                    };
+                    crate::animation::backdrop::BackdropSignals::gather(
+                        Some(&tui_bus.read()),
+                        backend.as_ref(),
+                        rows,
+                        backdrop_started.elapsed().as_secs_f64(),
+                        backend_type == BackendType::Mock,
+                    )
+                },
+            );
 
             // Unattended rotation: advance once this view has had its dwell.
             // Placed after the per-mode update so the activity flags reflect
@@ -1180,6 +2187,43 @@ fn run_app(
             // decision is made at the data rate rather than the (much faster)
             // animation rate.
             if rotate_enabled {
+                // Keep what the rotation knows about the workload views: the
+                // one on screen from its own flag, the other from a peek every
+                // few seconds, so a view with nothing to show is skipped
+                // instead of visited.
+                match display_mode {
+                    DisplayMode::Training => rotation_activity.training = train_active,
+                    DisplayMode::InferenceMonitor => rotation_activity.inference = inference_active,
+                    _ => {}
+                }
+                if backend_type == BackendType::Mock {
+                    // The mock backend drives a synthetic run.
+                    rotation_activity.training = true;
+                }
+                if rotation_activity.due() {
+                    // Inference: attached, the host's models; otherwise the
+                    // local monitor, which exists only on Linux. Training: a
+                    // run in the bus's world, which is how an attached TUI
+                    // sees a headless host's trainer.
+                    rotation_activity.probe(display_mode, &tui_bus.read(), || {
+                        inference_bus::inference_active(tui_bus, backend.as_ref(), || {
+                            #[cfg(target_os = "linux")]
+                            {
+                                peek_inference_active(
+                                    backend.as_ref(),
+                                    backend_type,
+                                    &inference_monitor,
+                                    mock_started,
+                                )
+                            }
+                            // No inference monitor off Linux, so nothing to show.
+                            #[cfg(not(target_os = "linux"))]
+                            {
+                                false
+                            }
+                        })
+                    });
+                }
                 let active = match display_mode {
                     DisplayMode::Training => train_active,
                     DisplayMode::InferenceMonitor => inference_active,
@@ -1188,12 +2232,25 @@ fn run_app(
                     _ => true,
                 };
                 if rotate_since.elapsed() >= linger_for(display_mode, active) {
-                    display_mode = next_rotation_mode(display_mode);
+                    display_mode = next_rotation_mode_for(
+                        display_mode,
+                        rotation_activity.wants_training(),
+                        rotation_activity.inference,
+                        has_blackhole_chip(backend.devices()),
+                    );
                     force_redraw = true;
                 }
             }
         } // end if should_tick
 
+        // A message that belongs to a view goes when the view is left, and
+        // an informational one after a few seconds.
+        tidy_view_message(
+            &mut cmd_message,
+            &mut cmd_message_view,
+            display_mode,
+            message_clock_s,
+        );
         // Clear terminal when switching modes to remove artifacts
         if display_mode != prev_display_mode {
             // Single choke point for tearing down the HivemindSweeper engine:
@@ -1227,6 +2284,22 @@ fn run_app(
                     .get_or_insert_with(crate::workload::hivemind::Hivemind::new)
                     .start();
             }
+            // Die 3D's view is dropped on any exit, whichever key or command
+            // caused it, so the next entry starts afresh: all boards, every
+            // switch at its default (auto-cuts on), an empty history (the
+            // update arm re-creates the view and its clock).
+            if leaves_die3d(prev_display_mode, display_mode) {
+                die3d = None;
+            }
+            // The Insights inset is dropped the same way.
+            if leaves_insights(prev_display_mode, display_mode) {
+                insights_inset = None;
+                insights_flags = Default::default();
+            }
+            // Grid's bus memory too, so the next entry is a first sight.
+            if prev_display_mode == DisplayMode::Grid {
+                grid_bus = Default::default();
+            }
             // Any arrival at a new view — rotated to or navigated to — starts
             // its dwell fresh, so pressing a mode key never lands you on a
             // view that's about to rotate away.
@@ -1236,6 +2309,8 @@ fn run_app(
             // on a stale flag left by the previous one.
             train_active = true;
             inference_active = true;
+            // Once per change, never on a redraw.
+            tui_bus.note_view(view_name(display_mode));
             terminal.clear().ok();
             prev_display_mode = display_mode;
         }
@@ -1302,6 +2377,9 @@ fn run_app(
             let serve_hint = serve_status.as_deref();
             #[cfg(not(feature = "remote"))]
             let serve_hint: Option<&str> = None;
+            // `bus: <path>` / `bus: replay` when the bus is not this
+            // process's own live bus; nothing otherwise.
+            let bus_hint = bus_status_hint(tui_bus);
             // Whether `proc_rows` above was actually built via the TT-filtered
             // path this cycle — only possible on Linux/procfs builds (see the
             // proc_rows assignments). Drives the process panel's empty-state
@@ -1315,7 +2393,10 @@ fn run_app(
             // `remote_proc_rows` (computed above) is `None` under `--remote` —
             // i.e. the list below is still LOCAL processes, not the remote
             // box's. See `remote_local_fallback_note`.
-            let remote_note = remote_local_fallback_note(backend_type, has_remote_proc_rows);
+            // Before the first scan lands (`host_cpu_primed` is set then)
+            // the panel says it is scanning (`SCANNING_NOTE`).
+            let remote_note = remote_local_fallback_note(backend_type, has_remote_proc_rows)
+                .or((!host_cpu_primed).then_some(SCANNING_NOTE));
             // The rows the panel actually renders this frame: the remote list
             // when present, else the local scan.
             let display_proc_rows: &[ProcRow] = remote_proc_rows.as_deref().unwrap_or(&proc_rows);
@@ -1332,16 +2413,39 @@ fn run_app(
             // Status-bar reset segment for this frame (None once expired).
             let reset_seg = reset_status.text(Instant::now());
 
+            // The bus as Die 3D and the Insights inset read it this frame
+            // (their effects are timed by its clock). Taken only for those
+            // two screens.
+            let bus_world = matches!(
+                display_mode,
+                DisplayMode::Die3d | DisplayMode::Insights | DisplayMode::Plugin(_)
+            )
+            .then(|| tui_bus.read());
+            let bus_world = bus_world
+                .as_ref()
+                .map(|w| w as &dyn tt_toplike_bus::WorldRead);
+            // The legend's backdrop line: the view's setting, and whether its
+            // signals are estimates.
+            let backdrop_legend = (
+                backdrop_settings.choice(view_name(display_mode)),
+                shared_backdrop.estimated(),
+            );
+            // The splash (if it is up) stops and clears before the first frame.
+            splash::first_frame();
             let draw_start = Instant::now();
+            let mut viz_outcome = None;
             terminal
                 .draw(|f| {
                     // Clear frame with explicit black background for tmux compatibility
                     f.render_widget(
-                        Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
+                        Block::default().style(Style::default().bg(colors::canvas_bg())),
                         f.area(),
                     );
 
                     match display_mode {
+                        DisplayMode::Plugin(h) => {
+                            viz_outcome = Some(viz_host.render(h, f, bus_world))
+                        }
                         DisplayMode::Insights => {
                             render_insights(
                                 f,
@@ -1359,12 +2463,25 @@ fn run_app(
                                 host_mem_total,
                                 tt_filtered,
                                 remote_note,
+                                // The inset, only while its rect exists (the
+                                // renderer checks again).
+                                insights_inset.as_ref(),
+                                bus_world,
+                                insights_inset_started.elapsed().as_secs_f64(),
+                                &insights_flags,
                                 #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                 &serving_metrics,
                             );
                         }
                         DisplayMode::Grid => {
                             render_grid_mode(f, backend);
+                            let area = f.area();
+                            grid_bus::draw_grid(
+                                f.buffer_mut(),
+                                area,
+                                backend.devices(),
+                                grid_bus.fx(),
+                            );
                         }
                         DisplayMode::InferenceMonitor => {
                             render_snake_view(f, &snake, &inference_roster, &inference_band);
@@ -1402,12 +2519,13 @@ fn run_app(
                                 // and wide; busy slows down and focuses into a
                                 // bright core (see `hivemind_view::KittScanner`).
                                 let kitt_activity =
-                                    hivemind_view::kitt_activity_norm(h.feed().total_rate());
+                                    hm_bus.kitt_activity(h.feed().total_rate(), Instant::now());
                                 kitt.advance(kitt_activity);
                                 hivemind_view::render_hivemind(
                                     f,
                                     f.area(),
                                     h,
+                                    &hm_bus,
                                     hm_cursor,
                                     hm_auto,
                                     hm_unified,
@@ -1415,6 +2533,27 @@ fn run_app(
                                     &kitt,
                                 );
                             }
+                        }
+                        DisplayMode::Die3d => {
+                            if let Some(ref dv) = die3d {
+                                ui_die3d(f, dv, bus_world, die3d_started.elapsed().as_secs_f64());
+                            }
+                        }
+                        DisplayMode::Saga => {
+                            let flags = saga_view::SagaFlags {
+                                stopped: false,
+                                why: saga_why,
+                                focus: saga_focus,
+                                zoom: saga_zoom,
+                            };
+                            ui_saga(
+                                f,
+                                saga,
+                                &saga_party,
+                                loaded_config.saga.enabled,
+                                flags,
+                                saga_frame,
+                            );
                         }
                         DisplayMode::Training => {
                             // Under `--mock` the state comes from the
@@ -1431,6 +2570,10 @@ fn run_app(
                         }
                     }
 
+                    // The shared backdrop, in the blank cells the view left.
+                    let backdrop_area = backdrop_bus::area(f.area(), STATUS_BAR_ROWS as u16);
+                    shared_backdrop.draw(f.buffer_mut(), backdrop_area, view_name(display_mode));
+
                     // ── Global status bar (all modes) ─────────────────────────
                     render_global_statusbar(
                         f,
@@ -1439,6 +2582,7 @@ fn run_app(
                         perf_arg,
                         throttle_hint,
                         serve_hint,
+                        bus_hint,
                         reset_seg.as_ref(),
                     );
 
@@ -1450,7 +2594,8 @@ fn run_app(
 
                     // ── Floating overlay panel (legend / help / explain) ───────
                     if let Some(kind) = overlay {
-                        render_overlay_panel(f, kind, display_mode);
+                        let plugins = viz_host.help_rows(kind);
+                        render_overlay_panel_with(f, kind, display_mode, backdrop_legend, &plugins);
                     }
 
                     // ── Reset takeover (full-screen, drawn over everything) ──
@@ -1459,7 +2604,18 @@ fn run_app(
                     }
                 })
                 .map_err(|e| TTTopError::Terminal(e.to_string()))?;
+            // A plugin that crashed or went away closes: back to Insights,
+            // with the reason on the status line for a few seconds.
+            if let Some(why) = viz_host::active(display_mode)
+                .zip(viz_outcome)
+                .and_then(|(h, o)| viz_host.leave_message(h, &o))
+            {
+                display_mode = DisplayMode::Insights;
+                cmd_message = Some((why, false));
+                cmd_message_view = ViewMessage::tag(&cmd_message, display_mode, message_clock_s);
+            }
             perf_meter.record_frame(draw_start.elapsed());
+            crate::startup_log::frame(draw_start.elapsed(), draw_start - iter_start);
         } // end if do_draw
 
         // Input always polls at 16 ms so keystrokes respond immediately.
@@ -1475,7 +2631,7 @@ fn run_app(
                 Event::FocusLost => {
                     throttle_state.focused = false;
                 }
-                Event::Resize(_, _) => {
+                Event::Resize(width, height) => {
                     // Drop all size-dependent visualizations so they reinitialize
                     // at the new dimensions on the next loop iteration.
                     starfield = None;
@@ -1484,6 +2640,16 @@ fn run_app(
                     arcade = None;
                     defrag = None;
                     train_view = None;
+                    // Die 3D keeps its state (switches, history, load
+                    // calibration, camera) and its clock across a resize;
+                    // only its size and size-dependent caches change.
+                    resize_die3d(&mut die3d, width, height);
+                    // The inset follows too, so a redraw before the next tick
+                    // never draws a stale size.
+                    resize_inset(
+                        &mut insights_inset,
+                        inset_rect_for(width, height, backend.devices(), fleet_zoom_start),
+                    );
                     terminal.clear().ok();
                 }
                 // ── Reset takeover intercepts all keystrokes while active ──────
@@ -1543,21 +2709,33 @@ fn run_app(
                                             .unwrap_or("")
                                             .trim()
                                             .to_string();
-                                        // Show progress immediately; the worker
-                                        // replaces this when it finishes.
-                                        cmd_message = Some((
-                                            if arg.is_empty() {
-                                                "discovering boxes…".to_string()
-                                            } else {
-                                                format!("connecting to {}…", arg)
-                                            },
-                                            false,
-                                        ));
-                                        pending_remote = Some(spawn_remote_worker(
-                                            arg,
-                                            remote_boxes.clone(),
-                                            config.clone(),
-                                        ));
+                                        // Connecting swaps the backend, which a
+                                        // recording or served bus refuses.
+                                        // Discovery alone (no argument) is fine.
+                                        let refusal = if arg.is_empty() {
+                                            None
+                                        } else {
+                                            tui_bus.switch_refusal()
+                                        };
+                                        if let Some(why) = refusal {
+                                            cmd_message = Some((why, true));
+                                        } else {
+                                            // Show progress immediately; the worker
+                                            // replaces this when it finishes.
+                                            cmd_message = Some((
+                                                if arg.is_empty() {
+                                                    "discovering boxes…".to_string()
+                                                } else {
+                                                    format!("connecting to {}…", arg)
+                                                },
+                                                false,
+                                            ));
+                                            pending_remote = Some(spawn_remote_worker(
+                                                arg,
+                                                remote_boxes.clone(),
+                                                config.clone(),
+                                            ));
+                                        }
                                     }
                                     #[cfg(not(feature = "remote"))]
                                     {
@@ -1688,7 +2866,7 @@ fn run_app(
                                             rotate_since = Instant::now();
                                             cmd_message = Some((
                                                 if v {
-                                                    "rotation on — cycling all views (R to stop)"
+                                                    "rotation on — cycling the views (R to stop)"
                                                         .to_string()
                                                 } else {
                                                     "rotation off".to_string()
@@ -1845,6 +3023,92 @@ fn run_app(
                                             )
                                         }
                                     }
+                                } else if verb == "arcade" {
+                                    // `/arcade layout ...`; the old `/arcade
+                                    // cloudfield` only says the arcade carries no
+                                    // backdrop.
+                                    let arg = cmd_buf
+                                        .trim()
+                                        .trim_start_matches('/')
+                                        .split_once(char::is_whitespace)
+                                        .map(|(_, rest)| rest)
+                                        .unwrap_or("");
+                                    cmd_message = arcade_switch(
+                                        ArcadeInput::Command(arg),
+                                        display_mode,
+                                        ArcadeSwitch {
+                                            arcade: &mut arcade,
+                                            config: &mut arcade_config,
+                                            cycle: &mut arcade_cycle,
+                                        },
+                                        backend.as_ref(),
+                                    );
+                                    cmd_message_view = ViewMessage::tag(
+                                        &cmd_message,
+                                        display_mode,
+                                        message_clock_s,
+                                    );
+                                    force_redraw = true;
+                                } else if verb == "backdrop" {
+                                    // `/backdrop [off|scene|sky|clouds]` for the view
+                                    // on screen; the next update applies it.
+                                    let arg = cmd_buf
+                                        .trim()
+                                        .trim_start_matches('/')
+                                        .split_once(char::is_whitespace)
+                                        .map(|(_, rest)| rest)
+                                        .unwrap_or("");
+                                    cmd_message = Some(crate::animation::backdrop::command(
+                                        arg,
+                                        view_name(display_mode),
+                                        &mut backdrop_settings,
+                                    ));
+                                    cmd_message_view = ViewMessage::tag(
+                                        &cmd_message,
+                                        display_mode,
+                                        message_clock_s,
+                                    );
+                                    force_redraw = true;
+                                } else if crate::animation::die3d::commands::is_command(&verb) {
+                                    // A Die 3D setting. It belongs to the open view, so it
+                                    // is dispatched here, where the view is, and not in
+                                    // `execute_command`, which has no view.
+                                    let arg = cmd_buf
+                                        .trim()
+                                        .trim_start_matches('/')
+                                        .split_once(char::is_whitespace)
+                                        .map(|(_, rest)| rest)
+                                        .unwrap_or("")
+                                        .trim()
+                                        .to_string();
+                                    cmd_message = Some(match (display_mode, die3d.as_mut()) {
+                                        (DisplayMode::Die3d, Some(dv)) => {
+                                            let out = dv.command(
+                                                &verb,
+                                                &arg,
+                                                die3d_started.elapsed().as_secs_f64(),
+                                            );
+                                            // `/clouds` is the view's backdrop
+                                            // setting: clouds or off.
+                                            if verb == "clouds" {
+                                                let _ = backdrop_settings.set(
+                                                    "die3d",
+                                                    dv.clouds_on().then_some(
+                                                        crate::animation::backdrop::BackdropKind::Clouds,
+                                                    ),
+                                                );
+                                            }
+                                            out
+                                        }
+                                        _ => (
+                                            format!(
+                                                "/{verb} is a {} command (press 3 to open it)",
+                                                crate::animation::DIE3D_DISPLAY_NAME
+                                            ),
+                                            true,
+                                        ),
+                                    });
+                                    force_redraw = true;
                                 } else {
                                     let (msg, is_err, should_quit) = execute_command(
                                         &cmd_buf,
@@ -1858,6 +3122,12 @@ fn run_app(
                                     if should_quit {
                                         return Ok(());
                                     }
+                                    // `/mode <id>` and `/viz <id>` for plugins.
+                                    let (msg, is_err) = viz_host.command_fallthrough(
+                                        &cmd_buf,
+                                        (msg, is_err),
+                                        &mut display_mode,
+                                    );
                                     // Empty message (e.g. /help opens overlay) →
                                     // don't leave a blank command bar on screen.
                                     cmd_message = if msg.is_empty() {
@@ -2011,8 +3281,77 @@ fn run_app(
                                         )
                                         .start();
                                 } else {
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
                                 }
+                                force_redraw = true;
+                            }
+                            // ── Die 3D keys ([ ] and Space) ────────────────────
+                            // Checked before the general character arms so the
+                            // view consumes them. They are the keys that mean the
+                            // same in every view (change board, nudge); the view's
+                            // own settings are slash commands. `die3d_key_for` is
+                            // `None` outside the mode, so nothing else is
+                            // shadowed.
+                            KeyCode::Char(c) if die3d_key_for(display_mode, c).is_some() => {
+                                if let (Some(k), Some(dv)) =
+                                    (die3d_key_for(display_mode, c), die3d.as_mut())
+                                {
+                                    dv.handle_key(k, die3d_started.elapsed().as_secs_f64());
+                                }
+                                force_redraw = true;
+                            }
+                            // The arrows move the window over a scene too big
+                            // for the terminal (`die3d_pan_for` is `None` outside
+                            // the mode and for any other key).
+                            code if die3d_pan_for(display_mode, code).is_some() => {
+                                if let (Some(k), Some(dv)) =
+                                    (die3d_pan_for(display_mode, code), die3d.as_mut())
+                                {
+                                    dv.handle_key(k, die3d_started.elapsed().as_secs_f64());
+                                }
+                                force_redraw = true;
+                            }
+                            // ── Saga keys ──────────────────────────────────
+                            // In Saga only (`saga_key_for`): `y` shows or
+                            // hides each chronicle line's cause (Insights
+                            // keeps `y` for its kill dialog), `[` and `]`
+                            // move the party view's focus from floor to
+                            // floor (Die 3D keeps them for its boards), and
+                            // `z` draws the focused floor alone or goes back
+                            // to the grid.
+                            KeyCode::Char(c) if saga_key_for(display_mode, c) => {
+                                let floors = saga
+                                    .map_or(1, |d| d.published().state.world.floors.len())
+                                    .max(1);
+                                match c {
+                                    saga_view::PREV_FLOOR_KEY => {
+                                        saga_focus = saga_focus_step(saga_focus, floors, false);
+                                    }
+                                    saga_view::NEXT_FLOOR_KEY => {
+                                        saga_focus = saga_focus_step(saga_focus, floors, true);
+                                    }
+                                    saga_view::ZOOM_KEY => saga_zoom = !saga_zoom,
+                                    _ => saga_why = !saga_why,
+                                }
+                                force_redraw = true;
+                            }
+                            KeyCode::Char(saga_view::ENTRY_KEY) => {
+                                // Toggle Saga, like `3` for Die 3D. The
+                                // story keeps running off screen (the
+                                // driver's thread), so leaving drops nothing.
+                                let (m, p) = saga_toggle(display_mode, prev_mode);
+                                display_mode = m;
+                                prev_mode = p;
+                                force_redraw = true;
+                            }
+                            KeyCode::Char('3') => {
+                                // Toggle the Die 3D view, like `t` for Training. The
+                                // view is dropped at the mode-transition choke point
+                                // on any exit, so each entry starts afresh on all
+                                // boards with every switch at its default.
+                                let (m, p) = die3d_toggle(display_mode, prev_mode);
+                                display_mode = m;
+                                prev_mode = p;
                                 force_redraw = true;
                             }
                             KeyCode::Char('t') => {
@@ -2023,7 +3362,7 @@ fn run_app(
                                 // so unlike HivemindSweeper there is nothing for the
                                 // mode-transition choke point to tear down.
                                 if display_mode == DisplayMode::Training {
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
                                 } else {
                                     prev_mode = display_mode;
                                     display_mode = DisplayMode::Training;
@@ -2042,7 +3381,7 @@ fn run_app(
                                 rotate_since = Instant::now();
                                 cmd_message = Some((
                                     if rotate_enabled {
-                                        "rotation on — cycling all views (R to stop)".to_string()
+                                        "rotation on — cycling the views (R to stop)".to_string()
                                     } else {
                                         "rotation off".to_string()
                                     },
@@ -2085,16 +3424,26 @@ fn run_app(
                                     // Back out of the sniffer view to wherever the user
                                     // came from; the mode-transition choke point above
                                     // stops the engine's collector threads.
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
                                 } else if display_mode == DisplayMode::InferenceMonitor {
                                     // Back out of the dedicated Inference Server Monitor
                                     // view to wherever the user came from (see the
                                     // `i`/`I` handler above) rather than quitting.
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
                                 } else if display_mode == DisplayMode::Training {
                                     // Back out of the Training view to wherever the
                                     // user came from (see the `t` handler above).
-                                    display_mode = prev_mode;
+                                    display_mode = back_target(display_mode, prev_mode);
+                                } else if display_mode == DisplayMode::Die3d {
+                                    // Back out of Die 3D (see the `3` handler above);
+                                    // `back_target` makes sure Esc always leaves.
+                                    display_mode = back_target(display_mode, prev_mode);
+                                } else if display_mode == DisplayMode::Saga {
+                                    // Back out of Saga (see the `S` handler above).
+                                    display_mode = back_target(display_mode, prev_mode);
+                                } else if viz_host::active(display_mode).is_some() {
+                                    // Back out of a plugin view, as from Saga.
+                                    display_mode = back_target(display_mode, prev_mode);
                                 } else {
                                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                                     if kill_confirm.is_some() {
@@ -2136,8 +3485,42 @@ fn run_app(
                                     }
                                     _ => {}
                                 }
-                                display_mode = next_display_mode(display_mode);
+                                // Die 3D and plugins go on to the next plugin.
+                                display_mode = viz_host.next_mode(display_mode);
                                 log::info!("Switched to {:?} mode", display_mode);
+                            }
+                            KeyCode::Char(crate::animation::backdrop::KEY) => {
+                                // The next backdrop for the view on screen
+                                // (see `backdrop::key_message`).
+                                cmd_message = Some((
+                                    crate::animation::backdrop::key_message(
+                                        view_name(display_mode),
+                                        &mut backdrop_settings,
+                                    ),
+                                    false,
+                                ));
+                                cmd_message_view =
+                                    ViewMessage::tag(&cmd_message, display_mode, message_clock_s);
+                            }
+                            // `}` and `{`: the next and previous arcade layout,
+                            // in Arcade only (`arcade_step_for` is `None`
+                            // elsewhere, so nothing else is shadowed). The
+                            // arcade is laid out again at once, so the next
+                            // draw shows the new layout.
+                            KeyCode::Char(c) if arcade_step_for(display_mode, c).is_some() => {
+                                cmd_message = arcade_switch(
+                                    ArcadeInput::Key(c),
+                                    display_mode,
+                                    ArcadeSwitch {
+                                        arcade: &mut arcade,
+                                        config: &mut arcade_config,
+                                        cycle: &mut arcade_cycle,
+                                    },
+                                    backend.as_ref(),
+                                );
+                                cmd_message_view =
+                                    ViewMessage::tag(&cmd_message, display_mode, message_clock_s);
+                                force_redraw = true;
                             }
                             KeyCode::Char('d') | KeyCode::Char('D') => {
                                 // Jump directly to Defrag mode. If the sweeper happens
@@ -2163,42 +3546,54 @@ fn run_app(
                                 // Switch to next backend
                                 log::info!("Attempting to switch from {:?} backend", backend_type);
 
-                                match factory::switch_to_next_backend(
-                                    backend_type,
-                                    config.clone(),
-                                    cli,
-                                ) {
-                                    Ok((new_backend, new_type)) => {
-                                        *backend = new_backend;
-                                        backend_type = new_type;
-                                        log::info!(
-                                            "Successfully switched to {:?} backend",
-                                            backend_type
-                                        );
+                                // A recording or served bus names one backend
+                                // for the whole run.
+                                if let Some(why) = tui_bus.switch_refusal() {
+                                    cmd_message = Some((why, true));
+                                    force_redraw = true;
+                                } else {
+                                    match factory::switch_to_next_backend(
+                                        backend_type,
+                                        config.clone(),
+                                        cli,
+                                    ) {
+                                        Ok((new_backend, new_type)) => {
+                                            *backend = new_backend;
+                                            backend_type = new_type;
+                                            tui_bus.backend_switched(
+                                                backend_type,
+                                                &backend.backend_info(),
+                                                cli.mock_workloads,
+                                            );
+                                            log::info!(
+                                                "Successfully switched to {:?} backend",
+                                                backend_type
+                                            );
 
-                                        // Reinitialize visualizations with new backend
-                                        if let DisplayMode::Starfield = display_mode {
-                                            starfield = None;
+                                            // Reinitialize visualizations with new backend
+                                            if let DisplayMode::Starfield = display_mode {
+                                                starfield = None;
+                                            }
+                                            if let DisplayMode::MemoryCastle = display_mode {
+                                                memory_castle = None;
+                                            }
+                                            if let DisplayMode::MemoryFlow = display_mode {
+                                                memory_flow = None;
+                                            }
+                                            if let DisplayMode::Arcade = display_mode {
+                                                arcade = None;
+                                            }
+                                            if let DisplayMode::Defrag = display_mode {
+                                                defrag = None;
+                                            }
+                                            // Drop any fleet drill-down: the new backend
+                                            // may expose a different (smaller) device count.
+                                            fleet_zoom_start = None;
+                                            fleet_cursor = 0;
                                         }
-                                        if let DisplayMode::MemoryCastle = display_mode {
-                                            memory_castle = None;
+                                        Err(e) => {
+                                            log::error!("Failed to switch backend: {}", e);
                                         }
-                                        if let DisplayMode::MemoryFlow = display_mode {
-                                            memory_flow = None;
-                                        }
-                                        if let DisplayMode::Arcade = display_mode {
-                                            arcade = None;
-                                        }
-                                        if let DisplayMode::Defrag = display_mode {
-                                            defrag = None;
-                                        }
-                                        // Drop any fleet drill-down: the new backend
-                                        // may expose a different (smaller) device count.
-                                        fleet_zoom_start = None;
-                                        fleet_cursor = 0;
-                                    }
-                                    Err(e) => {
-                                        log::error!("Failed to switch backend: {}", e);
                                     }
                                 }
                             }
@@ -2394,6 +3789,13 @@ fn run_app(
                             // to Box<dyn TelemetryBackend> on assignment).
                             *backend = ws;
                             backend_type = BackendType::Remote;
+                            // Start feeding the remote frame's extension and
+                            // keep `/serve` off the old local raw frame.
+                            tui_bus.backend_switched(
+                                backend_type,
+                                &backend.backend_info(),
+                                cli.mock_workloads,
+                            );
                             log::info!("/remote: hot-swapped to WsBackend @ {}", target);
                             // Reset per-mode visualizations so they rebuild against
                             // the new device set (mirrors the `b` backend-cycle path).
@@ -2427,13 +3829,22 @@ fn run_app(
             }
         }
 
-        // Update backend data
-        if last_update.elapsed() >= update_interval {
-            if let Err(e) = backend.update() {
-                log::warn!("Update failed: {}", e);
-            }
-            last_update = Instant::now();
+        // Hivemind events go on the bus while its collector runs (it runs
+        // only on the sweeper view; the bus never starts it). Cheap when
+        // nothing is new.
+        if let Some(h) = hivemind.as_ref().filter(|h| h.is_running()) {
+            tui_bus.feed_hivemind(h);
+        }
 
+        // Update backend data, then tick the bus: the data tick. The bus
+        // never ticks per render frame (`run_data_tick`).
+        if crate::bus::tui_bus::run_data_tick(
+            &mut last_update,
+            update_interval,
+            Instant::now(),
+            backend.as_mut(),
+            Some(&mut *tui_bus),
+        ) {
             // Ingest fresh telemetry into InferenceEngine — runs at backend rate (~10 Hz),
             // not at the UI render rate (60 FPS), so ARC stall counters don't oversaturate.
             #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
@@ -2475,7 +3886,24 @@ fn run_app(
                 &mut serving_metrics,
             );
             let scanned_processes = applied.processes;
-            // The worker's trainer search result, for Arcade's lane.
+            // The second CPU sample, taken once, when the first scan lands.
+            if !std::mem::replace(&mut host_cpu_primed, true) {
+                sys_monitor.refresh_cpu_usage();
+                host_cpu_pct = sys_monitor.global_cpu_usage();
+            }
+            // The Wafer Waffler's process events, from this machine's /proc
+            // (never on --mock or --remote, whose chips are not these).
+            if crate::cli::backend_shows_only_tt(backend_type) {
+                for dv in [die3d.as_mut(), insights_inset.as_mut()]
+                    .into_iter()
+                    .flatten()
+                {
+                    dv.set_proc_holders(applied.holders.clone());
+                }
+            }
+            // The worker's trainer search result: for Arcade's lane, and for the
+            // rotation's idea of whether Training has anything to show.
+            rotation_activity.note_trainer(&applied.trainer);
             if applied.trainer.is_some() {
                 latest_trainer = applied.trainer;
             }
@@ -2522,18 +3950,32 @@ fn run_app(
             // Refresh the inference-server monitor's target set (containers only).
             #[cfg(target_os = "linux")]
             inference_monitor.submit(applied.inference_servers);
-            // Model-unload edge → kick off the Defrag EVICT animation. The
-            // power-EMA heuristic can't detect unload on Blackhole (see
-            // DefragVis::trigger_evict), so we drive it from this discrete signal.
-            #[cfg(target_os = "linux")]
-            {
-                let cur_inf = inference_monitor.snapshot();
-                if inference_panel::model_unloaded(&prev_inference_snapshot, &cur_inf) {
-                    if let Some(dv) = defrag.as_mut() {
-                        dv.trigger_evict();
-                    }
-                }
-                prev_inference_snapshot = cur_inf;
+            // Defrag's EVICT on a model unload comes from the bus now: the
+            // services go on it just below (see `defrag_bus`).
+
+            // The workload monitors' results go on the bus once per applied
+            // scan. What the views show: under `--mock` the synthetic
+            // roster and run; under `--remote` nothing local (the remote
+            // frame's extension is fed on the data tick).
+            if backend_type != BackendType::Remote {
+                #[cfg(target_os = "linux")]
+                let bus_inference = Some(if backend_type == BackendType::Mock {
+                    crate::workload::inference_server::mock::mock_services(
+                        mock_started.elapsed().as_secs_f32(),
+                    )
+                } else {
+                    inference_monitor.snapshot()
+                });
+                #[cfg(not(target_os = "linux"))]
+                let bus_inference: Option<
+                    Vec<crate::workload::inference_server::ServiceState>,
+                > = None;
+                let bus_training = if backend_type == BackendType::Mock {
+                    mock_train_state.clone()
+                } else {
+                    train_monitor.as_ref().map(|tm| tm.state().clone())
+                };
+                tui_bus.feed_workloads(&proc_rows, bus_inference.as_deref(), bus_training.as_ref());
             }
 
             // `/serve` per-tick broadcast. It runs once per applied scan
@@ -2542,24 +3984,31 @@ fn run_app(
             // frame dozens of times a second for no visible benefit.
             // `proc_rows` is current as of just above; the inference snapshot
             // is re-read here (cheap: an `ArcSwap` load + clone, see
-            // `InferenceServerMonitor::snapshot`) rather than threaded out of
-            // the `#[cfg(target_os = "linux")]` block above, since that block
-            // computes it only to detect the model-unload edge and doesn't
-            // otherwise need to survive past that check.
+            // `InferenceServerMonitor::snapshot`), as the bus feed above
+            // reads its own copy inside a `#[cfg(target_os = "linux")]`
+            // binding.
+            //
+            // The frame is built from the bus (`serve_frame`): the newest
+            // raw `tt-smi` record in the world, which the data tick
+            // published from this same backend, so the bytes match the old
+            // `inject_extension(snapshot_json(), ext)` frame.
+            //
+            // Relay (`--remote`): re-broadcast the origin's frame verbatim so
+            // downstream viewers see the WATCHED box's processes/inference,
+            // not this relay host's. That frame may carry the origin's own
+            // `tt_toplike`; injecting our local `build_extension` here would
+            // overwrite that key with our laptop's scan, misattributing it
+            // to the box being watched (see I1 in the final review). So the
+            // relay branch uses `compat::relay_frame` and never builds the
+            // local extension.
             #[cfg(feature = "remote")]
             if let Some(pub_handle) = publisher.as_ref() {
-                if let Some(frame) = backend.snapshot_json() {
-                    if backend_type == BackendType::Remote {
-                        // Relay: re-broadcast the origin's frame verbatim so
-                        // downstream viewers see the WATCHED box's processes/
-                        // inference, not this relay host's. `snapshot_json()`
-                        // already IS the origin peer's raw frame (which may
-                        // carry the origin's own `tt_toplike`); injecting our
-                        // local `build_extension` here would overwrite that
-                        // key with our laptop's scan, misattributing it to
-                        // the box being watched (see I1 in the final review).
-                        pub_handle.broadcast(frame);
-                    } else {
+                let relay = backend_type == BackendType::Remote;
+                let frame = crate::bus::tui_bus::serve_frame(
+                    Some(&*tui_bus),
+                    backend.snapshot_json(),
+                    relay,
+                    || {
                         // Local source of truth: enrich our own telemetry
                         // with our own process/inference monitors.
                         #[cfg(target_os = "linux")]
@@ -2568,12 +4017,14 @@ fn run_app(
                         let inference_snapshot_for_broadcast: Vec<
                             crate::workload::inference_server::ServiceState,
                         > = Vec::new();
-                        let ext = crate::backend::build_extension(
+                        crate::backend::build_extension(
                             &proc_rows,
                             &inference_snapshot_for_broadcast,
-                        );
-                        pub_handle.broadcast(crate::backend::inject_extension(&frame, &ext));
-                    }
+                        )
+                    },
+                );
+                if let Some(frame) = frame {
+                    pub_handle.broadcast(frame);
                 }
             }
         }
@@ -2587,12 +4038,11 @@ fn run_app(
                 only_tt: crate::cli::backend_shows_only_tt(backend_type),
                 verdicts: liveness_prober.fresh_verdicts(),
                 want_processes: reset_behavior.detects(),
-                // Arcade follows a training run. The worker finds it (the
-                // `maps` reads must stay off this thread). Mock and remote
-                // build their lanes from elsewhere.
-                want_trainer: display_mode == DisplayMode::Arcade
-                    && backend_type != BackendType::Mock
-                    && backend_type != BackendType::Remote,
+                // Arcade follows a training run, and the rotation needs to know
+                // if one exists. The worker finds it (the `maps` reads must
+                // stay off this thread).
+                want_trainer: scan_wants_trainer(display_mode, rotate_enabled, backend_type),
+                devices: proc_scan::device_keys(backend.devices()),
             });
 
             sys_monitor.refresh_cpu_usage();
@@ -2667,7 +4117,7 @@ fn ui_visualization(f: &mut Frame, starfield: &HardwareStarfield, backend: &dyn 
     let starfield_lines = starfield.render();
 
     let starfield_widget = Paragraph::new(starfield_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0)))
+        .style(Style::default().bg(colors::canvas_bg()))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -2684,7 +4134,7 @@ fn ui_visualization(f: &mut Frame, starfield: &HardwareStarfield, backend: &dyn 
                         .fg(colors::rgb(150, 220, 255))
                         .add_modifier(Modifier::BOLD),
                 )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))),
+                .style(Style::default().bg(colors::canvas_bg())),
         );
 
     f.render_widget(starfield_widget, chunks[1]);
@@ -2763,7 +4213,7 @@ fn ui_memory_castle(f: &mut Frame, memory_castle: &MemoryCastle, backend: &dyn T
     let castle_lines = memory_castle.render(backend);
 
     let castle_widget = Paragraph::new(castle_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0)))
+        .style(Style::default().bg(colors::canvas_bg()))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -2780,7 +4230,7 @@ fn ui_memory_castle(f: &mut Frame, memory_castle: &MemoryCastle, backend: &dyn T
                         .fg(colors::rgb(255, 180, 220))
                         .add_modifier(Modifier::BOLD),
                 )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))),
+                .style(Style::default().bg(colors::canvas_bg())),
         );
 
     f.render_widget(castle_widget, chunks[1]);
@@ -2801,7 +4251,7 @@ fn ui_memory_flow(f: &mut Frame, memory_flow: &MemoryFlowVis, backend: &dyn Tele
     let flow_lines = memory_flow.render(backend);
 
     let flow_widget = Paragraph::new(flow_lines)
-        .style(Style::default().bg(colors::rgb(0, 0, 0)))
+        .style(Style::default().bg(colors::canvas_bg()))
         .block(
             Block::default()
                 .borders(Borders::ALL)
@@ -2818,7 +4268,7 @@ fn ui_memory_flow(f: &mut Frame, memory_flow: &MemoryFlowVis, backend: &dyn Tele
                         .fg(colors::rgb(180, 255, 180))
                         .add_modifier(Modifier::BOLD),
                 )
-                .style(Style::default().bg(colors::rgb(0, 0, 0))),
+                .style(Style::default().bg(colors::canvas_bg())),
         );
 
     f.render_widget(flow_widget, chunks[1]);
@@ -2923,7 +4373,7 @@ fn render_memory_flow_header(f: &mut Frame, area: Rect, backend: &dyn TelemetryB
 /// from observable signals: power ramp, aiclk transition, and GDDR temperature delta.
 fn ui_defrag(f: &mut Frame, dv: &DefragVis, backend: &dyn TelemetryBackend) {
     let lines = dv.render(backend);
-    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::canvas_bg()));
     f.render_widget(widget, f.area());
 }
 
@@ -2936,21 +4386,95 @@ fn ui_train(
     backend: &dyn TelemetryBackend,
 ) {
     let lines = tv.render(st, backend);
-    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::canvas_bg()));
     f.render_widget(widget, f.area());
 }
 
-/// Render Arcade mode — uses the composite canvas so the hero `@` and trail
-/// actually appear.  The previous ratatui-Layout approach called sub-viz methods
-/// directly into separate Rects, bypassing ArcadeVisualization::render() and
-/// overlay_hero() entirely — the hero was computed but never drawn.
+/// Render the Die 3D view. It draws into the area above the global status
+/// bar's row (the view was sized for that, see the update arm), so its own
+/// footer is not covered.
+fn ui_die3d(
+    f: &mut Frame,
+    view: &crate::animation::Die3dView,
+    world: Option<&dyn tt_toplike_bus::WorldRead>,
+    now: f64,
+) {
+    let full = f.area();
+    let area = Rect {
+        height: full.height.saturating_sub(STATUS_BAR_ROWS as u16),
+        ..full
+    };
+    let lines = view.render(world, now);
+    // Reset, not black: the view leaves its background unpainted by default so
+    // the terminal's own colour (and any translucency) shows through, and a
+    // black base style here would paint over that in every unspanned cell.
+    let widget = Paragraph::new(lines).style(
+        Style::default()
+            .fg(ratatui::style::Color::Reset)
+            .bg(ratatui::style::Color::Reset),
+    );
+    f.render_widget(widget, area);
+}
+
+/// Draw the Saga view above the global status bar: the driver's last
+/// published state, or a note when there is no driver (`enabled` is the
+/// `[saga] enabled` setting, so the note can say why). See `saga_view`.
+fn ui_saga(
+    f: &mut Frame,
+    saga: Option<&crate::saga::SagaDriver>,
+    party: &saga_view::PartyMemory,
+    enabled: bool,
+    flags: saga_view::SagaFlags,
+    frame: u64,
+) {
+    let full = f.area();
+    let area = Rect {
+        height: full.height.saturating_sub(STATUS_BAR_ROWS as u16),
+        ..full
+    };
+    let size = (area.width, area.height);
+    let lines = match saga {
+        Some(d) => {
+            // One read gives the state and the stopped flag together.
+            let p = d.published();
+            let flags = saga_view::SagaFlags {
+                stopped: p.stopped,
+                ..flags
+            };
+            saga_view::render_saga(&p.state, party, flags, size, frame)
+        }
+        None => saga_view::render_saga_off(size, enabled),
+    };
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::canvas_bg()));
+    f.render_widget(widget, area);
+}
+
+/// What the arcade's Saga panel is fed: the driver's last published state
+/// and its stopped flag in one read, or why there is no driver (`enabled`
+/// is the `[saga] enabled` setting).
+fn saga_panel_feed(saga: Option<&crate::saga::SagaDriver>, enabled: bool) -> saga_view::PanelFeed {
+    match saga {
+        Some(d) => {
+            let p = d.published();
+            saga_view::PanelFeed::Live {
+                state: p.state,
+                stopped: p.stopped,
+            }
+        }
+        None => saga_view::PanelFeed::Off { enabled },
+    }
+}
+
+/// Render Arcade mode from the composite canvas (`ArcadeVisualization::render`),
+/// so the shared header, the bus effects and the activity lanes, which are
+/// drawn across panels, appear.
 ///
 /// The composite path: arcade.render(backend) → Vec<Line> → single Paragraph
 /// over the full terminal area.  No border boxes around each sub-panel, but
 /// the inline separators from render_separator() provide visual structure.
 fn ui_arcade(f: &mut Frame, arcade: &ArcadeVisualization, backend: &dyn TelemetryBackend) {
     let lines = arcade.render(backend);
-    let widget = Paragraph::new(lines).style(Style::default().bg(colors::rgb(0, 0, 0)));
+    let widget = Paragraph::new(lines).style(Style::default().bg(colors::canvas_bg()));
     f.render_widget(widget, f.area());
 }
 
@@ -2970,6 +4494,13 @@ fn ui_arcade(f: &mut Frame, arcade: &ArcadeVisualization, backend: &dyn Telemetr
 /// >4 chips: a single `avg  44°  822M  79W` column instead.
 ///
 /// The command bar and overlay panels render on top of this row when active.
+/// The chip's ARC firmware has stalled: its heartbeat reads 0. A backend
+/// that reports no heartbeat is not stalled (the old arcade hero's `?` rule,
+/// now shown in the status bar).
+fn arc_stalled(telem: Option<&crate::models::telemetry::Telemetry>) -> bool {
+    telem.is_some_and(|t| t.heartbeat == Some(0))
+}
+
 fn render_global_statusbar(
     f: &mut Frame,
     backend: &dyn TelemetryBackend,
@@ -2977,6 +4508,7 @@ fn render_global_statusbar(
     perf: Option<&str>,
     throttle_hint: Option<&str>,
     serve_hint: Option<&str>,
+    bus_hint: Option<&str>,
     reset_seg: Option<&reset_status::ResetSegment>,
 ) {
     use crate::models::telemetry::parse_hex_or_dec;
@@ -3018,6 +4550,37 @@ fn render_global_statusbar(
         vec![key(" q "), lbl(" quit")],
     ];
 
+    // Die 3D: name the view and the key out of it. The view's own footer is
+    // two rows above this bar.
+    if mode == DisplayMode::Die3d {
+        hotkeys.push(vec![
+            key(" 3 "),
+            Span::styled(
+                format!(" leave {}", statusbar_mode_name(mode)),
+                Style::default().fg(label_fg),
+            ),
+        ]);
+    }
+
+    // Saga: the "why" key and the key out of it.
+    if mode == DisplayMode::Saga {
+        hotkeys.push(vec![key(" y "), lbl(" why")]);
+        hotkeys.push(vec![
+            key(" S "),
+            Span::styled(
+                format!(" leave {}", statusbar_mode_name(mode)),
+                Style::default().fg(label_fg),
+            ),
+        ]);
+    }
+
+    // A plugin view: its title and the key out of it.
+    hotkeys.extend(viz_host::statusbar_group(
+        mode,
+        key_style,
+        Style::default().fg(label_fg),
+    ));
+
     // Insights-specific nav appended when in that mode.
     if matches!(mode, DisplayMode::Insights) {
         hotkeys.push(vec![
@@ -3044,6 +4607,9 @@ fn render_global_statusbar(
         temp: f32,
         mhz: u32,
         watts: f32,
+        /// The ARC firmware heartbeat reads 0: the chip's firmware has
+        /// stalled. A chip that does not report a heartbeat is not stalled.
+        arc_stalled: bool,
     }
 
     let chips: Vec<ChipTelem> = devices
@@ -3065,11 +4631,13 @@ fn render_global_statusbar(
                 temp,
                 mhz,
                 watts,
+                arc_stalled: arc_stalled(telem),
             }
         })
         .collect();
 
     let mut right: Vec<Span> = Vec::new();
+    let stalled_fg = colors::rgb(255, 100, 80);
 
     if chips.is_empty() {
         // nothing to show
@@ -3109,6 +4677,12 @@ fn render_global_statusbar(
                 format!("{:>3.0}W", c.watts),
                 Style::default().fg(colors::rgb(200, 160, 255)),
             ));
+            if c.arc_stalled {
+                right.push(Span::styled(
+                    " ARC!",
+                    Style::default().fg(stalled_fg).add_modifier(Modifier::BOLD),
+                ));
+            }
         }
         right.push(Span::raw(" "));
     } else {
@@ -3141,6 +4715,13 @@ fn render_global_statusbar(
             format!("  ×{}", chips.len()),
             Style::default().fg(label_fg),
         ));
+        let stalled = chips.iter().filter(|c| c.arc_stalled).count();
+        if stalled > 0 {
+            right.push(Span::styled(
+                format!(" ARC!×{stalled}"),
+                Style::default().fg(stalled_fg).add_modifier(Modifier::BOLD),
+            ));
+        }
         right.push(Span::raw(" "));
     }
 
@@ -3167,6 +4748,13 @@ fn render_global_statusbar(
             Style::default()
                 .fg(colors::rgb(120, 220, 140))
                 .add_modifier(Modifier::BOLD),
+        )]);
+    }
+    // The bus, when it is another process's (`bus: <path>`) or a replay.
+    if let Some(hint) = bus_hint {
+        hints.push(vec![Span::styled(
+            hint.to_string(),
+            Style::default().fg(colors::rgb(0x74, 0xC5, 0xDF)),
         )]);
     }
 
@@ -3299,7 +4887,11 @@ fn render_command_bar(f: &mut Frame, cmd_buf: &str, msg: Option<(&str, bool)>) {
         height: bar_h,
     };
 
-    // Clear the bar rows with a dark background, then render text.
+    // Clear the bar rows, then give them a dark background, then render
+    // text. A `Block` style only recolours a cell and keeps its symbol, so
+    // without the `Clear` a backdrop glyph laid in these rows (the shared
+    // backdrop draws before the bar) showed to the right of each line.
+    f.render_widget(ratatui::widgets::Clear, bar_area);
     f.render_widget(
         Block::default().style(Style::default().bg(colors::rgb(15, 20, 30))),
         bar_area,
@@ -3474,25 +5066,74 @@ fn line_cols(line: &Line<'_>) -> usize {
         .sum()
 }
 
+/// Wrap budget for prose panels on a terminal `width` columns wide: the panel
+/// clamps to `width - 2`, and each content line spends 2 columns on the "║ "
+/// border plus one trailing padding column. Capped so the text keeps a
+/// readable measure on a very wide terminal. A function so the size tests
+/// use the same arithmetic.
+fn overlay_wrap_cols(width: u16) -> usize {
+    (width as usize).saturating_sub(5).clamp(16, 56)
+}
+
+/// The rows an overlay of `content_lines` lines needs on screen: the content,
+/// its top and bottom border, the command-bar row below it and the one-row
+/// margin `render_overlay_panel` keeps. A terminal shorter than this cuts
+/// the panel's last lines off.
+#[cfg(test)]
+fn overlay_rows_needed(content_lines: usize) -> usize {
+    content_lines + 4
+}
+
+/// The terminal height each overlay must fit in at 80 columns without losing
+/// a line (the panel does not scroll): Help in 24 rows, Legend and Explain in
+/// 30. `every_overlay_fits_its_row_target_at_80_columns` holds every mode to it.
+#[cfg(test)]
+fn overlay_row_target(kind: OverlayPanel) -> usize {
+    match kind {
+        OverlayPanel::Help => 24,
+        OverlayPanel::Legend | OverlayPanel::Explain => 30,
+    }
+}
+
 /// Render the floating overlay panel (legend / help / explain) anchored to the
 /// bottom-right corner.  No right-side border characters per project convention.
 ///
 /// The panel composites over whatever view is underneath — it does not consume
 /// any layout rows.  Width adapts to the widest content line (clamped to the
 /// terminal) so legend/help text is never clipped; height grows with content.
+#[cfg(test)]
 fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
+    render_overlay_panel_with(f, kind, mode, default_backdrop_legend(mode), &[]);
+}
+
+#[cfg(test)]
+/// The legend's backdrop line for `mode` with no setting changed: its
+/// default backdrop, no estimate.
+fn default_backdrop_legend(mode: DisplayMode) -> (crate::animation::backdrop::Choice, bool) {
+    (
+        crate::animation::backdrop::BackdropConfig::default().choice(view_name(mode)),
+        false,
+    )
+}
+
+/// [`render_overlay_panel`] with the view's backdrop as it is now (its
+/// choice and whether its signals are estimates), for the legend's line.
+fn render_overlay_panel_with(
+    f: &mut Frame,
+    kind: OverlayPanel,
+    mode: DisplayMode,
+    backdrop: (crate::animation::backdrop::Choice, bool),
+    // (id, title) of each enabled plugin view, for the help panel.
+    plugins: &[(String, String)],
+) {
     let area = f.area();
     // Enforce minimum terminal size — skip if it would leave no room.
     if area.width < 24 || area.height < 6 {
         return;
     }
 
-    // Wrap budget for prose panels: the panel clamps to `area.width - 2`, and
-    // each content line spends 2 columns on the "║ " border plus one trailing
-    // padding column. Capped so the text keeps a readable measure on a very
-    // wide terminal instead of stretching into one long line.
-    let wrap_cols = (area.width as usize).saturating_sub(5).clamp(16, 56);
-    let lines = overlay_lines(kind, mode, wrap_cols);
+    // Prose panels wrap to the budget `overlay_wrap_cols` sets for this width.
+    let lines = overlay_lines_with(kind, mode, overlay_wrap_cols(area.width), backdrop, plugins);
 
     // Title + accent per panel kind (used for the header and to size the panel).
     let (title, border_color) = match kind {
@@ -3511,7 +5152,10 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
     let content_max = lines.iter().map(line_cols).max().unwrap_or(0);
     let panel_w = ((content_max.max(title_floor) + 1) as u16).min(area.width.saturating_sub(2));
 
-    let panel_h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2)); // +2 for top/bottom border
+    // +2 for the top and bottom border; the clamp leaves the command-bar row
+    // and one margin row, so a terminal shorter than
+    // `overlay_rows_needed(lines.len())` cuts the last lines off.
+    let panel_h = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
 
     let x = area.width.saturating_sub(panel_w);
     let y = area.height.saturating_sub(panel_h + 1); // +1 keeps above command bar row
@@ -3574,7 +5218,22 @@ fn render_overlay_panel(f: &mut Frame, kind: OverlayPanel, mode: DisplayMode) {
 ///
 /// Lines must fit within PANEL_W - 2 visible columns (no right border means content
 /// needs to respect the panel width itself).  Each line is prefixed with `║ ` (2 cols).
+#[cfg(test)]
 fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line<'static>> {
+    overlay_lines_with(kind, mode, cols, default_backdrop_legend(mode), &[])
+}
+
+/// [`overlay_lines`] with the view's backdrop as it is now: the legend ends
+/// with its line.
+fn overlay_lines_with(
+    kind: OverlayPanel,
+    mode: DisplayMode,
+    cols: usize,
+    backdrop: (crate::animation::backdrop::Choice, bool),
+    // (id, title) of each enabled plugin view: the help panel's "Plugin
+    // views" section (`viz_host::plugin_views_section`); empty, no section.
+    plugins: &[(String, String)],
+) -> Vec<Line<'static>> {
     let bg = colors::rgb(8, 14, 22);
     let bar = colors::rgb(40, 55, 70);
     let dim = colors::rgb(90, 100, 120);
@@ -3599,515 +5258,471 @@ fn overlay_lines(kind: OverlayPanel, mode: DisplayMode, cols: usize) -> Vec<Line
             )])
         };
     }
-    macro_rules! row {
-        ($k:expr, $v:expr, $kc:expr) => {
-            ln!(vec![
-                // Pad to 12 columns, but never less than the label plus one
-                // space: a longer label (`/serve [bind:port]`) used to run
-                // straight into its description.
-                Span::styled(
-                    format!("{:<w$}", $k, w = 12.max($k.chars().count() + 1)),
-                    Style::default().fg($kc).add_modifier(Modifier::BOLD)
-                ),
-                Span::styled($v, Style::default().fg(dim)),
-            ])
-        };
-    }
-
     match kind {
         OverlayPanel::Help => {
-            vec![
-                sep!("Keys"),
-                row!(" v", "cycle views", key),
-                row!(" l", "toggle legend", key),
-                row!(" ?", "this help panel", key),
-                row!(" !", "explain current mode", key),
-                row!(" /", "open command bar", key),
-                row!(" q  Esc", "quit", key),
-                row!(" r", "force data refresh", key),
-                row!(" a  A", "jump to Arcade", key),
-                row!(" d  D", "jump to Defrag", key),
-                row!(" g", "jump to Grid", key),
-                row!(" i  I", "Inference Servers monitor", key),
-                row!(" ~", "HivemindSweeper activity sniffer", key),
-                row!(" t", "Training view (live tt-train run)", key),
-                row!(" R", "rotate every view unattended (kiosk)", key),
-                row!(" b", "cycle backend", key),
-                ln!(vec![Span::styled(
-                    "──────────────────────────────────────",
-                    Style::default().fg(bar)
-                )]),
+            // A row of `(label, description)` cells at fixed widths, so the
+            // panel packs two or three keys per line and fits 24 rows. Each
+            // label pads to `kw` columns but never less than itself plus one
+            // space (a long label used to run into its description); each
+            // description pads to `dw`, except the last, which needs none.
+            let cells = |items: &[(&str, &str)], kw: usize, dw: usize, kc| {
+                let mut spans = vec![Span::raw(" ")];
+                for (i, (k, d)) in items.iter().enumerate() {
+                    let w = kw.max(k.chars().count() + 1);
+                    spans.push(Span::styled(
+                        format!("{k:<w$}"),
+                        Style::default().fg(kc).add_modifier(Modifier::BOLD),
+                    ));
+                    let d = if i + 1 < items.len() {
+                        format!("{d:<dw$}")
+                    } else {
+                        d.to_string()
+                    };
+                    spans.push(Span::styled(d, Style::default().fg(dim)));
+                }
+                ln!(spans)
+            };
+            let waffler = crate::animation::DIE3D_DISPLAY_NAME;
+            // The global keys, four to a line: twenty keys in five rows.
+            // The last cell of a row has no padding, so each row's longest
+            // description goes last.
+            let keys = |kc| {
+                let row = |items: &[(&str, &str)]| cells(items, 4, 16, kc);
+                vec![
+                    row(&[
+                        ("!", "explain view"),
+                        ("v", "next view"),
+                        ("?", "this help"),
+                        ("l", "legend"),
+                    ]),
+                    row(&[
+                        ("/", "command bar"),
+                        ("Esc", "back, or quit"),
+                        ("r", "refresh data"),
+                        ("q", "quit"),
+                    ]),
+                    row(&[
+                        ("b", "next backend"),
+                        ("a A", "Arcade"),
+                        ("d D", "Defrag"),
+                        ("g", "Grid"),
+                    ]),
+                    row(&[
+                        ("i I", "Inference"),
+                        ("~", "HivemindSweeper"),
+                        ("3", waffler),
+                        ("t", "Training"),
+                    ]),
+                    row(&[
+                        ("R", "rotate (kiosk)"),
+                        ("w", "backdrop"),
+                        ("{ }", "Arcade layout"),
+                        ("S", saga_view::DISPLAY_NAME),
+                    ]),
+                ]
+            };
+            if let DisplayMode::Plugin(h) = mode {
+                return viz_host::help_overlay(h, [bar, bg, dim, lbl, head], cols, keys(key));
+            }
+            if mode == DisplayMode::Die3d {
+                // In the Waffler, its own keys and every one of its
+                // commands, from the view's table so a command cannot exist
+                // without being listed; then the global keys.
+                let mut help = vec![
+                    sep!(format!("{waffler} keys")),
+                    cells(
+                        &[
+                            ("[ ]", "previous / next board"),
+                            ("Space", "cut the camera"),
+                        ],
+                        6,
+                        24,
+                        key,
+                    ),
+                    cells(
+                        &[("←↑↓→", "pan a clipped scene"), ("3 Esc", "leave")],
+                        6,
+                        24,
+                        key,
+                    ),
+                    sep!(format!("{waffler} commands  (/ to open)")),
+                ];
+                // One column for every description, set by the longest usage.
+                use crate::animation::die3d::commands::{usage, COMMANDS};
+                let w = COMMANDS.iter().map(|c| usage(c).chars().count() + 1).max();
+                help.extend(
+                    COMMANDS
+                        .iter()
+                        .map(|c| cells(&[(usage(c).as_str(), c.help)], w.unwrap_or(12), 0, lbl)),
+                );
+                // The global keys most used here; the full list is `?` in
+                // any other view, which keeps this panel inside 24 rows.
+                help.push(sep!("Everywhere  (every key: ? in another view)"));
+                // Rows 0, 1 and 3: the panels and quit, then the other
+                // key-only views.
+                help.extend(
+                    keys(key)
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(i, _)| [0, 1, 3].contains(i))
+                        .map(|(_, l)| l),
+                );
+                return help;
+            }
+            if mode == DisplayMode::Saga {
+                // In Saga, its own keys, then the global keys most used
+                // here, as the Waffler does.
+                let mut help = vec![sep!(format!("{} keys", saga_view::DISPLAY_NAME))];
+                help.extend(
+                    saga_view::HELP_KEYS
+                        .iter()
+                        .map(|pair| cells(pair, 6, 30, key)),
+                );
+                help.push(sep!("Everywhere  (every key: ? in another view)"));
+                help.extend(
+                    keys(key)
+                        .into_iter()
+                        .enumerate()
+                        .filter(|(i, _)| [0, 1, 3, 4].contains(i))
+                        .map(|(_, l)| l),
+                );
+                return help;
+            }
+            let cmd = |items: &[(&str, &str)]| cells(items, 19, 18, lbl);
+            let settings = format!("{waffler} settings (3, then /help)");
+            let mut help = vec![sep!("Keys")];
+            help.extend(keys(key));
+            help.extend(viz_host::plugin_views_section(
+                plugins, bar, bg, head, key, dim,
+            ));
+            help.extend([
                 sep!("Commands  (/ to open)"),
-                row!(" /mode <name>", "insights grid castle flow…", lbl),
-                row!(" /fps <n>", "animation FPS  1–120", lbl),
-                row!(" /datafps <n>", "data refresh FPS  1–30", lbl),
-                row!(" /rotate", "rotate all views; on|off to force", lbl),
-                row!(" /legend", "toggle legend panel", lbl),
-                row!(" /explain", "toggle explain panel", lbl),
-                row!(" /help", "toggle this panel", lbl),
-                row!(
-                    " /throttle",
-                    "throttle anim FPS under heavy load (60→30)",
-                    lbl
+                cmd(&[
+                    ("/mode <name>", "switch view"),
+                    ("/fps <n>", "anim FPS 1–120"),
+                ]),
+                cmd(&[
+                    ("/datafps <n>", "data FPS 1–30"),
+                    ("/rotate [on|off]", "kiosk rotation"),
+                ]),
+                cmd(&[
+                    ("/theme [name]", "grayskull|rainbow"),
+                    ("/throttle", "30 FPS under load"),
+                ]),
+                cmd(&[
+                    ("/idle-on-blur", "2 FPS unfocused"),
+                    ("/hivemind", "start the sniffer"),
+                ]),
+                cmd(&[
+                    ("/remote [n|box]", "join a box on LAN"),
+                    ("/serve [bind:port]", "share (plaintext)"),
+                ]),
+                cmd(&[
+                    ("/serve off", "stop sharing"),
+                    ("/wrap <cmd…>", "repeat to confirm"),
+                ]),
+                cmd(&[
+                    ("/watch <path>", "tail a log in ~"),
+                    ("/watch pid <n>", "sniff a process"),
+                ]),
+                // Narrower descriptions, so the /backdrop usage fits.
+                cells(
+                    &[
+                        ("/legend /explain /help", "l ! ? panels"),
+                        ("/backdrop [kind]", "off sky scene clouds"),
+                    ],
+                    19,
+                    13,
+                    lbl,
                 ),
-                row!(
-                    " /idle-on-blur",
-                    "drop to 2 FPS when terminal unfocused",
-                    lbl
-                ),
-                row!(
-                    " /remote [n|box]",
-                    "discover + connect to a remote box",
-                    lbl
-                ),
-                row!(
-                    " /serve [bind:port]",
-                    "broadcast telemetry (plaintext, trusted-LAN)",
-                    lbl
-                ),
-                row!(" /serve off", "stop broadcasting", lbl),
-                row!(
-                    " /hivemind",
-                    "enter HivemindSweeper + start the engine",
-                    lbl
-                ),
-                row!(
-                    " /watch <path>",
-                    "tail a host log file in HivemindSweeper",
-                    lbl
-                ),
-                row!(
-                    " /watch pid <n>",
-                    "attach to a PID's device fds + logs",
-                    lbl
-                ),
-                row!(
-                    " /wrap <cmd…>",
-                    "spawn + capture a command (confirm: repeat it)",
-                    lbl
-                ),
-                ln!(vec![Span::styled(
-                    "──────────────────────────────────────",
-                    Style::default().fg(bar)
-                )]),
+                cmd(&[("/arcade layout", "next prev <name> list")]),
+                cmd(&[("/board /scene /cells …", &settings)]),
                 sep!("Status bar"),
-                row!(" ⟳ tt-smi -r", "a reset is running (chips shown)", lbl),
-                row!(
-                    " ✓ tt-smi -r done",
-                    "shown for 10 s after the last one ends",
-                    lbl
+                cells(
+                    &[
+                        ("⟳ tt-smi -r", "a reset is running"),
+                        ("✓ tt-smi -r done", "for 10 s after"),
+                    ],
+                    13,
+                    20,
+                    lbl,
                 ),
-                row!(
-                    " --tt-smi-reset-behavior",
-                    "ignore · inform · dazzle · demo",
-                    lbl
+                cells(
+                    &[("--tt-smi-reset-behavior", "ignore · inform · dazzle · demo")],
+                    13,
+                    0,
+                    lbl,
                 ),
-            ]
+            ]);
+            help
         }
 
         OverlayPanel::Legend => {
-            // Per-view symbol legend — Arcade shows all four combined.
-            match mode {
-                DisplayMode::Starfield => starfield_legend_lines(bar, bg, dim, key),
-                DisplayMode::MemoryCastle => castle_legend_lines(bar, bg, dim),
-                DisplayMode::Defrag => defrag_legend_lines(bar, bg, dim, key),
-                DisplayMode::MemoryFlow => flow_legend_lines(bar, bg, dim),
-                DisplayMode::InferenceMonitor => inference_legend_lines(bar, bg, dim),
-                DisplayMode::Insights => insights_legend_lines(bar, bg, dim),
-                DisplayMode::Grid => grid_legend_lines(bar, bg, dim),
-                DisplayMode::HivemindSweeper => hivemind_view::legend_lines(bar, bg, dim),
-                DisplayMode::Training => train_legend_lines(bar, bg, dim),
-                DisplayMode::Arcade => {
-                    // All four combined.
-                    let mut v = Vec::new();
-                    v.push(sep!("✧ Starfield"));
-                    v.extend(starfield_legend_lines(bar, bg, dim, key));
-                    v.push(ln!(vec![Span::styled(
-                        "──────────────────────────────────────",
-                        Style::default().fg(bar)
-                    )]));
-                    v.push(sep!("🏰 Memory Castle"));
-                    v.extend(castle_legend_lines(bar, bg, dim));
-                    v.push(ln!(vec![Span::styled(
-                        "──────────────────────────────────────",
-                        Style::default().fg(bar)
-                    )]));
-                    v.push(sep!("▓ Defrag"));
-                    v.extend(defrag_legend_lines(bar, bg, dim, key));
-                    v.push(ln!(vec![Span::styled(
-                        "──────────────────────────────────────",
-                        Style::default().fg(bar)
-                    )]));
-                    v.push(sep!("🌊 Memory Flow"));
-                    v.extend(flow_legend_lines(bar, bg, dim));
-                    v.push(ln!(vec![Span::styled(
-                        "──────────────────────────────────────",
-                        Style::default().fg(bar)
-                    )]));
-                    v.push(sep!("@ Hero"));
-                    v.extend(hero_legend_lines(bar, bg, dim));
-                    v.push(ln!(vec![Span::styled(
-                        "──────────────────────────────────────",
-                        Style::default().fg(bar)
-                    )]));
-                    v.push(sep!("▶ Activity lanes"));
-                    v.extend(activity_legend_lines(bar, bg, dim));
+            // Per-view symbol legend — Arcade shows all four combined. The
+            // last line is the view's backdrop, in a view that takes one.
+            let mut v = match mode {
+                DisplayMode::Starfield => {
+                    let mut v = starfield_legend_lines(bar, bg, dim, key);
+                    v.extend(crate::animation::starfield_bus::legend_lines(bar, bg, dim));
                     v
                 }
+                DisplayMode::MemoryCastle => {
+                    let mut v = castle_legend_lines(bar, bg, dim);
+                    v.extend(crate::animation::castle_bus::legend_lines(bar, bg, dim));
+                    v
+                }
+                DisplayMode::Defrag => {
+                    let mut v = defrag_legend_lines(bar, bg, dim, key);
+                    v.extend(crate::animation::defrag_bus::legend_lines(bar, bg, dim));
+                    v
+                }
+                DisplayMode::MemoryFlow => {
+                    let mut v = flow_legend_lines(bar, bg, dim);
+                    v.extend(crate::animation::memory_flow_bus::legend_lines(
+                        bar, bg, dim,
+                    ));
+                    v
+                }
+                DisplayMode::InferenceMonitor => inference_legend_lines(bar, bg, dim),
+                DisplayMode::Insights => {
+                    let mut v = insights_legend_lines(bar, bg, dim);
+                    v.extend(grid_bus::legend_lines(
+                        grid_bus::INSIGHTS_LEGEND_TEXT,
+                        bar,
+                        bg,
+                        dim,
+                    ));
+                    v
+                }
+                DisplayMode::Grid => {
+                    let mut v = grid_legend_lines(bar, bg, dim);
+                    v.extend(grid_bus::legend_lines(
+                        grid_bus::GRID_LEGEND_TEXT,
+                        bar,
+                        bg,
+                        dim,
+                    ));
+                    v
+                }
+                DisplayMode::HivemindSweeper => hivemind_view::legend_lines(bar, bg, dim),
+                DisplayMode::Training => {
+                    let mut v = train_legend_lines(bar, bg, dim);
+                    v.extend(crate::animation::train_bus::legend_lines(bar, bg, dim));
+                    v
+                }
+                DisplayMode::Die3d => die3d_legend_lines(bar, bg, dim),
+                DisplayMode::Saga => saga_view::legend_lines(bar, bg, dim),
+                DisplayMode::Arcade => arcade_legend_lines(bar, bg, dim),
+                DisplayMode::Plugin(h) => viz_host::legend_overlay(h, bar, bg, dim),
+            };
+            if crate::animation::backdrop::takes_backdrop(view_name(mode)) {
+                v.push(ln!(vec![Span::styled(
+                    format!(
+                        "  {}",
+                        crate::animation::backdrop::legend_line(backdrop.0, backdrop.1)
+                    ),
+                    Style::default().fg(dim)
+                )]));
             }
+            v
         }
 
-        OverlayPanel::Explain => match mode {
-            DisplayMode::Starfield => explain_lines(
-                bar,
-                bg,
-                dim,
-                lbl,
-                &[
-                    "Hardware-Responsive Starfield",
-                    "",
-                    "Each star represents one Tensix compute",
-                    "core inside a Blackhole or Wormhole ASIC.",
-                    "",
-                    "Star brightness encodes instantaneous",
-                    "power draw. Hue cycles from cyan (cool)",
-                    "through yellow to red (hot) tracking the",
-                    "ASIC die temperature in real time.",
-                    "",
-                    "Twinkle speed accelerates when current",
-                    "draw is high. Brief sparkle flashes mark",
-                    "power spikes above the learned baseline.",
-                    "",
-                    "Round planets (○) represent DDR/L2/L1",
-                    "memory hierarchy — orbit radius tracks",
-                    "memory bandwidth utilization.",
-                ],
-                cols,
-            ),
-            DisplayMode::MemoryCastle => explain_lines(
-                bar,
-                bg,
-                dim,
-                lbl,
-                &[
-                    "Memory Castle",
-                    "",
-                    "An architectural view of the Tenstorrent",
-                    "memory hierarchy rendered as a layered",
-                    "tower. Particles flow upward from DRAM",
-                    "at the base through L2 cache, L1 SRAM,",
-                    "and into the Tensix compute cores at top.",
-                    "",
-                    "◦ open circle  — read access",
-                    "· dot          — write access",
-                    "◇ diamond      — cache hit",
-                    "• filled dot   — cache miss",
-                    "",
-                    "Particle color encodes the memory tier.",
-                    "Density reflects current bandwidth.",
-                    "",
-                    "The base shows one DDR gate per channel: ▪ is",
-                    "healthy, · is harvested (fused off), ✗ failed",
-                    "its BIST.",
-                ],
-                cols,
-            ),
-            DisplayMode::Defrag => explain_lines(
-                bar,
-                bg,
-                dim,
-                lbl,
-                &[
-                    "Model-Loading Defrag Display",
-                    "",
-                    "Inspired by classic disk defragmenters.",
-                    "Each row represents one GDDR channel.",
-                    "Cells fill left-to-right as model weights",
-                    "are transferred into device memory.",
-                    "",
-                    "░ empty     ▒ loading    ▓█ resident",
-                    "",
-                    "EVICT flashes when the runtime unloads",
-                    "a model — triggered when inference power",
-                    "surges above the rolling baseline.",
-                    "",
-                    "Block character intensity (░▒▓█) encodes",
-                    "relative activity within each cell.",
-                    "Color encodes channel temperature.",
-                    "",
-                    "A dark-red ✗ is a bad sector: a channel that",
-                    "failed its BIST, and stays that way. A bright",
-                    "red ✗ flashes on an uncorrectable error.",
-                ],
-                cols,
-            ),
-            DisplayMode::MemoryFlow => explain_lines(
-                bar,
-                bg,
-                dim,
-                lbl,
-                &[
-                    "Memory Flow — NoC & DDR Activity",
-                    "",
-                    "Visualizes the Network-on-Chip (NoC) and",
-                    "DDR memory traffic in real time.",
-                    "",
-                    "Particles flowing → are read requests;",
-                    "particles flowing ← are write requests.",
-                    "Speed scales with NoC clock (axiclk/aiclk",
-                    "ratio) and MVDDQ memory subsystem power.",
-                    "",
-                    "DDR channels are shown as a perimeter",
-                    "ring. Channel activity brightens the",
-                    "corresponding arc segment.",
-                    "",
-                    "Heat-map center encodes die temperature.",
-                ],
-                cols,
-            ),
-            DisplayMode::Arcade => explain_lines(
-                bar,
-                bg,
-                dim,
-                lbl,
-                &[
-                    "Arcade Mode — Unified View",
-                    "",
-                    "Combines all four visualizations into a",
-                    "single full-screen display.",
-                    "",
-                    "Top band: Starfield — Tensix cores",
-                    "Middle-left: Memory Castle — hierarchy",
-                    "Middle-right: Defrag — GDDR loading",
-                    "Bottom band: Memory Flow — NoC traffic",
-                    "",
-                    "The @ hero character moves across the",
-                    "full canvas driven by live telemetry:",
-                    "  x-axis = current draw (0–100A)",
-                    "  y-axis = power (low → bottom, high top)",
-                    "  color  = ASIC die temperature",
-                    "",
-                    "Hero glyph encodes chip health state:",
-                    "  @  healthy   !  throttled/faulted",
-                    "  ?  ARC stall  %  undervolt",
-                    "",
-                    "Activity lanes: while a training run, a model",
-                    "load or a model serving is running, the top",
-                    "starfield rows become lanes, up to two, most",
-                    "urgent first (stalled, loading, training,",
-                    "serving):",
-                    "  ▶ TRAIN  step, % and bar, ETA, step/s, loss",
-                    "  ◐ LOAD   :port · chips, load time",
-                    "  ● SERVE  tok/s, requests running",
-                    "A key in brackets opens the full view: [t]",
-                    "Training, [i] Inference. The stars take a tint",
-                    "(warm = training, violet = loading, teal =",
-                    "serving, red = stalled) and a flare marks each",
-                    "step or request. Nothing running, nothing",
-                    "changes. Not shown under --remote.",
-                ],
-                cols,
-            ),
-            DisplayMode::Insights => explain_lines(
-                bar,
-                bg,
-                dim,
-                lbl,
-                &[
-                    "Insights Screen",
-                    "",
-                    "Real-time chip portrait grid with live",
-                    "telemetry and process management.",
-                    "",
-                    "Each panel shows a Tensix core portrait",
-                    "with power, temperature, clock, and DDR",
-                    "status alongside a live process table.",
-                    "",
-                    "Animated particles in each portrait",
-                    "reflect the current compute activity.",
-                    "",
-                    "The sidebar reads the driver directly, so",
-                    "power and temperature are compared against",
-                    "each board's real firmware limits (a p300c",
-                    "trips at 90°C / 125W, not a generic 105°C)",
-                    "and clocks come from tt-kmd rather than a",
-                    "tt-smi subprocess.",
-                    "",
-                    "PCIe shows the link's generation and width",
-                    "above live ▼ inbound / ▲ outbound byte",
-                    "rates, differentiated from the driver's own",
-                    "data-word counters — that's the host↔chip",
-                    "pipe: weights streaming in at load time,",
-                    "results coming back during inference.",
-                    "",
-                    "The GDDR row counts memory channels (needs",
-                    "tt-smi 6.3+): n/m trn is trained out of all,",
-                    "hv is harvested (fused off), flt is a BIST",
-                    "fault. It turns amber when any are harvested",
-                    "and red on a fault.",
-                    "",
-                    "GDDR ECC and thermal-trip rows appear only",
-                    "when those counters are non-zero, because",
-                    "zero is the healthy answer and a quiet",
-                    "sidebar should stay quiet. Uncorrectable",
-                    "ECC errors are drawn in red: they mean",
-                    "data corruption, not just a corrected bit.",
-                    "",
-                    "Use ↑↓ to navigate the process list.",
-                    "k = SIGTERM,  K = SIGKILL.",
-                    "At 32+ devices a compact fleet heatmap",
-                    "is shown — Enter to zoom in.",
-                ],
-                cols,
-            ),
-            DisplayMode::Grid => explain_lines(
-                bar,
-                bg,
-                dim,
-                lbl,
-                &[
-                    "Grid Mode",
-                    "",
-                    "Full-screen grid of chip portraits for",
-                    "all connected devices. No process panel.",
-                    "",
-                    "Color and density in each portrait cell",
-                    "encode Tensix core temperature and power.",
-                    "",
-                    "Press v to continue cycling modes.",
-                ],
-                cols,
-            ),
-            DisplayMode::InferenceMonitor => explain_lines(
-                bar,
-                bg,
-                dim,
-                lbl,
-                &[
-                    "Inference Server Monitor",
-                    "",
-                    "One creature across the whole lifecycle of",
-                    "a TT inference-server (a docker container, or a",
-                    "vLLM process run directly on the host):",
-                    "",
-                    "COLD  — no model up: a hungry snake roams",
-                    "  the model-catalog starfield (what could",
-                    "  run on your hardware).",
-                    "LOADING — compiling kernels / streaming",
-                    "  weights: the snake grows + coils through",
-                    "  compile→load, then uncoils at ready.",
-                    "SERVING — live dashboard from vLLM /metrics:",
-                    "  throughput timeline, the token-exhaust",
-                    "  snake, request swimlanes (queue→prefill→",
-                    "  decode), and a TT silicon strip tying",
-                    "  tokens/s to real chip power/temp/clock.",
-                    "ALARM — stalled 5+ min: the snake reddens.",
-                    "",
-                    "With two or more models a roster tops the view, one",
-                    "row each: phase, name, where it runs (:port · chips)",
-                    "and a live stat. ▸ marks the one the snake features.",
-                    "A single model gets one header line with the same",
-                    "text. The port is the one it answers on. Chips are the",
-                    "/dev/tenstorrent devices the server holds open, or",
-                    "else the device nodes its container was given; none",
-                    "show while it is still starting, or when the container",
-                    "was given the whole device directory. Diffusion and",
-                    "video servers show jobs in flight and done in place of",
-                    "tokens/s.",
-                    "",
-                    "Behind the snake a backdrop shows what the",
-                    "model is doing. It fills blank cells only, so",
-                    "the dashboards always win, and every effect",
-                    "follows a real signal:",
-                    "  forge   compiling or loading. Beams rise as",
-                    "          kernels compile and weight shards",
-                    "          land (how much has been built, never a",
-                    "          percentage); sparks fly while kernels",
-                    "          compile; the floor glows with host CPU.",
-                    "  storm   thinking. Requests are in but no token",
-                    "          is out yet (prefill). Clouds, a",
-                    "          heartbeat, lightning while they run.",
-                    "  aurora  generating. Brightness follows tokens",
-                    "          per second and hue the KV cache. Gold",
-                    "          glyphs rise at the token rate (writing),",
-                    "          dim ones fall with prompt tokens (reading).",
-                    "  comets  one per running request, a dim star on",
-                    "          the horizon per waiting one, a ring when",
-                    "          one finishes, static on an error.",
-                    "  tide    the KV cache level along the bottom,",
-                    "          blue, then amber, then red; a splash on",
-                    "          a preemption.",
-                    "  forming a diffusion or video job in flight, a",
-                    "          canvas resolving from noise. It cannot",
-                    "          show progress: none is reported.",
-                    "  dream   ready and idle. stalled: dim embers.",
-                    "The view never shows generated text.",
-                    "",
-                    "Press l for the symbol legend · i to return.",
-                ],
-                cols,
-            ),
-            DisplayMode::HivemindSweeper => {
-                explain_lines(bar, bg, dim, lbl, hivemind_view::EXPLAIN_TEXT, cols)
+        // Each mode's `!` text: what the screen is and what moves it, then
+        // the signal bus paragraph from the view's own `*_bus` module. Each
+        // fits 30 rows at 80 columns (`every_overlay_fits_its_row_target_at_80_columns`);
+        // symbol-by-symbol detail belongs in the legend and in docs/.
+        OverlayPanel::Explain => {
+            let with_bus = |own: &[&'static str], bus: &[&'static str]| {
+                let text: Vec<&'static str> = own.iter().chain(bus).copied().collect();
+                explain_lines(bar, bg, dim, lbl, &text, cols)
+            };
+            match mode {
+                DisplayMode::Starfield => with_bus(
+                    &[
+                        "Hardware-Responsive Starfield",
+                        "",
+                        "Each star is a Tensix core. Stars brighten as power",
+                        "rises above the chip's idle, and their hue runs from",
+                        "cyan (cool) to red (hot) with die temperature. Twinkle",
+                        "speeds up with current draw, and a sparkle marks a",
+                        "power spike above the learned baseline.",
+                        "Planets (○) are L1, L2 and DDR. They orbit faster and",
+                        "glow brighter with activity: L1 follows power, L2",
+                        "current draw, DDR its channels.",
+                    ],
+                    crate::animation::starfield_bus::EXPLAIN_TEXT,
+                ),
+                DisplayMode::MemoryCastle => with_bus(
+                    &[
+                        "Memory Castle",
+                        "",
+                        "The memory hierarchy as a tower. Particles rise from",
+                        "DRAM at the base through L2 and L1 to the Tensix cores.",
+                        "◦ read   · write   ◇ cache hit   • cache miss",
+                        "Colour is the tier and density is bandwidth.",
+                        "The base has a DDR gate per channel: ▪ healthy,",
+                        "· harvested (fused off), ✗ failed its BIST.",
+                    ],
+                    crate::animation::castle_bus::EXPLAIN_TEXT,
+                ),
+                DisplayMode::Defrag => with_bus(
+                    &[
+                        "Model-Loading Defrag Display",
+                        "",
+                        "A disk defragmenter for model weights, minus the wait",
+                        "for it to finish. Each row is a GDDR channel; cells fill",
+                        "left to right as weights land in device memory.",
+                        "░ empty   ▒ loading   ▓█ resident",
+                        "Shade is activity and colour is channel temperature.",
+                        "EVICT drains the blocks when a model unloads: the bus",
+                        "sees it go, or power falls back to idle after a load.",
+                        "A dark-red ✗ is a bad sector, a channel that failed",
+                        "its BIST. A bright-red ✗ flashes on an uncorrectable",
+                        "error.",
+                    ],
+                    crate::animation::defrag_bus::EXPLAIN_TEXT,
+                ),
+                DisplayMode::MemoryFlow => with_bus(
+                    &[
+                        "Memory Flow — NoC & DDR Activity",
+                        "",
+                        "NoC and DDR traffic. Particles flowing → are reads and",
+                        "← are writes. Reads spawn with chip power, writes with",
+                        "current draw or MVDDQ memory power. Speed follows",
+                        "current draw and the NoC clock ratio (axiclk/aiclk).",
+                        "The DDR channels ring the edge and brighten with",
+                        "activity; the heat map in the centre is die",
+                        "temperature.",
+                    ],
+                    crate::animation::memory_flow_bus::EXPLAIN_TEXT,
+                ),
+                DisplayMode::Arcade => with_bus(
+                    &[
+                        "Arcade Mode — Unified View",
+                        "",
+                        "Starfield, Memory Castle, Defrag and Memory Flow on one",
+                        "screen. While a model serves, row 2 is a duel: the @",
+                        "lunges on a power spike, the snake on each finished",
+                        "request, and the ⚔ slides to whoever is winning.",
+                        "",
+                        "While something trains, loads or serves, the top rows",
+                        "become up to two lanes, most urgent first: ▶ TRAIN,",
+                        "◐ LOAD, ● SERVE. [t] and [i] open Training and",
+                        "Inference. The stars take the lane's tint and flare",
+                        "per step or request. No lanes under --remote.",
+                    ],
+                    &[
+                        crate::animation::arcade_bus::EXPLAIN_TEXT,
+                        crate::animation::arcade_layout::EXPLAIN_TEXT,
+                    ]
+                    .concat(),
+                ),
+                DisplayMode::Insights => with_bus(
+                    &[
+                        "Insights Screen",
+                        "",
+                        "A portrait per chip, with live power, temperature,",
+                        "clock and DDR, beside the processes holding a device.",
+                        "",
+                        // First after the intro, so an 80 x 24 terminal
+                        // still shows it (see
+                        // `the_insights_ecc_sentence_shows_on_a_24_row_terminal`).
+                        "ECC and thermal-trip rows appear only when non-zero,",
+                        "because zero is healthy. ECC is amber for corrected",
+                        "errors and red once any is uncorrectable, which means",
+                        "corrupted data.",
+                        "",
+                    ],
+                    &[
+                        grid_bus::INSIGHTS_EXPLAIN_TEXT,
+                        &[
+                            "The sidebar reads the driver: power and temperature",
+                            "show against each board's own firmware limits (a p300c",
+                            "trips at 90°C / 125 W), and clocks come from tt-kmd.",
+                            "PCIe shows the link's generation and width over ▼ in",
+                            "and ▲ out byte rates: weights in at load, results out.",
+                            "GDDR n/m trn counts trained channels; hv is harvested,",
+                            "flt a BIST fault (tt-smi 6.3+). Amber when any are",
+                            "harvested, red on a fault.",
+                            "",
+                            "↑↓ select a process · k SIGTERM · K SIGKILL",
+                            "At 32+ devices a fleet heatmap shows; Enter zooms.",
+                        ],
+                    ]
+                    .concat(),
+                ),
+                DisplayMode::Grid => with_bus(
+                    &[
+                        "Grid Mode",
+                        "",
+                        "Chip portraits for every device, full screen, with no",
+                        "process panel. Colour and density in each cell follow",
+                        "core temperature and power. v moves on.",
+                    ],
+                    grid_bus::GRID_EXPLAIN_TEXT,
+                ),
+                DisplayMode::InferenceMonitor => with_bus(
+                    &[
+                        "Inference Server Monitor",
+                        "",
+                        "One snake follows a TT inference server (a container",
+                        "or a vLLM process) through its life:",
+                        "  COLD     no model up: a hungry snake roams the",
+                        "           models your hardware could run",
+                        "  LOADING  it grows and coils through compile and",
+                        "           load, then uncoils at ready",
+                        "  SERVING  vLLM /metrics: throughput, the token",
+                        "           exhaust, request swimlanes, chip power",
+                        "  ALARM    stalled 5+ min: the snake reddens",
+                        "",
+                        "With two or more models a roster lists each: phase,",
+                        "name, :port · chips and a live stat. ▸ marks the model",
+                        "the snake features. Chips are the devices the server",
+                        "holds open, or those its container was given.",
+                        "Diffusion and video servers show jobs in flight and done.",
+                        "",
+                        "The backdrop fills blank cells, each effect from a",
+                        "signal: forge (compile, load), storm (prefill),",
+                        "aurora (tokens/s; hue is the KV cache), comets",
+                        "(requests), tide (KV cache level), forming (a",
+                        "diffusion job), dream (idle). The view never shows",
+                        "generated text.",
+                    ],
+                    &[],
+                ),
+                DisplayMode::HivemindSweeper => {
+                    explain_lines(bar, bg, dim, lbl, hivemind_view::EXPLAIN_TEXT, cols)
+                }
+                DisplayMode::Die3d => explain_lines(bar, bg, dim, lbl, DIE3D_EXPLAIN_TEXT, cols),
+                DisplayMode::Saga => {
+                    explain_lines(bar, bg, dim, lbl, saga_view::EXPLAIN_TEXT, cols)
+                }
+                DisplayMode::Plugin(h) => viz_host::explain_overlay(h, [bar, bg, dim, lbl], cols),
+                DisplayMode::Training => with_bus(
+                    &[
+                        "Training — Robot Brain Food",
+                        "",
+                        "A live tt-train run, from what the trainer prints and",
+                        "this tool's own chip telemetry. Nothing is invented.",
+                        "",
+                        "STEP ANATOMY (top): a star per step, its height the",
+                        "step's wall time. ◆ is a compile, ✺ a checkpoint, ┈ the",
+                        "median; (from bar) means polled from a progress bar.",
+                        "Then a row per chip (power / TDP), aiclk, PCIe and host",
+                        "CPU, a verdict (compiling, compute- or host-bound) and",
+                        "a convergence strip (loss slope, noise, best, lr).",
+                        "The loss mountains run red (untrained) to cyan",
+                        "(converged) under an aurora that opens as loss falls.",
+                        "",
+                        "It attaches by itself to a tt-train example or a ttml",
+                        "script and reads its log. If stdout was not redirected,",
+                        "relaunch with '> train.log'. The ETA shows only when",
+                        "the run's step budget is known. l has every symbol.",
+                    ],
+                    crate::animation::train_bus::EXPLAIN_TEXT,
+                ),
             }
-            DisplayMode::Training => explain_lines(
-                bar,
-                bg,
-                dim,
-                lbl,
-                &[
-                    "Training — Robot Brain Food",
-                    "",
-                    "A live training run, drawn from what the trainer",
-                    "prints plus tt-toplike's own chip telemetry.",
-                    "Nothing here is invented.",
-                    "",
-                    "STEP ANATOMY (top band). Each star is one step, two to",
-                    "a column. Its height is that step's wall time, with the",
-                    "scale printed at the left. A teal ⠂ is a normal step, a",
-                    "purple ◆ means the program cache grew (a compile), an",
-                    "amber ✺ is a checkpoint write. The dotted ┈ line is the",
-                    "median of the steps shown, and the newest three stars",
-                    "swell once per measured step. The title says (from bar)",
-                    "when the times were polled from a progress bar instead",
-                    "of printed by the trainer.",
-                    "",
-                    "Under the stars: one row per chip (height = power as a",
-                    "share of that chip's TDP, coral where aiclk has dropped),",
-                    "then aiclk, PCIe and host-CPU rows. Then a one-line",
-                    "verdict: compiling, compute-bound (busiest chip at 50%",
-                    "of TDP or more) or host-bound (under 30% of TDP with the",
-                    "host CPU over 100%). Last, a convergence strip: loss",
-                    "slope per 100 logs, noise, how long since the best loss,",
-                    "the base learning rate and how far through the schedule",
-                    "the run is.",
-                    "",
-                    "The loss mountains below are coloured by their own value,",
-                    "so the range is the whole run's history: red (untrained)",
-                    "to cyan (converged), under an aurora sky that opens as the",
-                    "loss falls. A comet crosses it when a checkpoint is saved.",
-                    "",
-                    "The view attaches by itself. It scans /proc for a",
-                    "tt-train example (nano_gpt, mnist_mlp, linear_regression)",
-                    "or a Python script that drives ttml, then reads",
-                    "/proc/<pid>/fd/1 to locate its log. A tt-tnt progress",
-                    "bar is read live, so a resumed or chunked run shows its",
-                    "real global step. The ETA appears only when the run's",
-                    "step budget is known.",
-                    "",
-                    "tt-train prints step, loss and step time; tokens/s and",
-                    "ETA are derived from those plus the run's config.",
-                    "Gradient norms and MFU aren't emitted live, so they",
-                    "aren't shown.",
-                    "",
-                    "If stdout wasn't redirected to a file, the per-step",
-                    "stream can't be read after the fact: relaunch with",
-                    "'> train.log' and the view picks it up automatically.",
-                    "Press l for the symbol legend.",
-                ],
-                cols,
-            ),
-        },
+        }
     }
 }
 
@@ -4222,15 +5837,12 @@ fn insights_legend_lines(
         // absent row is a healthy answer, not a missing feature.
         ln!(vec![
             Span::styled("(lim N) ", Style::default().fg(colors::rgb(200, 230, 255))),
-            Span::styled(
-                "= the board's real firmware ceiling, not a default",
-                Style::default().fg(dim),
-            ),
+            Span::styled("= the board's own firmware limit", Style::default().fg(dim),),
         ]),
         ln!(vec![
             Span::styled("ETH ●·+N ", Style::default().fg(colors::rgb(79, 209, 197))),
             Span::styled(
-                "= one dot per enabled port, ● live; +N won't fit",
+                "= a dot per enabled port, ● live; +N more",
                 Style::default().fg(dim),
             ),
         ]),
@@ -4251,7 +5863,7 @@ fn insights_legend_lines(
         ln!(vec![
             Span::styled("ECC ", Style::default().fg(colors::error())),
             Span::styled(
-                "= GDDR errors, shown only when non-zero (uncorr = red)",
+                "= GDDR errors, only when non-zero (red = uncorrectable)",
                 Style::default().fg(dim),
             ),
         ]),
@@ -4603,6 +6215,462 @@ fn defrag_legend_lines(
     ]
 }
 
+/// The Die 3D view's `i` explanation, wrapped to the overlay's width by
+/// `explain_lines`. A constant so a test can check what it says.
+const DIE3D_EXPLAIN_TEXT: &[&str] = &[
+    crate::animation::DIE3D_DISPLAY_NAME,
+    "",
+    "Each Blackhole board in isometric 3D, one block per die,",
+    "from live telemetry; other chips are not drawn.",
+    crate::animation::DIE3D_NAME_STORY,
+    "",
+    "Tiles glow with activity, relative to each chip's own",
+    "idle over the last day: the day's lowest power is zero,",
+    "and the highest in the most recent 10 minutes (at least",
+    "idle + 25 W) is full. Measured per tile where the driver",
+    "reports it, else an estimate, and the footer says so.",
+    "",
+    "The camera turns every 15 s or so. When something",
+    "happens it cuts: chaos for a chip event, a dissolve for",
+    "memory or an Ethernet link. A board you choose stays.",
+    "",
+    "The signal bus adds a flag per model, a purple fill while",
+    "it loads, a teal pulse per batch of requests, GDDR heat",
+    "per channel, red ECC flashes and hivemind sparks; '~'",
+    "marks an estimate. The fill's sweep, the pulse's fade,",
+    "the sparks' look and the clouds are decoration. The",
+    "history panel plots power and PCIe traffic from real",
+    "readings. l lists every symbol, /help every command.",
+];
+
+/// The view's display name is one constant, `DIE3D_DISPLAY_NAME`. Its old
+/// name may stay in code comments, CHANGELOG and debian/changelog history,
+/// AGENTS.md (the project log) and docs/superpowers; anywhere a person reads
+/// it (a string in the source, the `--help` text, README, QUICK_START,
+/// docs/*.md, the site) it must come from the constant or say the new name.
+#[cfg(test)]
+mod display_name_tests {
+    /// Every `.rs` file under `dir`, recursively.
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).expect("read source dir").flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                rust_files(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+
+    #[test]
+    fn no_user_facing_text_uses_the_old_die3d_name() {
+        use clap::CommandFactory;
+        // Built in two halves so this file does not match itself.
+        let old = concat!("die", " 3d");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut hits = Vec::new();
+
+        // Source: a code identifier cannot hold a space, so the old name on a
+        // line that is not a comment is inside a string literal.
+        let mut files = Vec::new();
+        for dir in ["src", "crates", "tests", "examples"] {
+            if root.join(dir).is_dir() {
+                rust_files(&root.join(dir), &mut files);
+            }
+        }
+        for f in &files {
+            let text = std::fs::read_to_string(f).expect("read source");
+            for (n, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue;
+                }
+                // A trailing comment after code is still a comment.
+                let code = code.split(" // ").next().unwrap_or(code);
+                if code.replace('\u{a0}', " ").to_lowercase().contains(old) {
+                    hits.push(format!("{}:{}: {line}", f.display(), n + 1));
+                }
+            }
+        }
+
+        // `--help`: clap builds it from doc comments, which the scan above
+        // skips, so check the text clap prints.
+        let help = crate::cli::Cli::command().render_long_help().to_string();
+        if help.to_lowercase().contains(old) {
+            hits.push("--help text".to_string());
+        }
+
+        // Documents a person reads. docs/superpowers is history.
+        let mut docs = vec![
+            root.join("README.md"),
+            root.join("QUICK_START.md"),
+            root.join("site/index.html"),
+            root.join("test-modes.sh"),
+            root.join("debian/control"),
+        ];
+        for dir in ["demo", "scripts"] {
+            for e in std::fs::read_dir(root.join(dir))
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                if e.path().is_file() {
+                    docs.push(e.path());
+                }
+            }
+        }
+        for e in std::fs::read_dir(root.join("docs"))
+            .expect("docs")
+            .flatten()
+        {
+            if e.path().extension().is_some_and(|x| x == "md") {
+                docs.push(e.path());
+            }
+        }
+        for d in &docs {
+            let text = std::fs::read_to_string(d).unwrap_or_default();
+            for (n, line) in text.lines().enumerate() {
+                if line.replace('\u{a0}', " ").to_lowercase().contains(old) {
+                    hits.push(format!("{}:{}: {line}", d.display(), n + 1));
+                }
+            }
+        }
+        assert!(
+            hits.is_empty(),
+            "old name still shown:\n{}",
+            hits.join("\n")
+        );
+    }
+
+    /// README, docs/bus.md and the site cannot read a Rust constant, so they
+    /// spell the name out. They must spell the current one: change
+    /// `die3d_display_name!` and this fails until the prose follows. The
+    /// `--help` text is built from the macro, and is checked here too.
+    #[test]
+    fn docs_name_the_view_by_its_current_name() {
+        use clap::CommandFactory;
+        let name = crate::animation::DIE3D_DISPLAY_NAME;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for doc in ["README.md", "docs/bus.md", "site/index.html"] {
+            let text = std::fs::read_to_string(root.join(doc)).expect("read doc");
+            assert!(text.contains(name), "{doc} never says {name:?}");
+        }
+        let help = crate::cli::Cli::command().render_long_help().to_string();
+        assert!(help.contains(name), "--help never says {name:?}:\n{help}");
+        assert!(
+            help.contains(crate::animation::DIE3D_MODE_ALIAS),
+            "--help never names the alias:\n{help}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod die3d_text_tests {
+    use super::{die3d_legend_lines, DIE3D_EXPLAIN_TEXT};
+    use ratatui::style::Color;
+
+    /// Lines of text as one string, whitespace collapsed, so a phrase split
+    /// across two lines still matches.
+    fn flat<'a>(lines: impl Iterator<Item = String>) -> String {
+        lines
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn the_legend_says_activity_is_relative_to_each_chips_own_idle() {
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                // The first span of each line is the `║ ` bar.
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+        for (what, text) in [("legend", &legend), ("explain", &explain)] {
+            for phrase in ["own idle", "over the last day"] {
+                assert!(text.contains(phrase), "{what} lacks {phrase:?}: {text}");
+            }
+            // The idle is remembered for a day, and the share of the power
+            // limit an idle chip draws was measured on one box only.
+            for wrong in ["last ten minutes", "An idle chip draws about a third"] {
+                assert!(!text.contains(wrong), "{what} says {wrong:?}: {text}");
+            }
+        }
+    }
+
+    /// The legend (`l`) names every moving thing symbol by symbol: what
+    /// drives the clouds, what the history panel plots, and everything the
+    /// bus draws, each read from hardware, marked as an estimate, or named as
+    /// decoration. The explain text (`!`) fits 30 rows, so it carries the
+    /// summary: which parts are measured, which are estimates and which are
+    /// decoration. Neither may say what is wrong.
+    #[test]
+    fn the_legend_says_what_drives_the_clouds() {
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        for phrase in [
+            "decoration",
+            "drift follows",
+            "PCIe traffic",
+            "brightness follows chip load",
+            "/clouds",
+        ] {
+            assert!(legend.contains(phrase), "legend lacks {phrase:?}: {legend}");
+        }
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+        assert!(explain.contains("clouds are decoration"), "{explain}");
+    }
+
+    #[test]
+    fn the_legend_says_what_the_history_panel_shows() {
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        for phrase in [
+            "history",
+            "last minute of measured",
+            "temperature",
+            "PCIe traffic",
+            "real readings",
+            "/history",
+        ] {
+            assert!(legend.contains(phrase), "legend lacks {phrase:?}: {legend}");
+        }
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+        assert!(
+            explain.contains("history panel plots power and PCIe traffic from real readings"),
+            "{explain}"
+        );
+    }
+
+    #[test]
+    fn the_legend_and_explain_text_name_what_the_bus_draws() {
+        // The Die 3D design: every moving thing is read from hardware,
+        // marked as an estimate, or named as decoration. The bus overlay
+        // added the model flag, the bring-up fill, pulses, per-channel GDDR
+        // rows, the ECC flash and sparks.
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+        for phrase in [
+            "model",
+            "fill",
+            "phase and progress",
+            "sweep",
+            "pulse",
+            "requests completed",
+            "own temperature",
+            "ECC",
+            "spark",
+            "hivemind",
+            "~",
+            "estimate",
+            "decoration",
+            "channels 0-3 west, 4-7 east",
+            "channel order",
+            "not measured",
+        ] {
+            assert!(legend.contains(phrase), "legend lacks {phrase:?}: {legend}");
+        }
+        // The summary names each bus effect and says which parts are
+        // decoration.
+        for phrase in [
+            "a flag per model",
+            "a purple fill while it loads",
+            "a teal pulse per batch of requests",
+            "GDDR heat per channel",
+            "red ECC flashes",
+            "hivemind sparks",
+            "'~' marks an estimate",
+        ] {
+            assert!(
+                explain.contains(phrase),
+                "explain lacks {phrase:?}: {explain}"
+            );
+        }
+        // The parts with no reading behind them are named in the sentence
+        // that calls them decoration, whatever its wording.
+        let decoration = explain
+            .split(". ")
+            .find(|s| s.contains("decoration"))
+            .unwrap_or_else(|| panic!("no sentence names decoration: {explain}"));
+        for part in ["fill's sweep", "pulse's fade", "sparks' look", "clouds"] {
+            assert!(
+                decoration.contains(part),
+                "{part:?} not called decoration: {decoration}"
+            );
+        }
+        for (what, text) in [("legend", &legend), ("explain", &explain)] {
+            // The flag carries more than the name and power now.
+            assert!(
+                !text.contains("(name and power) on or off"),
+                "{what}: {text}"
+            );
+        }
+        let labels = crate::animation::die3d::commands::COMMANDS
+            .iter()
+            .find(|c| c.name == "labels")
+            .unwrap();
+        assert!(labels.help.contains("model"), "{}", labels.help);
+    }
+
+    /// The numbers the explain text states come from the code that decides
+    /// them, so changing the code fails here until the text is changed too:
+    /// the idle turn (`IDLE_ROTATE_SECS`), the smallest idle-to-full span
+    /// (`MIN_SPAN_W`), the peak window (`WINDOW_SAMPLES` one-second samples),
+    /// the day the idle is kept (`DAY_MINUTES`), and which cut each kind of
+    /// event gets (`camera::rotate_kind`).
+    #[test]
+    fn the_waffler_numbers_follow_the_code() {
+        use crate::animation::die3d::camera::{rotate_kind, TransitionKind, IDLE_ROTATE_SECS};
+        use crate::animation::die3d::load::{
+            DAY_MINUTES, MIN_SPAN_W, SAMPLE_INTERVAL_S, WINDOW_SAMPLES,
+        };
+        use crate::animation::die3d::triggers::Reason;
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+
+        assert_eq!(IDLE_ROTATE_SECS.fract(), 0.0, "the text says whole seconds");
+        let turn = format!("every {} s", IDLE_ROTATE_SECS as u32);
+        assert!(explain.contains(&turn), "lacks {turn:?}: {explain}");
+
+        assert_eq!(MIN_SPAN_W.fract(), 0.0, "the text says whole watts");
+        let span = format!("idle + {} W", MIN_SPAN_W as u32);
+        assert!(explain.contains(&span), "lacks {span:?}: {explain}");
+
+        let minutes = (WINDOW_SAMPLES as f64 * SAMPLE_INTERVAL_S / 60.0).round() as u32;
+        let window = format!("most recent {minutes} minutes");
+        assert!(explain.contains(&window), "lacks {window:?}: {explain}");
+
+        assert_eq!(DAY_MINUTES, 24 * 60, "the text says the last day");
+        assert!(explain.contains("over the last day"), "{explain}");
+
+        let name = |k: TransitionKind| format!("{k:?}").to_lowercase();
+        let chip = format!(
+            "{} for a chip event",
+            name(rotate_kind(Some(Reason::Chip), false))
+        );
+        assert!(explain.contains(&chip), "lacks {chip:?}: {explain}");
+        // Memory and an Ethernet link share one sentence, so they must
+        // share one kind of cut.
+        let mem = rotate_kind(Some(Reason::Memory), false);
+        assert_eq!(mem, rotate_kind(Some(Reason::Board), false));
+        let memory = format!("{} for memory or an Ethernet link", name(mem));
+        assert!(explain.contains(&memory), "lacks {memory:?}: {explain}");
+    }
+
+    /// The name is explained where it is shown: what is waffled is the
+    /// wafer-shaped die and its tiles.
+    #[test]
+    fn the_explain_text_says_where_the_name_comes_from() {
+        assert_eq!(DIE3D_EXPLAIN_TEXT[0], crate::animation::DIE3D_DISPLAY_NAME);
+        assert!(DIE3D_EXPLAIN_TEXT.contains(&crate::animation::DIE3D_NAME_STORY));
+        let story = crate::animation::DIE3D_NAME_STORY;
+        assert!(
+            story.contains(crate::animation::DIE3D_DISPLAY_NAME),
+            "{story}"
+        );
+        // The pun: what is waffled is the wafer-shaped die and its tiles.
+        for phrase in ["wafer", "tiles", "waffle"] {
+            assert!(
+                story.contains(phrase),
+                "the story lacks {phrase:?}: {story}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_legend_says_what_the_pcie_packets_are() {
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        for phrase in ["packets", "PCIe edge", "measured PCIe rate", "log scale"] {
+            assert!(legend.contains(phrase), "legend lacks {phrase:?}: {legend}");
+        }
+    }
+
+    #[test]
+    fn the_panel_text_says_power_and_pcie_and_latest_temperature() {
+        // The panel plots power and PCIe traffic; temperature is only the
+        // latest value printed beside each chip's sparkline. Neither text
+        // may say the panel plots temperature.
+        let legend = flat(
+            die3d_legend_lines(Color::Reset, Color::Reset, Color::Reset)
+                .iter()
+                .map(|l| l.spans.iter().skip(1).map(|s| s.content.as_ref()).collect()),
+        );
+        let explain = flat(DIE3D_EXPLAIN_TEXT.iter().map(|s| s.to_string()));
+        for phrase in ["plots power and PCIe traffic", "latest temperature"] {
+            assert!(legend.contains(phrase), "legend lacks {phrase:?}: {legend}");
+        }
+        assert!(
+            explain.contains("plots power and PCIe traffic"),
+            "{explain}"
+        );
+        for (what, text) in [("legend", &legend), ("explain", &explain)] {
+            for wrong in ["power, temperature", "power and temperature"] {
+                assert!(!text.contains(wrong), "{what} says {wrong:?}: {text}");
+            }
+        }
+    }
+}
+
+/// Legend for the Die 3D view: what the scene's colours and the footer mean,
+/// and the keys the view takes.
+fn die3d_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    [
+        crate::animation::DIE3D_DISPLAY_NAME,
+        "  tile glow  activity above a quiet wave, relative to each",
+        "             chip's own idle over the last day; per tile when",
+        "             the driver reports it, else an estimate from",
+        "             chip load (the footer says which)",
+        "  packets    dots in from and out to the PCIe edge; their",
+        "             count follows the measured PCIe rate on a log",
+        "             scale (none below 1 kB/s)",
+        "  labels     a flag per chip: name, power, its model's phase,",
+        "             tokens/s and waiting requests ('~' = estimate), in",
+        "             the phase colour: purple loading, teal ready, red alarm",
+        "  fill       purple from the DRAM edges inward while a model",
+        "             loads, by its phase and progress; with no",
+        "             progress, a sweep (decoration)",
+        "  pulse      PCIe connector glows teal on requests completed, 1 s",
+        "  GDDR       each block in its channel's own temperature; dim",
+        "             when harvested; a red flash when its ECC count",
+        "             rises. Rows: channels 0-3 west, 4-7 east, in",
+        "             channel order; a row's position is not measured",
+        "  spark      over a chip's back edge for a hivemind event",
+        "  clouds     /clouds: decoration; drift follows PCIe traffic,",
+        "             brightness follows chip load",
+        "  history    /history, top left: plots power and PCIe traffic",
+        "             over the last minute of measured data (real",
+        "             readings, one a second), then latest temperature",
+    ]
+    .iter()
+    .map(|s| {
+        Line::from(vec![
+            Span::styled("║ ", Style::default().fg(bar).bg(bg)),
+            Span::styled(*s, Style::default().fg(dim)),
+        ])
+    })
+    .collect()
+}
+
 /// Legend for the Training view: the nine colour channels, each of which
 /// carries a different live signal.
 fn train_legend_lines(
@@ -4767,14 +6835,17 @@ fn flow_legend_lines(
                 "speed       ",
                 Style::default().fg(colors::rgb(200, 230, 255))
             ),
-            Span::styled("= NoC clock / aiclk", Style::default().fg(dim))
+            Span::styled("= current draw × NoC clock ratio", Style::default().fg(dim))
         ]),
         ln!(vec![
             Span::styled(
                 "density     ",
                 Style::default().fg(colors::rgb(200, 230, 255))
             ),
-            Span::styled("= MVDDQ power (mem W)", Style::default().fg(dim))
+            Span::styled(
+                "= power (reads), current or MVDDQ W (writes)",
+                Style::default().fg(dim)
+            )
         ]),
         ln!(vec![
             Span::styled(
@@ -4786,6 +6857,100 @@ fn flow_legend_lines(
     ]
 }
 
+/// One legend line from `(text, colour)` parts after the `║ ` bar; a part
+/// with no colour is drawn in `dim`. For the packed Arcade legend.
+fn legend_parts(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+    parts: &[(&'static str, Option<ratatui::style::Color>)],
+) -> Line<'static> {
+    let mut v: Vec<Span<'static>> = vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
+    v.extend(
+        parts
+            .iter()
+            .map(|(t, c)| Span::styled(*t, Style::default().fg(c.unwrap_or(dim)))),
+    );
+    Line::from(v)
+}
+
+/// Legend for Arcade. It shows the four views at once, so each gets one
+/// packed line with the glyphs its own legend explains (`l` in that view has
+/// the full list), then the duel and the activity lanes, which only Arcade
+/// draws. The glyph colours match the views' own legends.
+fn arcade_legend_lines(
+    bar: ratatui::style::Color,
+    bg: ratatui::style::Color,
+    dim: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    let head = colors::rgb(220, 230, 250);
+    let l =
+        |parts: &[(&'static str, Option<ratatui::style::Color>)]| legend_parts(bar, bg, dim, parts);
+    let mut v = vec![
+        l(&[
+            ("✧ Starfield ", Some(head)),
+            ("·○● ", Some(colors::rgb(100, 180, 255))),
+            ("a Tensix core: bright = power, hue = temperature", None),
+        ]),
+        l(&[
+            ("🏰 Castle   ", Some(head)),
+            ("◦", Some(colors::rgb(100, 200, 255))),
+            (" read ", None),
+            ("·", Some(colors::rgb(255, 180, 80))),
+            (" write ", None),
+            ("◇", Some(colors::rgb(100, 255, 180))),
+            (" hit ", None),
+            ("•", Some(colors::rgb(255, 100, 150))),
+            (" miss ", None),
+            ("▪", Some(colors::rgb(120, 200, 255))),
+            (" DDR gate ", None),
+            ("✗", Some(colors::rgb(255, 90, 90))),
+            (" BIST-fail", None),
+        ]),
+        l(&[
+            ("▓ Defrag    ", Some(head)),
+            ("░", Some(colors::rgb(60, 80, 100))),
+            (" empty ", None),
+            ("▒", Some(colors::rgb(80, 140, 200))),
+            (" loading ", None),
+            ("▓", Some(colors::rgb(79, 209, 197))),
+            (" resident ", None),
+            ("█", Some(colors::rgb(220, 240, 255))),
+            (" peak ", None),
+            ("✗", Some(colors::rgb(120, 25, 25))),
+            (" bad sector", None),
+        ]),
+        l(&[
+            ("🌊 Flow     ", Some(head)),
+            ("→", Some(colors::rgb(100, 220, 255))),
+            (" DDR reads ", None),
+            ("←", Some(colors::rgb(255, 160, 80))),
+            (" writes · ring = GDDR channels", None),
+        ]),
+    ];
+    v.push(l(&[
+        ("⚔ Duel ", Some(head)),
+        ("row 2 while a model serves: ", None),
+        ("@", Some(colors::info())),
+        (" chip ⚔ ", None),
+        ("▶●●", Some(colors::rgb(80, 200, 230))),
+        (" snake", None),
+    ]));
+    v.push(l(&[
+        ("▶ Activity lanes ", Some(head)),
+        ("while something runs", None),
+    ]));
+    v.extend(activity_legend_lines(bar, bg, dim));
+    v.push(l(&[("◆ Signal bus", Some(head))]));
+    v.extend(crate::animation::arcade_bus::legend_lines(bar, bg, dim));
+    v.push(l(&[
+        ("▦ Layout  ", Some(head)),
+        (crate::animation::arcade_layout::LEGEND_HEAD, None),
+    ]));
+    v.extend(crate::animation::arcade_layout::legend_lines(bar, bg, dim));
+    v
+}
+
 /// Legend for Arcade's activity lanes, which appear over the top of the
 /// starfield only while something with a goal or a clock is running. The tags
 /// are the ones `animation::activity_lanes` draws.
@@ -4794,145 +6959,37 @@ fn activity_legend_lines(
     bg: ratatui::style::Color,
     dim: ratatui::style::Color,
 ) -> Vec<Line<'static>> {
-    macro_rules! ln {
-        ($spans:expr) => {{
-            let mut v: Vec<Span<'static>> =
-                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
-            v.extend($spans);
-            Line::from(v)
-        }};
-    }
     let amber = colors::rgb(246, 188, 66);
     let violet = colors::rgb(180, 140, 230);
     let teal = colors::rgb(79, 209, 197);
+    let label = colors::rgb(200, 230, 255);
+    let l =
+        |parts: &[(&'static str, Option<ratatui::style::Color>)]| legend_parts(bar, bg, dim, parts);
     vec![
-        ln!(vec![
-            Span::styled("▶ TRAIN  ", Style::default().fg(amber)),
-            Span::styled(
-                "a training run: step, % and bar, ETA, step/s",
-                Style::default().fg(dim)
+        l(&[
+            ("  ▶ TRAIN ", Some(amber)),
+            ("step, %, ETA  ", None),
+            ("◐ LOAD ", Some(violet)),
+            (":port · chips  ", None),
+            ("● SERVE ", Some(teal)),
+            ("tok/s", None),
+        ]),
+        l(&[
+            ("  ✗ STALLED ", Some(colors::error())),
+            ("5+ min quiet  ", None),
+            ("[t] [i] ", Some(label)),
+            ("open Training / Inference", None),
+        ]),
+        l(&[
+            ("  tint ", Some(label)),
+            (
+                "warm training, violet loading, teal serving, red stalled",
+                None,
             ),
         ]),
-        ln!(vec![
-            Span::styled("◐ LOAD   ", Style::default().fg(violet)),
-            Span::styled(
-                "a model compiling or loading: :port · chips",
-                Style::default().fg(dim)
-            ),
-        ]),
-        ln!(vec![
-            Span::styled("● SERVE  ", Style::default().fg(teal)),
-            Span::styled(
-                "a model serving: tok/s and requests running",
-                Style::default().fg(dim)
-            ),
-        ]),
-        ln!(vec![
-            Span::styled("✗ STALLED ", Style::default().fg(colors::error())),
-            Span::styled("no progress for 5+ minutes", Style::default().fg(dim)),
-        ]),
-        ln!(vec![
-            Span::styled("[t] [i]  ", Style::default().fg(colors::rgb(200, 230, 255))),
-            Span::styled(
-                "open the Training / Inference view",
-                Style::default().fg(dim)
-            ),
-        ]),
-        ln!(vec![
-            Span::styled("tint     ", Style::default().fg(colors::rgb(200, 230, 255))),
-            Span::styled(
-                "stars warm = training, violet = loading,",
-                Style::default().fg(dim)
-            ),
-        ]),
-        ln!(vec![
-            Span::styled("         ", Style::default().fg(dim)),
-            Span::styled("teal = serving, red = stalled", Style::default().fg(dim)),
-        ]),
-        ln!(vec![
-            Span::styled("○ ◌ ·   ", Style::default().fg(colors::rgb(200, 230, 255))),
-            Span::styled(
-                "a flare = one step or one request finished",
-                Style::default().fg(dim)
-            ),
-        ]),
-    ]
-}
-
-fn hero_legend_lines(
-    bar: ratatui::style::Color,
-    bg: ratatui::style::Color,
-    dim: ratatui::style::Color,
-) -> Vec<Line<'static>> {
-    macro_rules! ln {
-        ($spans:expr) => {{
-            let mut v: Vec<Span<'static>> =
-                vec![Span::styled("║ ", Style::default().fg(bar).bg(bg))];
-            v.extend($spans);
-            Line::from(v)
-        }};
-    }
-    vec![
-        ln!(vec![
-            Span::styled("x-axis   ", Style::default().fg(colors::rgb(200, 230, 255))),
-            Span::styled("= current draw 0–100A", Style::default().fg(dim))
-        ]),
-        ln!(vec![
-            Span::styled("y-axis   ", Style::default().fg(colors::rgb(200, 230, 255))),
-            Span::styled("= power (low→bot, hi→top)", Style::default().fg(dim))
-        ]),
-        ln!(vec![
-            Span::styled("color    ", Style::default().fg(colors::rgb(200, 230, 255))),
-            Span::styled("= ASIC temperature", Style::default().fg(dim))
-        ]),
-        ln!(vec![
-            Span::styled(
-                "@",
-                Style::default()
-                    .fg(colors::rgb(79, 209, 197))
-                    .add_modifier(Modifier::BOLD)
-            ),
-            Span::styled("  healthy", Style::default().fg(dim))
-        ]),
-        ln!(vec![
-            Span::styled(
-                "!",
-                Style::default()
-                    .fg(colors::rgb(255, 100, 80))
-                    .add_modifier(Modifier::BOLD)
-            ),
-            Span::styled("  throttled / faulted", Style::default().fg(dim))
-        ]),
-        ln!(vec![
-            Span::styled(
-                "?",
-                Style::default()
-                    .fg(colors::rgb(255, 220, 80))
-                    .add_modifier(Modifier::BOLD)
-            ),
-            Span::styled("  ARC firmware stalled", Style::default().fg(dim))
-        ]),
-        ln!(vec![
-            Span::styled(
-                "%",
-                Style::default()
-                    .fg(colors::rgb(255, 180, 80))
-                    .add_modifier(Modifier::BOLD)
-            ),
-            Span::styled("  undervolt (vcore<0.75V)", Style::default().fg(dim))
-        ]),
-        ln!(vec![
-            Span::styled(
-                "( )",
-                Style::default()
-                    .fg(colors::rgb(180, 140, 255))
-                    .add_modifier(Modifier::BOLD)
-            ),
-            Span::styled(" harvested cores disabled", Style::default().fg(dim))
-        ]),
-        ln!(vec![
-            Span::styled("trail    ", Style::default().fg(colors::rgb(200, 230, 255))),
-            Span::styled("= GDDR temp / ETH links", Style::default().fg(dim))
+        l(&[
+            ("  ○ ◌ · ", Some(label)),
+            ("a flare for each step or request finished", None),
         ]),
     ]
 }
@@ -5002,7 +7059,7 @@ fn explain_lines(
     bg: ratatui::style::Color,
     dim: ratatui::style::Color,
     lbl: ratatui::style::Color,
-    text: &[&'static str],
+    text: &[&str],
     cols: usize,
 ) -> Vec<Line<'static>> {
     wrap_overlay_text(text, cols)
@@ -5031,6 +7088,7 @@ fn explain_lines(
 /// /fps <n>          set animation FPS (1–120)
 /// /datafps <n>      set data-mode FPS (1–30)
 /// /mode <name>      switch display mode (insights|grid|starfield|castle|flow|arcade|defrag|hivemind)
+/// /theme [name]     grayskull | rainbow, every view (bare flips)
 /// /legend           toggle legend overlay      (hotkey: l)
 /// /explain          toggle explain overlay     (hotkey: !)
 /// /help             list commands              (hotkey: ?)
@@ -5130,9 +7188,28 @@ fn execute_command(
                 *display_mode = DisplayMode::Training;
                 ("→ training".to_string(), false, false)
             }
+            // The view itself is made where the loop draws it, on the first
+            // frame in the mode, as for the `3` key.
+            "die3d" | crate::animation::DIE3D_MODE_ALIAS => {
+                *display_mode = DisplayMode::Die3d;
+                (
+                    format!("→ {}", crate::animation::DIE3D_DISPLAY_NAME),
+                    false,
+                    false,
+                )
+            }
+            // The story runs from start-up on the driver's thread, so
+            // there is nothing to start: setting the mode is the whole job.
+            saga_view::MODE_NAME => {
+                *display_mode = DisplayMode::Saga;
+                (format!("→ {}", saga_view::DISPLAY_NAME), false, false)
+            }
             _ => (
-                "mode: insights|grid|starfield|castle|flow|arcade|defrag|hivemind|training"
-                    .to_string(),
+                format!(
+                    "mode: insights|grid|starfield|castle|flow|arcade|defrag|hivemind|training|die3d|{}|{}",
+                    crate::animation::DIE3D_MODE_ALIAS,
+                    saga_view::MODE_NAME
+                ),
                 true,
                 false,
             ),
@@ -5164,11 +7241,25 @@ fn execute_command(
                 }
             },
             _ => (
-                "theme: grayskull | default  (or /theme to toggle)".to_string(),
+                "theme: grayskull | rainbow  (or /theme to toggle)".to_string(),
                 true,
                 false,
             ),
         },
+        // Shorthand for `/mode saga`, as `/waffler` is for the Waffler.
+        saga_view::MODE_NAME => {
+            *display_mode = DisplayMode::Saga;
+            (format!("→ {}", saga_view::DISPLAY_NAME), false, false)
+        }
+        // Shorthand for `/mode die3d`, the way `/hivemind` opens its view.
+        "die3d" | crate::animation::DIE3D_MODE_ALIAS => {
+            *display_mode = DisplayMode::Die3d;
+            (
+                format!("→ {}", crate::animation::DIE3D_DISPLAY_NAME),
+                false,
+                false,
+            )
+        }
         "legend" | "l" => {
             *overlay = if *overlay == Some(OverlayPanel::Legend) {
                 None
@@ -5631,6 +7722,84 @@ fn device_panels_height(devices: &[crate::models::Device], area_width: u16) -> u
     (row_count as u16) * (DEVICE_PANEL_H + 1) // panel + inter-row gap(1)
 }
 
+/// Width of the Die 3D inset drawn beside the process table, in columns.
+const INSET_W: u16 = 52;
+/// The least height the process panel needs before an inset is shown.
+const INSET_MIN_H: u16 = 16;
+/// The least width the process table keeps when an inset is shown. The
+/// inset appears only where the panel is at least `TABLE_MIN_W + INSET_W`
+/// (122) columns wide.
+const TABLE_MIN_W: u16 = 70;
+
+/// The devices whose chip panels the Insights screen draws: all of them, or
+/// the `FLEET_PAGE_SIZE` page that starts at `fleet_zoom_start` when zoomed.
+///
+/// The renderer and the host loop both size things from this slice (the
+/// panel height here, the inset's size in the loop), so the logic lives in
+/// one place.
+fn insights_panel_devices(
+    devices: &[crate::models::Device],
+    fleet_zoom_start: Option<usize>,
+) -> &[crate::models::Device] {
+    if let Some(start) = fleet_zoom_start {
+        // Clamp start: the device count can shrink beneath a stale zoom offset
+        // (backend swap via `b`/`/remote`, or a remote fleet losing a device),
+        // which would otherwise make `start > end` and panic on the slice.
+        let start = start.min(devices.len());
+        let end = (start + FLEET_PAGE_SIZE).min(devices.len());
+        &devices[start..end]
+    } else {
+        devices
+    }
+}
+
+/// The Insights screen's vertical split: header(3) | cards(exact height) |
+/// process panel (remainder).
+///
+/// Cards use Constraint::Length so they always get the exact height needed to
+/// show all chip panels (including a 2x2 grid when 4 chips don't fit in one row).
+/// The process panel takes whatever remains; it may be zero on very short
+/// terminals but the chip panels are never truncated.
+///
+/// The old toggle-able `[i]` Inference Servers strip that used to live here
+/// has been retired in favor of the dedicated full-screen
+/// `DisplayMode::InferenceMonitor` view (the unified serving snake - see
+/// `render_snake_view`), entered via `i`/`I`.
+fn insights_chunks(area: Rect, panel_devices: &[crate::models::Device]) -> [Rect; 3] {
+    let cards_h = device_panels_height(panel_devices, area.width);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(cards_h),
+            Constraint::Min(0),
+        ])
+        .split(area);
+    [chunks[0], chunks[1], chunks[2]]
+}
+
+/// Where the Die 3D inset goes on the Insights screen, or `None` when there
+/// is no room for it.
+///
+/// It takes the right `INSET_W` columns of the process panel, full height.
+/// The global status bar is drawn over the screen's last row, so that row is
+/// not counted. The panel (less the status row) must be at least
+/// `TABLE_MIN_W + INSET_W` wide, so the table keeps `TABLE_MIN_W` columns,
+/// and at least `INSET_MIN_H` tall.
+fn insights_inset_rect(area: Rect, panel_devices: &[crate::models::Device]) -> Option<Rect> {
+    let panel = insights_chunks(area, panel_devices)[2];
+    let height = panel.height.saturating_sub(STATUS_BAR_ROWS as u16);
+    if panel.width < TABLE_MIN_W + INSET_W || height < INSET_MIN_H {
+        return None;
+    }
+    Some(Rect {
+        x: panel.x + panel.width - INSET_W,
+        y: panel.y,
+        width: INSET_W,
+        height,
+    })
+}
+
 /// Render Insights screen (full layout: chip portraits + process panel).
 ///
 /// `portrait_particles` maps device index → live particle list, threaded through
@@ -5659,6 +7828,16 @@ fn render_insights(
     // See `remote_local_fallback_note`: `Some` under `--remote` while the
     // panel is still showing LOCAL processes rather than the remote box's.
     remote_note: Option<&'static str>,
+    // The Die 3D inset to draw beside the process table, with the clock
+    // (`inset_now`, seconds) its `render` takes. `render_insights` has no
+    // clock of its own. `None`, or too little room (see
+    // `insights_inset_rect`), leaves the screen as it was.
+    inset: Option<&crate::animation::Die3dView>,
+    // The bus, for the inset's fill and pulses (`None`: none drawn).
+    inset_world: Option<&dyn tt_toplike_bus::WorldRead>,
+    inset_now: f64,
+    // The model on each chip, for the panels' bottom rules (`grid_bus`).
+    chip_flags: &grid_bus::ChipFlags,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
@@ -5666,37 +7845,9 @@ fn render_insights(
     let devices = backend.devices();
 
     // When zoomed in, the panel height is based on the slice, not the full list.
-    let panel_devices: &[crate::models::Device] = if let Some(start) = fleet_zoom_start {
-        // Clamp start: the device count can shrink beneath a stale zoom offset
-        // (backend swap via `b`/`/remote`, or a remote fleet losing a device),
-        // which would otherwise make `start > end` and panic on the slice.
-        let start = start.min(devices.len());
-        let end = (start + FLEET_PAGE_SIZE).min(devices.len());
-        &devices[start..end]
-    } else {
-        devices
-    };
+    let panel_devices = insights_panel_devices(devices, fleet_zoom_start);
 
-    // Layout: header(3) | cards(exact height) | process panel (remainder)
-    //
-    // Cards use Constraint::Length so they always get the exact height needed to
-    // show all chip panels (including a 2×2 grid when 4 chips don't fit in one row).
-    // The process panel takes whatever remains; it may be zero on very short
-    // terminals but the chip panels are never truncated.
-    //
-    // The old toggle-able `[i]` Inference Servers strip that used to live here
-    // has been retired in favor of the dedicated full-screen
-    // `DisplayMode::InferenceMonitor` view (the unified serving snake — see
-    // `render_snake_view`), entered via `i`/`I`.
-    let cards_h = device_panels_height(panel_devices, area.width);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(cards_h),
-            Constraint::Min(0),
-        ])
-        .split(area);
+    let chunks = insights_chunks(area, panel_devices);
 
     render_header(f, chunks[0], backend);
     render_device_panels(
@@ -5707,10 +7858,17 @@ fn render_insights(
         &portrait_baseline,
         fleet_cursor,
         fleet_zoom_start,
+        chip_flags,
     );
+    // With an inset and room for it, the table gives up the rect's columns.
+    let inset_rect = inset.and_then(|_| insights_inset_rect(area, panel_devices));
+    let table_area = Rect {
+        width: chunks[2].width - inset_rect.map_or(0, |r| r.width),
+        ..chunks[2]
+    };
     render_process_panel(
         f,
-        chunks[2],
+        table_area,
         rows,
         cursor,
         kill_confirm,
@@ -5719,9 +7877,20 @@ fn render_insights(
         host_mem_total,
         tt_filtered,
         remote_note,
+        chip_flags,
         #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
         serving_metrics,
     );
+    if let (Some(view), Some(rect)) = (inset, inset_rect) {
+        // The fg and bg are Reset, as in `ui_die3d`, so the terminal's own
+        // colour shows in the cells the view leaves unpainted.
+        let widget = Paragraph::new(view.render(inset_world, inset_now)).style(
+            Style::default()
+                .fg(ratatui::style::Color::Reset)
+                .bg(ratatui::style::Color::Reset),
+        );
+        f.render_widget(widget, rect);
+    }
     // Kill modal overlays the full screen when active
     if let Some(ref kc) = kill_confirm {
         render_kill_dialog(f, area, kc);
@@ -5737,7 +7906,7 @@ fn render_snake_view(
 ) {
     let area = f.area();
     f.render_widget(
-        Block::default().style(Style::default().bg(colors::rgb(0, 0, 0))),
+        Block::default().style(Style::default().bg(colors::canvas_bg())),
         area,
     );
     // Layout, top to bottom: the multi-model roster (0 rows when <2 services),
@@ -6174,12 +8343,21 @@ fn bar_color(frac: f32) -> ratatui::style::Color {
     }
 }
 
+/// The process panel's note before the first process scan has landed. It
+/// travels in the `remote_note` slot and is not added to the header. With no
+/// rows, the panel shows it as the empty-state line, so the panel does not
+/// say "No processes ..." before any scan has run.
+const SCANNING_NOTE: &str = "scanning processes";
+
 /// Render the process panel over cross-platform `ProcRow`s.
 ///
 /// Always shows PID / CPU% / MEM / NAME and an inference tag. When a row carries
 /// TT attribution (`row.tt`, Linux-only) it also shows the device-index column
-/// and a hugepage hint. On Linux, a matching `serving_metrics` entry adds a
-/// per-process serving summary row (port / health / model / tok-s).
+/// and a hugepage hint. A process on chips that serve a model gets a serving
+/// summary row under it: from the world's model on those chips when the TUI
+/// is attached (`chip_flags`, see `grid_bus::ChipFlags::process_row`), so a
+/// headless host's model shows; otherwise, on Linux, from a matching
+/// `serving_metrics` entry (port / health / model / tok-s).
 fn render_process_panel(
     f: &mut Frame,
     area: Rect,
@@ -6193,6 +8371,8 @@ fn render_process_panel(
     // See `remote_local_fallback_note`: `Some` under `--remote` while this
     // panel is still showing LOCAL processes rather than the remote box's.
     remote_note: Option<&'static str>,
+    // The model on each chip, from the bus.
+    chip_flags: &grid_bus::ChipFlags,
     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
     serving_metrics: &std::collections::HashMap<i32, ServingMetrics>,
 ) {
@@ -6254,7 +8434,7 @@ fn render_process_panel(
         Span::raw("  "),
         Span::styled("Processes", Style::default().fg(Color::Gray)),
     ];
-    if let Some(note) = remote_note {
+    if let Some(note) = remote_note.filter(|n| *n != SCANNING_NOTE) {
         header_spans.push(Span::styled(
             format!(" · {note}"),
             Style::default()
@@ -6265,7 +8445,9 @@ fn render_process_panel(
     lines.push(Line::from(header_spans));
 
     if rows.is_empty() {
-        let empty_msg = if tt_filtered {
+        let empty_msg = if remote_note == Some(SCANNING_NOTE) {
+            SCANNING_NOTE
+        } else if tt_filtered {
             "No processes using TT devices detected"
         } else {
             "nothing is feeding the chips right now"
@@ -6374,9 +8556,20 @@ fn render_process_panel(
 
             lines.push(Line::from(row_spans));
 
-            // If this is a known TT inference server, append a metrics summary row.
+            // Attached: the world's model on this process's chips.
+            let bus_row = row
+                .tt
+                .as_ref()
+                .and_then(|tt| chip_flags.process_row(&tt.device_indices));
+            let from_bus = bus_row.is_some();
+            if let Some(line) = bus_row {
+                lines.push(line);
+            }
+
+            // Otherwise, if this is a known TT inference server, append the
+            // local monitor's metrics summary row.
             #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-            if let Some(sm) = serving_metrics.get(&row.pid) {
+            if let Some(sm) = serving_metrics.get(&row.pid).filter(|_| !from_bus) {
                 let mut spans: Vec<Span> = vec![
                     Span::raw("       "),
                     Span::styled(
@@ -6431,6 +8624,8 @@ fn render_process_panel(
 
                 lines.push(Line::from(spans));
             }
+            #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
+            let _ = from_bus;
         }
     }
 
@@ -6466,6 +8661,14 @@ fn render_kill_dialog(f: &mut Frame, area: Rect, kc: &KillConfirmState) {
     };
 
     f.render_widget(Clear, dialog_rect);
+    // A background of its own: the shared backdrop is laid after the view
+    // and fills only blank cells (a space on the canvas black or Reset), so
+    // a dialog left at Reset would take backdrop glyphs between its lines.
+    f.render_widget(
+        ratatui::widgets::Block::default()
+            .style(Style::default().bg(crate::ui::colors::rgb(8, 14, 22))),
+        dialog_rect,
+    );
 
     let content_w = (DIALOG_W.saturating_sub(1)) as usize; // ║ takes 1 col
     let name_short = truncate(&kc.name, 14);
@@ -7318,6 +9521,7 @@ fn render_device_panels(
     portrait_baseline: &crate::animation::baseline::AdaptiveBaseline,
     fleet_cursor: usize,
     fleet_zoom_start: Option<usize>,
+    chip_flags: &grid_bus::ChipFlags,
 ) {
     use crate::ui::tui::chip_portrait::{portrait_dims, render_chip_portrait, tensix_temp_rgb};
     use ratatui::style::{Color, Modifier, Style};
@@ -7507,12 +9711,17 @@ fn render_device_panels(
             );
         }
 
-        // ── Footer hairline ───────────────────────────────────────────────────
+        // ── Footer hairline (the model on the chip, from the bus, when one is) ─
+        let footer = chip_flags
+            .footer_line(idx, panel_w as usize)
+            .unwrap_or_else(|| {
+                Line::from(Span::styled(
+                    "─".repeat(panel_w as usize),
+                    Style::default().fg(Color::DarkGray),
+                ))
+            });
         f.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "─".repeat(panel_w as usize),
-                Style::default().fg(Color::DarkGray),
-            ))),
+            Paragraph::new(footer),
             Rect {
                 x: panel_rect.x,
                 y: panel_rect.y + panel_h - 1,
@@ -7768,6 +9977,14 @@ mod cmd_tests {
             ("mode flow", DisplayMode::MemoryFlow),
             ("mode arcade", DisplayMode::Arcade),
             ("mode defrag", DisplayMode::Defrag),
+            // The Wafer Waffler keeps its code name and takes the new one,
+            // as `/mode` and as a bare verb.
+            ("mode die3d", DisplayMode::Die3d),
+            ("mode waffler", DisplayMode::Die3d),
+            ("/die3d", DisplayMode::Die3d),
+            ("/waffler", DisplayMode::Die3d),
+            ("mode saga", DisplayMode::Saga),
+            ("/saga", DisplayMode::Saga),
         ];
         for (cmd, expected) in cases {
             let (mut mode, mut ap, mut dp, mut ov, mut ts) = fresh();
@@ -8203,8 +10420,46 @@ mod tests {
 #[cfg(test)]
 mod display_mode_tests {
     use super::{
-        display_mode_for, linger_for, next_display_mode, next_rotation_mode, DisplayMode, ROTATION,
+        back_target, die3d_area, die3d_key_for, die3d_pan_for, die3d_toggle, display_mode_for,
+        leaves_die3d, linger_for, next_display_mode, next_rotation_mode, resize_die3d, saga_toggle,
+        statusbar_mode_name, DisplayMode, ROTATE_LINGER, ROTATION,
     };
+
+    /// `S` enters Saga remembering the mode it came from, and `S` again
+    /// leaves to it; from a saved mode of Saga itself it leaves to Insights
+    /// (`back_target`, which Esc uses too).
+    #[test]
+    fn key_s_enters_saga_and_leaves_to_where_it_came_from() {
+        let (mode, prev) = saga_toggle(DisplayMode::Grid, DisplayMode::Insights);
+        assert_eq!((mode, prev), (DisplayMode::Saga, DisplayMode::Grid));
+        let (mode, prev) = saga_toggle(mode, prev);
+        assert_eq!((mode, prev), (DisplayMode::Grid, DisplayMode::Grid));
+        let (mode, _) = saga_toggle(DisplayMode::Saga, DisplayMode::Saga);
+        assert_eq!(mode, DisplayMode::Insights);
+        assert_eq!(
+            back_target(DisplayMode::Saga, DisplayMode::Training),
+            DisplayMode::Training
+        );
+    }
+
+    /// Saga is outside the `v` cycle and, until phase 3 decides, outside
+    /// `--rotate`; `v` from it goes to Insights. The status bar names it.
+    #[test]
+    fn saga_is_out_of_the_v_cycle_and_the_rotation() {
+        assert_eq!(next_display_mode(DisplayMode::Saga), DisplayMode::Insights);
+        let mut m = DisplayMode::Insights;
+        for _ in 0..30 {
+            assert_ne!(m, DisplayMode::Saga, "`v` must not cycle into Saga");
+            m = next_display_mode(m);
+        }
+        assert!(!ROTATION.contains(&DisplayMode::Saga));
+        assert_eq!(statusbar_mode_name(DisplayMode::Saga), "Saga");
+        // The `v` key goes through `viz_host::next_mode_in`; with no plugin
+        // enabled it is this same table for every mode.
+        for m in super::ALL_DISPLAY_MODES {
+            assert_eq!(super::viz_host::next_mode_in(m, &[]), next_display_mode(m));
+        }
+    }
 
     #[test]
     fn t_key_enters_training_mode_and_esc_leaves_it() {
@@ -8216,6 +10471,507 @@ mod display_mode_tests {
         assert_eq!(mode, DisplayMode::Training);
         mode = prev;
         assert_eq!(mode, DisplayMode::Insights);
+    }
+
+    /// Both the unattended rotation (`--rotate`, `R`) and the `v` cycle visit
+    /// Die 3D, and `v` from Die 3D wraps to Insights.
+    #[test]
+    fn die3d_is_in_the_unattended_rotation_and_the_v_cycle() {
+        assert!(ROTATION.contains(&DisplayMode::Die3d));
+        let mut m = DisplayMode::Insights;
+        let mut seen = false;
+        for _ in 0..12 {
+            m = next_display_mode(m);
+            seen |= m == DisplayMode::Die3d;
+        }
+        assert!(seen, "`v` must cycle into Die3d");
+        assert_eq!(
+            next_display_mode(DisplayMode::InferenceMonitor),
+            DisplayMode::Die3d
+        );
+    }
+
+    #[test]
+    fn v_from_die3d_leaves_to_insights() {
+        assert_eq!(next_display_mode(DisplayMode::Die3d), DisplayMode::Insights);
+        // Also through the plugin-aware cycle, when no plugin is enabled.
+        assert_eq!(
+            super::viz_host::next_mode_in(DisplayMode::Die3d, &[]),
+            DisplayMode::Insights
+        );
+    }
+
+    #[test]
+    fn die3d_has_a_status_bar_name() {
+        let name = statusbar_mode_name(DisplayMode::Die3d);
+        assert!(!name.is_empty());
+        assert_eq!(name, crate::animation::DIE3D_DISPLAY_NAME);
+    }
+
+    #[test]
+    fn every_exit_from_die3d_drops_the_view_and_nothing_else_does() {
+        for m in [
+            DisplayMode::Insights,
+            DisplayMode::Grid,
+            DisplayMode::Training,
+            DisplayMode::Arcade,
+        ] {
+            assert!(leaves_die3d(DisplayMode::Die3d, m), "{m:?}");
+            assert!(!leaves_die3d(m, DisplayMode::Die3d), "entering {m:?}");
+            assert!(!leaves_die3d(m, DisplayMode::Insights), "{m:?}");
+        }
+        assert!(!leaves_die3d(DisplayMode::Die3d, DisplayMode::Die3d));
+    }
+
+    #[test]
+    fn die3d_dwells_for_the_default_linger() {
+        assert_eq!(linger_for(DisplayMode::Die3d, false), ROTATE_LINGER);
+        assert_eq!(linger_for(DisplayMode::Die3d, true), ROTATE_LINGER);
+    }
+
+    #[test]
+    fn key_3_enters_die3d_remembering_the_mode_and_leaves_to_it() {
+        // Entering from Grid remembers Grid; pressing `3` again goes back.
+        let (mode, prev) = die3d_toggle(DisplayMode::Grid, DisplayMode::Insights);
+        assert_eq!((mode, prev), (DisplayMode::Die3d, DisplayMode::Grid));
+        let (mode, prev) = die3d_toggle(mode, prev);
+        assert_eq!((mode, prev), (DisplayMode::Grid, DisplayMode::Grid));
+    }
+
+    #[test]
+    fn three_esc_and_v_leave_die3d_after_a_detour_through_another_view() {
+        // Grid, `3` into Die 3D, `i` into the inference monitor (which saves
+        // Die3d as the previous mode), Esc back into Die 3D. The previous
+        // mode is now Die3d itself.
+        let (mode, _) = die3d_toggle(DisplayMode::Grid, DisplayMode::Insights);
+        assert_eq!(mode, DisplayMode::Die3d);
+        // `i`: the handler saves the mode it leaves as the previous one.
+        let (mode, prev) = (DisplayMode::InferenceMonitor, mode);
+        // Esc: back to Die 3D; the previous mode stays Die3d.
+        let mode = back_target(mode, prev);
+        assert_eq!(mode, DisplayMode::Die3d);
+        // `3`, Esc and `v` must each still leave, to Insights.
+        let (m, p) = die3d_toggle(mode, prev);
+        assert_eq!((m, p), (DisplayMode::Insights, DisplayMode::Insights), "3");
+        assert_eq!(back_target(mode, prev), DisplayMode::Insights, "Esc");
+        assert_eq!(next_display_mode(mode), DisplayMode::Insights, "v");
+    }
+
+    #[test]
+    fn esc_goes_back_to_the_previous_mode_unless_that_is_the_mode_itself() {
+        // The usual case: back to where the user came from.
+        assert_eq!(
+            back_target(DisplayMode::Die3d, DisplayMode::Grid),
+            DisplayMode::Grid
+        );
+        assert_eq!(
+            back_target(DisplayMode::Training, DisplayMode::Starfield),
+            DisplayMode::Starfield
+        );
+        // A previous mode equal to the current one would go nowhere: every
+        // entry-key view leaves to Insights then.
+        for m in [
+            DisplayMode::Die3d,
+            DisplayMode::Training,
+            DisplayMode::InferenceMonitor,
+            DisplayMode::HivemindSweeper,
+        ] {
+            assert_eq!(back_target(m, m), DisplayMode::Insights, "{m:?}");
+        }
+    }
+
+    #[test]
+    fn a_terminal_resize_keeps_the_die3d_view_and_its_switches() {
+        use crate::animation::die3d::Die3dKey;
+        use crate::animation::Die3dView;
+        use crate::backend::TelemetryBackend;
+        let (c, r, reserved) = die3d_area(150, 43);
+        assert_eq!((c, r, reserved), (150, 42, 1));
+        let mut die3d = Some(Die3dView::with_reserved_rows(c, r, reserved));
+        let view = die3d.as_mut().unwrap();
+        view.handle_key(Die3dKey::ToggleBraille, 0.0);
+        view.handle_key(Die3dKey::ToggleClouds, 0.0);
+        let switches = view.switches();
+        resize_die3d(&mut die3d, 120, 40);
+        let view = die3d.as_ref().expect("the view survives a resize");
+        assert_eq!(view.switches(), switches);
+        // Drawn at the new size: once a Blackhole chip has been read (the
+        // mock's third device), the view gives one line per row of its area,
+        // the terminal less the status bar's row. 90 x 25 is below the full
+        // layout, so this also shows the smaller layout follows a resize.
+        let mut mock = crate::backend::mock::MockBackend::new(3);
+        mock.init().expect("mock init");
+        mock.update().expect("mock update");
+        die3d.as_mut().unwrap().update(&mock, None, 0.0);
+        assert_eq!(die3d.as_ref().unwrap().render(None, 0.0).len(), 39);
+        resize_die3d(&mut die3d, 90, 25);
+        assert_eq!(die3d.as_ref().unwrap().render(None, 0.1).len(), 24);
+        // No view (Die 3D not open): nothing is made.
+        let mut none: Option<Die3dView> = None;
+        resize_die3d(&mut none, 120, 40);
+        assert!(none.is_none());
+    }
+
+    /// The views the app makes take their background from the canvas setting.
+    /// The view's own default is transparent, so a creation site that skips
+    /// the helper leaves a view that shows the terminal's colour on an
+    /// otherwise black screen.
+    #[test]
+    fn the_die3d_views_the_app_makes_follow_the_canvas_background() {
+        let want = crate::ui::colors::canvas_transparent();
+        assert_eq!(
+            super::new_die3d_view(100, 30, 0).is_transparent(),
+            want,
+            "full view"
+        );
+        assert_eq!(
+            super::new_inset_view(52, 16).is_transparent(),
+            want,
+            "inset"
+        );
+    }
+
+    /// The full view follows the hardware for its cell style. The inset holds
+    /// braille: half blocks halve its pixel width and a two-die board would no
+    /// longer fit it.
+    #[test]
+    fn the_app_makes_the_full_view_auto_and_the_inset_braille() {
+        use crate::animation::die3d::cellmode::CellMode;
+        use crate::animation::die3d::cells::CellStyle;
+        assert_eq!(
+            super::new_die3d_view(100, 30, 0).cell_mode(),
+            CellMode::Auto
+        );
+        let inset = super::new_inset_view(52, 16);
+        assert_eq!(inset.cell_mode(), CellMode::Fixed(CellStyle::Braille));
+    }
+
+    /// The views the app makes carry the theme in force, so `/theme` reaches
+    /// Die 3D. The theme is process-wide and other tests change it, so this
+    /// reads it before and after and accepts either.
+    #[test]
+    fn the_die3d_views_the_app_makes_carry_the_current_theme() {
+        use crate::ui::colors::current_theme;
+        let before = current_theme();
+        let (full, inset) = (
+            super::new_die3d_view(100, 30, 0).theme(),
+            super::new_inset_view(52, 16).theme(),
+        );
+        let after = current_theme();
+        for (what, got) in [("full view", full), ("inset", inset)] {
+            assert!(got == before || got == after, "{what}: {got:?}");
+        }
+    }
+
+    #[test]
+    fn die3d_keys_are_routed_only_while_in_the_mode() {
+        use crate::animation::die3d::Die3dKey;
+        for (c, want) in [
+            (']', Die3dKey::NextBoard),
+            ('[', Die3dKey::PrevBoard),
+            (' ', Die3dKey::CutNow),
+        ] {
+            assert_eq!(die3d_key_for(DisplayMode::Die3d, c), Some(want), "{c}");
+            // Out of the mode the same keys are not taken.
+            for m in [
+                DisplayMode::Insights,
+                DisplayMode::Training,
+                DisplayMode::Grid,
+            ] {
+                assert_eq!(die3d_key_for(m, c), None, "{c} in {m:?}");
+            }
+        }
+        // In the mode, keys with no Die 3D meaning fall through. The letters
+        // that used to be this view's keys are slash commands now, so they
+        // reach the app's own meaning for them (or none).
+        for c in [
+            '3', 'v', 'q', 'l', 'b', 'h', 'm', 'c', 'C', 'B', 'T', 'X', 'L', 'W', 'H',
+        ] {
+            assert_eq!(die3d_key_for(DisplayMode::Die3d, c), None, "{c}");
+        }
+    }
+
+    /// The `{` `}` key arm and `/arcade` both run `arcade_switch`. A switch
+    /// lays the arcade out from the new rows,
+    /// and updates it once, so the first frame after it shows the devices
+    /// and services (review S1 and S4). Outside Arcade the keys change
+    /// nothing.
+    #[test]
+    fn a_layout_switch_updates_the_new_arcade_before_it_is_drawn() {
+        use super::{arcade_switch, ArcadeInput, ArcadeSwitch};
+        use crate::animation::arcade_layout::ArcadeConfig;
+        use crate::animation::arcade_presets::{preset, LayoutCycle};
+        use crate::animation::bus_test_support::Fixed;
+        use crate::animation::ArcadeVisualization;
+        use crate::backend::TelemetryBackend;
+        let b = Fixed::new(2);
+        let mut cycle = LayoutCycle::new(&[], None);
+        let mut config = ArcadeConfig::default();
+        let mut a = ArcadeVisualization::with_config(120, 40, &config);
+        a.initialize_from_devices(b.devices());
+        a.initialize_topology(&b);
+        for i in 0..3 {
+            a.set_services(crate::workload::inference_server::mock::mock_services(
+                100.0 + i as f32,
+            ));
+            a.update(&b);
+        }
+        let mut arcade = Some(a);
+        let text = |a: &ArcadeVisualization| {
+            a.render(&b)
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // Outside Arcade: no change.
+        let none = arcade_switch(
+            ArcadeInput::Key('}'),
+            DisplayMode::Grid,
+            ArcadeSwitch {
+                arcade: &mut arcade,
+                config: &mut config,
+                cycle: &mut cycle,
+            },
+            &b,
+        );
+        assert_eq!(none, None);
+        assert_eq!(cycle.current().name, "classic");
+        // `}` in Arcade: now-serving, its rows, a real frame.
+        let (msg, err) = arcade_switch(
+            ArcadeInput::Key('}'),
+            DisplayMode::Arcade,
+            ArcadeSwitch {
+                arcade: &mut arcade,
+                config: &mut config,
+                cycle: &mut cycle,
+            },
+            &b,
+        )
+        .expect("a layout key");
+        assert!(
+            !err && msg.starts_with("layout: now-serving (2/8)"),
+            "{msg}"
+        );
+        let ns = preset("now-serving").unwrap();
+        let a = arcade.as_ref().unwrap();
+        assert_eq!(config.rows, ns.rows);
+        assert_eq!(a.config().rows, ns.rows);
+        let t = text(a);
+        assert!(!t.contains("no Tenstorrent device found"), "{t}");
+        assert!(!t.contains("0 of 0 models"), "{t}");
+        // `/arcade layout classic` goes back.
+        let (msg, err) = arcade_switch(
+            ArcadeInput::Command("layout classic"),
+            DisplayMode::Arcade,
+            ArcadeSwitch {
+                arcade: &mut arcade,
+                config: &mut config,
+                cycle: &mut cycle,
+            },
+            &b,
+        )
+        .unwrap();
+        assert!(!err && msg.starts_with("layout: classic (1/8)"), "{msg}");
+        assert_eq!(arcade.as_ref().unwrap().config().rows, cycle.current().rows);
+    }
+
+    /// The shared backdrop does not show inside the Insights kill dialog,
+    /// which the view draws itself, nor to the right of a multi-line
+    /// command-bar message, which is drawn after the backdrop (review S3).
+    #[test]
+    fn the_backdrop_stays_out_of_the_kill_dialog_and_the_command_bar() {
+        use super::{render_command_bar, render_kill_dialog, KillConfirmState};
+        use crate::animation::backdrop::{Backdrop, BackdropKind, BackdropSignals};
+        use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+        let mut b = Backdrop::new(Some(BackdropKind::Clouds));
+        for i in 0..40 {
+            b.observe(&BackdropSignals {
+                now_s: i as f64 / 4.0,
+                pcie_bps: Some(4e9),
+                load: Some(1.0),
+                ..Default::default()
+            });
+        }
+        let glyph = |c: &str| ["░", "▒", "▓"].contains(&c);
+        let (w, h) = (100u16, 40u16);
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let kc = KillConfirmState {
+            pid: 42,
+            name: "python".into(),
+            device_idx: 0,
+        };
+        t.draw(|f| {
+            let area = f.area();
+            render_kill_dialog(f, area, &kc);
+            b.layer_buffer(f.buffer_mut(), area);
+        })
+        .unwrap();
+        let buf = t.backend().buffer().clone();
+        // The dialog is 42x8, centred.
+        let d = Rect::new((w - 42) / 2, (h - 8) / 2, 42, 8);
+        let mut outside = 0;
+        for y in 0..h {
+            for x in 0..w {
+                let inside = d.contains((x, y).into());
+                let g = glyph(buf[(x, y)].symbol());
+                assert!(
+                    !(inside && g),
+                    "a backdrop glyph at ({x},{y}) in the dialog"
+                );
+                outside += usize::from(g && !inside);
+            }
+        }
+        assert!(outside > 0, "the backdrop draws around the dialog");
+        // A three-line message over a laid backdrop.
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| {
+            let area = f.area();
+            b.layer_buffer(f.buffer_mut(), area);
+            render_command_bar(f, "", Some(("one\ntwo lines\nthree", false)));
+        })
+        .unwrap();
+        let buf = t.backend().buffer().clone();
+        for y in h - 3..h {
+            for x in 0..w {
+                assert!(
+                    !glyph(buf[(x, y)].symbol()),
+                    "a backdrop glyph at ({x},{y}) in the command bar"
+                );
+            }
+        }
+    }
+
+    /// A layout message belongs to the arcade: it goes when the arcade is
+    /// left and after its lifetime; a global message stays; an error in its
+    /// own view stays until the next command. The clock is a number, so no
+    /// wall time is read.
+    #[test]
+    fn a_view_message_goes_with_its_view_and_its_lifetime() {
+        use super::{
+            arcade_switch, tidy_view_message, ArcadeInput, ArcadeSwitch, ViewMessage,
+            VIEW_MESSAGE_SECS,
+        };
+        use crate::animation::arcade_layout::ArcadeConfig;
+        use crate::animation::arcade_presets::LayoutCycle;
+        use crate::animation::bus_test_support::Fixed;
+        let b = Fixed::new(2);
+        let mut cycle = LayoutCycle::new(&[], None);
+        let mut config = ArcadeConfig::default();
+        let mut arcade = None;
+        let mut msg = arcade_switch(
+            ArcadeInput::Key('}'),
+            DisplayMode::Arcade,
+            ArcadeSwitch {
+                arcade: &mut arcade,
+                config: &mut config,
+                cycle: &mut cycle,
+            },
+            &b,
+        );
+        let mut tag = ViewMessage::tag(&msg, DisplayMode::Arcade, 10.0);
+        // Still in the arcade, inside the lifetime: it stays.
+        tidy_view_message(&mut msg, &mut tag, DisplayMode::Arcade, 11.0);
+        assert!(msg.as_ref().unwrap().0.starts_with("layout: now-serving"));
+        // Another view: it goes.
+        tidy_view_message(&mut msg, &mut tag, DisplayMode::Grid, 11.0);
+        assert_eq!(msg, None);
+        // A global message (no tag) survives a view change.
+        let mut global = Some(("rotation: on".to_string(), false));
+        let mut none = None;
+        tidy_view_message(&mut global, &mut none, DisplayMode::Grid, 99.0);
+        assert!(global.is_some());
+        // A tag left by an older message does not clear a newer global one.
+        let mut stale = ViewMessage::tag(
+            &Some(("backdrop (grid): sky".to_string(), false)),
+            DisplayMode::Grid,
+            0.0,
+        );
+        tidy_view_message(&mut global, &mut stale, DisplayMode::Arcade, 99.0);
+        assert!(global.is_some() && stale.is_none());
+        // The lifetime clears an informational message and keeps an error.
+        let mut info = Some(("backdrop (grid): sky".to_string(), false));
+        let mut t = ViewMessage::tag(&info, DisplayMode::Grid, 1.0);
+        tidy_view_message(
+            &mut info,
+            &mut t,
+            DisplayMode::Grid,
+            1.0 + VIEW_MESSAGE_SECS - 0.1,
+        );
+        assert!(info.is_some());
+        tidy_view_message(
+            &mut info,
+            &mut t,
+            DisplayMode::Grid,
+            1.0 + VIEW_MESSAGE_SECS,
+        );
+        assert_eq!(info, None);
+        let mut err = Some((
+            "/backdrop: expected off, scene, sky or clouds".to_string(),
+            true,
+        ));
+        let mut t = ViewMessage::tag(&err, DisplayMode::Grid, 1.0);
+        tidy_view_message(&mut err, &mut t, DisplayMode::Grid, 1000.0);
+        assert!(err.is_some(), "an error stays in its view");
+        tidy_view_message(&mut err, &mut t, DisplayMode::Starfield, 1000.0);
+        assert_eq!(err, None, "and goes with it");
+    }
+
+    /// `}` and `{` step the arcade's layout in Arcade and do nothing in any
+    /// other view.
+    #[test]
+    fn the_layout_keys_work_only_in_the_arcade() {
+        use super::arcade_step_for;
+        use crate::animation::arcade_presets::Step;
+        assert_eq!(arcade_step_for(DisplayMode::Arcade, '}'), Some(Step::Next));
+        assert_eq!(arcade_step_for(DisplayMode::Arcade, '{'), Some(Step::Prev));
+        for c in ['[', ']', 'c', 'a', '(', ')'] {
+            assert_eq!(arcade_step_for(DisplayMode::Arcade, c), None, "{c}");
+        }
+        for m in [
+            DisplayMode::Insights,
+            DisplayMode::Grid,
+            DisplayMode::Starfield,
+            DisplayMode::MemoryCastle,
+            DisplayMode::MemoryFlow,
+            DisplayMode::Defrag,
+            DisplayMode::InferenceMonitor,
+            DisplayMode::HivemindSweeper,
+            DisplayMode::Training,
+            DisplayMode::Die3d,
+        ] {
+            for c in ['{', '}'] {
+                assert_eq!(arcade_step_for(m, c), None, "{c} in {m:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_arrows_pan_the_die3d_view_and_nothing_else() {
+        use crate::animation::die3d::Die3dKey;
+        use crossterm::event::KeyCode;
+        for (code, want) in [
+            (KeyCode::Left, Die3dKey::PanLeft),
+            (KeyCode::Right, Die3dKey::PanRight),
+            (KeyCode::Up, Die3dKey::PanUp),
+            (KeyCode::Down, Die3dKey::PanDown),
+        ] {
+            assert_eq!(die3d_pan_for(DisplayMode::Die3d, code), Some(want));
+            for m in [
+                DisplayMode::Insights,
+                DisplayMode::HivemindSweeper,
+                DisplayMode::Grid,
+            ] {
+                assert_eq!(die3d_pan_for(m, code), None, "{code:?} in {m:?}");
+            }
+        }
+        assert_eq!(die3d_pan_for(DisplayMode::Die3d, KeyCode::Enter), None);
+        assert_eq!(die3d_pan_for(DisplayMode::Die3d, KeyCode::Char('j')), None);
     }
 
     #[test]
@@ -8243,6 +10999,7 @@ mod display_mode_tests {
             DisplayMode::MemoryCastle,
             DisplayMode::MemoryFlow,
             DisplayMode::Arcade,
+            DisplayMode::Die3d,
             DisplayMode::Defrag,
             DisplayMode::InferenceMonitor,
             DisplayMode::HivemindSweeper,
@@ -8271,6 +11028,240 @@ mod display_mode_tests {
             );
         }
         assert_eq!(m, DisplayMode::Insights, "the rotation must wrap around");
+    }
+
+    /// Training and the Inference Monitor are visited only while a workload
+    /// exists. With neither, a lap visits every other view and never lands on
+    /// them; with one, only that one comes back.
+    #[test]
+    fn the_rotation_skips_the_workload_views_unless_one_is_going() {
+        use super::next_rotation_mode_for;
+        let lap = |training: bool, inference: bool| -> Vec<DisplayMode> {
+            // One lap: from Insights until the rotation comes back to it.
+            let mut seen = vec![DisplayMode::Insights];
+            let mut m = next_rotation_mode_for(DisplayMode::Insights, training, inference, true);
+            while m != DisplayMode::Insights {
+                seen.push(m);
+                assert!(seen.len() <= ROTATION.len(), "a lap never ends: {seen:?}");
+                m = next_rotation_mode_for(m, training, inference, true);
+            }
+            seen
+        };
+        let idle = lap(false, false);
+        assert!(!idle.contains(&DisplayMode::Training), "{idle:?}");
+        assert!(!idle.contains(&DisplayMode::InferenceMonitor), "{idle:?}");
+        // Everything else still comes up exactly once.
+        for want in [
+            DisplayMode::Insights,
+            DisplayMode::MemoryFlow,
+            DisplayMode::Starfield,
+            DisplayMode::MemoryCastle,
+            DisplayMode::Arcade,
+            DisplayMode::Die3d,
+            DisplayMode::Defrag,
+            DisplayMode::HivemindSweeper,
+        ] {
+            assert_eq!(idle.iter().filter(|&&m| m == want).count(), 1, "{want:?}");
+        }
+        let training_only = lap(true, false);
+        assert!(training_only.contains(&DisplayMode::Training));
+        assert!(!training_only.contains(&DisplayMode::InferenceMonitor));
+        let inference_only = lap(false, true);
+        assert!(inference_only.contains(&DisplayMode::InferenceMonitor));
+        assert!(!inference_only.contains(&DisplayMode::Training));
+        // With both going, the whole rotation is visited.
+        assert_eq!(lap(true, true).len(), ROTATION.len());
+    }
+
+    /// The rotation learns about training from the background scan, and asks
+    /// for that search only when it is going to use it.
+    #[test]
+    fn the_rotation_reads_training_from_the_scan_and_asks_for_the_search() {
+        use super::{scan_wants_trainer, RotationActivity};
+        use crate::cli::BackendType as B;
+        use crate::workload::train::TrainProcess;
+        let run = TrainProcess {
+            pid: 1,
+            binary: "nano_gpt".into(),
+            config_path: Some("train.yaml".into()),
+            start_time: None,
+        };
+        let mut a = RotationActivity::default();
+        assert!(!a.training);
+        a.note_trainer(&None);
+        assert!(!a.training, "a scan that did not search says nothing");
+        a.note_trainer(&Some(Some(run)));
+        assert!(a.training, "a trainer was found");
+        a.note_trainer(&None);
+        assert!(a.training, "and a scan that did not search leaves it");
+        a.note_trainer(&Some(None));
+        assert!(!a.training, "a search that found none: the run ended");
+
+        // Arcade asks on a real local box; the rotation asks on any real
+        // backend (the Training view scans locally whatever the backend); a
+        // mock backend never asks; nothing else asks.
+        for (mode, rotating, backend, want) in [
+            (DisplayMode::Arcade, false, B::Json, true),
+            (DisplayMode::Arcade, false, B::Mock, false),
+            (DisplayMode::Arcade, false, B::Remote, false),
+            (DisplayMode::Insights, true, B::Json, true),
+            (DisplayMode::Insights, true, B::Remote, true),
+            (DisplayMode::Insights, true, B::Mock, false),
+            (DisplayMode::Insights, false, B::Json, false),
+            (DisplayMode::Training, false, B::Json, false),
+        ] {
+            assert_eq!(
+                scan_wants_trainer(mode, rotating, backend),
+                want,
+                "{mode:?} rotating={rotating} {backend:?}"
+            );
+        }
+    }
+
+    /// Group D S1: an attached TUI with `--rotate` on a box with no trainer of
+    /// its own. The local scan finds nothing, but the host's run is in the
+    /// bus's world, so the probe taken from another view sends the rotation
+    /// to Training. A run whose step reading went stale does not.
+    #[test]
+    fn the_rotation_visits_training_for_a_run_seen_on_the_bus() {
+        use super::{next_rotation_mode_for, RotationActivity, ROTATION};
+        use tt_toplike_bus::{
+            EntityKey, HeaderKind, LocalView, Payload, Provenance, Record, Sample, Value, World,
+        };
+        const SEC: u64 = 1_000_000_000;
+        let mut world = World::new();
+        world.apply(&Record {
+            seq: 1,
+            t_mono_ns: 10 * SEC,
+            t_wall_ms: 1_790_000_000_000,
+            source: "test".into(),
+            payload: Payload::Sample(Sample {
+                entity: EntityKey::training_run("nano_gpt:4242@99"),
+                signal: crate::bus::signals::TRAIN_STEP.into(),
+                value: Value::U64(7),
+                prov: Provenance::Measured,
+            }),
+        });
+        let view = |now: u64| LocalView {
+            seq: world.seq(),
+            world: world.clone(),
+            now_mono_ns: now,
+            header_kind: HeaderKind::Live,
+        };
+        // The view before Training in the rotation.
+        let before = ROTATION[ROTATION.len() - 2];
+        assert_eq!(ROTATION[ROTATION.len() - 1], DisplayMode::Training);
+
+        let mut a = RotationActivity::default();
+        a.probe(before, &view(11 * SEC), || false);
+        assert!(!a.training, "the local scan found nothing");
+        assert_eq!(
+            next_rotation_mode_for(before, a.wants_training(), a.inference, true),
+            DisplayMode::Training,
+            "the host's run earns Training a visit"
+        );
+
+        // The same world a minute later: the run's step reading is stale.
+        a.probe(before, &view(71 * SEC), || false);
+        assert_ne!(
+            next_rotation_mode_for(before, a.wants_training(), a.inference, true),
+            DisplayMode::Training
+        );
+    }
+
+    /// A service that is `Down` is not something to look at: only a row that is
+    /// compiling, loading, ready or in alarm earns the Inference Monitor a visit.
+    #[test]
+    fn a_down_service_is_not_an_active_inference_workload() {
+        use super::inference_rows_active;
+        use crate::workload::inference_server::mock::mock_services;
+        use crate::workload::inference_server::Phase;
+        let template = mock_services(0.0).remove(0);
+        let with = |phases: &[Phase]| -> Vec<_> {
+            phases
+                .iter()
+                .map(|&p| {
+                    let mut s = template.clone();
+                    s.phase = p;
+                    s
+                })
+                .collect()
+        };
+        assert!(!inference_rows_active(&[]), "no service, nothing to see");
+        assert!(
+            !inference_rows_active(&with(&[Phase::Down])),
+            "one down service"
+        );
+        assert!(!inference_rows_active(&with(&[Phase::Down, Phase::Down])));
+        for live in [Phase::Compiling, Phase::Loading, Phase::Ready, Phase::Alarm] {
+            assert!(inference_rows_active(&with(&[live])), "{live:?}");
+            // One live service among dead ones is enough.
+            assert!(
+                inference_rows_active(&with(&[Phase::Down, live])),
+                "{live:?}"
+            );
+        }
+    }
+
+    /// Landing positions never wedge: from the workload views themselves (a run
+    /// that ended while it was on screen), from an unlisted view, and from the
+    /// view just before a skipped one.
+    #[test]
+    fn skipping_never_leaves_the_rotation_on_a_view_or_stuck() {
+        use super::{next_rotation_mode_for, rotation_visits};
+        for m in [
+            DisplayMode::Training,
+            DisplayMode::InferenceMonitor,
+            DisplayMode::Die3d,
+            DisplayMode::Grid,
+            DisplayMode::Defrag,
+            DisplayMode::HivemindSweeper,
+        ] {
+            let next = next_rotation_mode_for(m, false, false, true);
+            assert_ne!(next, m, "{m:?} must advance");
+            assert!(
+                rotation_visits(next, false, false, true),
+                "{m:?} -> {next:?}"
+            );
+            assert!(
+                ROTATION.contains(&next),
+                "{m:?} -> {next:?} is in the rotation"
+            );
+        }
+        // Every other view is always visited, whatever is going on.
+        for &m in ROTATION {
+            if !matches!(m, DisplayMode::Training | DisplayMode::InferenceMonitor) {
+                assert!(rotation_visits(m, false, false, true), "{m:?}");
+            }
+        }
+    }
+
+    /// Die 3D draws Blackhole boards only, so the rotation stops there only
+    /// when the box has one. On any other box it would show a hint line.
+    #[test]
+    fn the_rotation_visits_die3d_only_with_a_blackhole_chip() {
+        use super::next_rotation_mode_for;
+        let lap = |die3d: bool| -> Vec<DisplayMode> {
+            let mut seen = vec![DisplayMode::Insights];
+            let mut m = next_rotation_mode_for(DisplayMode::Insights, true, true, die3d);
+            while m != DisplayMode::Insights {
+                seen.push(m);
+                assert!(seen.len() <= ROTATION.len(), "a lap never ends: {seen:?}");
+                m = next_rotation_mode_for(m, true, true, die3d);
+            }
+            seen
+        };
+        assert!(lap(true).contains(&DisplayMode::Die3d));
+        assert!(!lap(false).contains(&DisplayMode::Die3d));
+        // It follows the Arcade and precedes Defrag.
+        assert_eq!(
+            next_rotation_mode_for(DisplayMode::Arcade, true, true, true),
+            DisplayMode::Die3d
+        );
+        assert_eq!(
+            next_rotation_mode_for(DisplayMode::Arcade, true, true, false),
+            DisplayMode::Defrag
+        );
     }
 
     /// A view missing from `ROTATION` must restart the cycle, never wedge.
@@ -8375,6 +11366,8 @@ mod display_mode_tests {
             (V::Arcade, DisplayMode::Arcade),
             (V::Hivemind, DisplayMode::HivemindSweeper),
             (V::Training, DisplayMode::Training),
+            (V::Die3d, DisplayMode::Die3d),
+            (V::Saga, DisplayMode::Saga),
         ];
         for (cli_mode, want) in pairs {
             assert_eq!(
@@ -9236,19 +12229,96 @@ mod host_default_screen_tests {
         }
     }
 
+    /// The planets' orbit radius is set once from the layout
+    /// (`starfield.rs`, where the planets are built) and never changes;
+    /// activity moves their speed and brightness. The text said the radius
+    /// tracked bandwidth.
+    #[test]
+    fn the_starfield_text_says_what_moves_the_planets() {
+        use super::{DisplayMode as M, OverlayPanel as P};
+        for panel in [P::Legend, P::Explain] {
+            let text = overlay_text(panel, M::Starfield).to_lowercase();
+            assert!(!text.contains("radius"), "Starfield {panel:?}:\n{text}");
+        }
+        let explain = overlay_text(P::Explain, M::Starfield);
+        let flat = explain
+            .replace('║', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(flat.contains("orbit faster and glow brighter"), "{flat}");
+    }
+
+    /// The ECC sentence (red for uncorrectable, the row absent at zero
+    /// because zero is healthy) was lost below row 44 once. It must be in
+    /// the Insights `!` text and inside the 20 content lines an 80 x 24
+    /// terminal shows (24 rows less two borders, the command bar and the
+    /// margin).
+    #[test]
+    fn the_insights_ecc_sentence_shows_on_a_24_row_terminal() {
+        use super::{overlay_lines, overlay_wrap_cols, DisplayMode, OverlayPanel};
+        let shown: String = overlay_lines(
+            OverlayPanel::Explain,
+            DisplayMode::Insights,
+            overlay_wrap_cols(80),
+        )
+        .iter()
+        .take(24 - 4)
+        .map(|l| {
+            l.spans
+                .iter()
+                .skip(1)
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+        for phrase in [
+            "zero is healthy",
+            "red once any is uncorrectable",
+            "corrupted data",
+        ] {
+            assert!(
+                shown.contains(phrase),
+                "{phrase:?} not in rows 1-20: {shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_card_lists_key_3() {
+        let help = overlay_text(super::OverlayPanel::Help, super::DisplayMode::Insights);
+        let row = help
+            .lines()
+            .find(|l| l.contains(crate::animation::DIE3D_DISPLAY_NAME))
+            .unwrap_or_else(|| panic!("no row names the view:\n{help}"));
+        assert!(row.contains(" 3 "), "{row}");
+    }
+
     /// A Help row's label must never run into its description: every row that
     /// has a description has at least one space between them.
     #[test]
     fn help_rows_keep_a_gap_between_label_and_description() {
         use super::{DisplayMode as M, OverlayPanel as P};
         let help = overlay_text(P::Help, M::Insights);
-        for needle in [
-            "/serve [bind:port] broadcast",
-            "/remote [n|box] discover",
-            "⟳ tt-smi -r a reset",
-            "--tt-smi-reset-behavior ignore",
+        for (label, desc) in [
+            ("/serve [bind:port]", "share"),
+            ("/remote [n|box]", "join"),
+            ("⟳ tt-smi -r", "a reset"),
+            ("--tt-smi-reset-behavior", "ignore"),
         ] {
-            assert!(help.contains(needle), "{needle:?} has no gap:\n{help}");
+            // The label, then at least one space, then its description.
+            let at = help
+                .find(label)
+                .unwrap_or_else(|| panic!("{label:?} missing:\n{help}"));
+            let rest = &help[at + label.len()..];
+            assert!(
+                rest.starts_with(' ') && rest.trim_start().starts_with(desc),
+                "{label:?} has no gap before {desc:?}:\n{help}"
+            );
         }
     }
 
@@ -9261,18 +12331,7 @@ mod host_default_screen_tests {
     #[test]
     fn explain_text_never_exceeds_its_wrap_budget() {
         use super::{line_cols, overlay_lines, wrap_overlay_text, DisplayMode, OverlayPanel};
-        for mode in [
-            DisplayMode::Insights,
-            DisplayMode::Grid,
-            DisplayMode::Starfield,
-            DisplayMode::MemoryCastle,
-            DisplayMode::MemoryFlow,
-            DisplayMode::Arcade,
-            DisplayMode::Defrag,
-            DisplayMode::InferenceMonitor,
-            DisplayMode::HivemindSweeper,
-            DisplayMode::Training,
-        ] {
+        for mode in ALL_MODES {
             for cols in [24usize, 40, 56] {
                 for line in overlay_lines(OverlayPanel::Explain, mode, cols) {
                     // +2 for the "║ " border prefix each line carries.
@@ -9295,6 +12354,162 @@ mod host_default_screen_tests {
             vec!["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"],
             "no word may be split or lost"
         );
+    }
+
+    /// Every mode, for the overlay size tests.
+    const ALL_MODES: [super::DisplayMode; 12] = super::ALL_DISPLAY_MODES;
+
+    /// The overlays do not scroll, so a panel taller than the terminal loses
+    /// its last lines. Every overlay for every mode must fit its row target
+    /// (Help 24 rows, Legend and Explain 30) at 80 columns, and no line may be
+    /// wider than the panel can draw there.
+    ///
+    /// Two checks, because the count alone could pass while the renderer cut
+    /// something: the content's line count against the target, then a real
+    /// render at 80 x target that must show the panel's last line and its
+    /// bottom border.
+    #[test]
+    fn every_overlay_fits_its_row_target_at_80_columns() {
+        use super::{
+            line_cols, overlay_lines, overlay_row_target, overlay_rows_needed, overlay_wrap_cols,
+            render_overlay_panel, OverlayPanel,
+        };
+        use ratatui::{backend::TestBackend, Terminal};
+        let width = 80u16;
+        let mut over = Vec::new();
+        for kind in [
+            OverlayPanel::Help,
+            OverlayPanel::Legend,
+            OverlayPanel::Explain,
+        ] {
+            let target = overlay_row_target(kind);
+            for mode in ALL_MODES {
+                let lines = overlay_lines(kind, mode, overlay_wrap_cols(width));
+                let needed = overlay_rows_needed(lines.len());
+                if needed > target {
+                    over.push(format!("{kind:?}/{mode:?} needs {needed} rows of {target}"));
+                    continue;
+                }
+                for l in &lines {
+                    let w = line_cols(l);
+                    // The panel is at most width - 2 columns wide.
+                    if w > width as usize - 2 {
+                        over.push(format!("{kind:?}/{mode:?} has a {w}-col line"));
+                    }
+                }
+                // The last line with text, as the renderer must paint it.
+                let last: String = lines
+                    .iter()
+                    .rev()
+                    .map(|l| {
+                        l.spans
+                            .iter()
+                            .map(|s| s.content.to_string())
+                            .collect::<String>()
+                    })
+                    .map(|s| s.trim_start_matches('║').trim().to_string())
+                    .find(|s| !s.is_empty())
+                    .unwrap_or_default();
+                let mut terminal =
+                    Terminal::new(TestBackend::new(width, target as u16)).expect("test terminal");
+                terminal
+                    .draw(|f| render_overlay_panel(f, kind, mode))
+                    .expect("draw");
+                let buf = terminal.backend().buffer().clone();
+                let painted: String = (0..buf.area.height)
+                    .map(|y| {
+                        (0..buf.area.width)
+                            .map(|x| buf[(x, y)].symbol().to_string())
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !painted.contains(&last) || !painted.contains('╚') {
+                    over.push(format!("{kind:?}/{mode:?}: last line {last:?} not drawn"));
+                }
+            }
+        }
+        assert!(
+            over.is_empty(),
+            "overlays over their target:\n{}",
+            over.join("\n")
+        );
+    }
+
+    /// Help, the Arcade legend and the Arcade explain text name the layout
+    /// keys `{ }`.
+    #[test]
+    fn the_overlays_name_the_layout_keys() {
+        use super::{overlay_lines, overlay_wrap_cols, DisplayMode, OverlayPanel};
+        for kind in [
+            OverlayPanel::Help,
+            OverlayPanel::Legend,
+            OverlayPanel::Explain,
+        ] {
+            let text: String = overlay_lines(kind, DisplayMode::Arcade, overlay_wrap_cols(80))
+                .iter()
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| s.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(text.contains("{ }"), "{kind:?}: {text}");
+            // The arcade carries no backdrop: no `c` key, and no backdrop
+            // line or key in its own legend and explain text. Help lists
+            // `w` with the global keys.
+            let words: Vec<&str> = text.split_whitespace().collect();
+            let pair = |a: &str, b: &str| words.windows(2).any(|p| p[0] == a && p[1] == b);
+            assert!(
+                !pair("c", "{") && !pair("c", "backdrop"),
+                "{kind:?}: c: {text}"
+            );
+            assert!(!text.contains("Backdrop:"), "{kind:?}: {text}");
+            if kind != OverlayPanel::Help {
+                assert!(!text.contains("backdrop"), "{kind:?}: {text}");
+            }
+        }
+    }
+
+    /// Prints each overlay's line count and the rows it needs at 80 columns.
+    /// For the copy review's inventory. Run with
+    /// `cargo test --lib --features tui overlay_inventory -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "prints a table for a person to read"]
+    fn overlay_inventory() {
+        use super::{overlay_lines, overlay_rows_needed, overlay_wrap_cols, OverlayPanel};
+        for kind in [
+            OverlayPanel::Help,
+            OverlayPanel::Legend,
+            OverlayPanel::Explain,
+        ] {
+            for mode in ALL_MODES {
+                let n = overlay_lines(kind, mode, overlay_wrap_cols(80)).len();
+                let widest = overlay_lines(kind, mode, overlay_wrap_cols(80))
+                    .iter()
+                    .map(super::line_cols)
+                    .max()
+                    .unwrap_or(0);
+                println!(
+                    "{kind:?}\t{mode:?}\t{n}\trows {}\twidest {widest}",
+                    overlay_rows_needed(n)
+                );
+                // With OVERLAY_TEXT set, the panel's text too.
+                if std::env::var_os("OVERLAY_TEXT").is_some() {
+                    for l in overlay_lines(kind, mode, overlay_wrap_cols(80)) {
+                        println!(
+                            "{}",
+                            l.spans
+                                .iter()
+                                .map(|s| s.content.as_ref())
+                                .collect::<String>()
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// A `Block` with a background style recolours cells but leaves their
@@ -9374,12 +12589,9 @@ mod host_default_screen_tests {
 
         // Deliberate column alignment must survive — `split_whitespace`
         // would collapse the double spaces that line these up.
-        let hero = [
-            "@  healthy   !  throttled/faulted",
-            "?  ARC stall  %  undervolt",
-        ];
-        let got = wrap_overlay_text(&hero, 56);
-        assert_eq!(got, vec![hero[0].to_string(), hero[1].to_string()]);
+        let defrag = ["░  empty     ▒  loading", "▓  resident  █  peak"];
+        let got = wrap_overlay_text(&defrag, 56);
+        assert_eq!(got, vec![defrag[0].to_string(), defrag[1].to_string()]);
 
         // An unindented list whose items are ordinary prose must not merge
         // either — the rule is "never join", not "never join glyphs".
@@ -9479,6 +12691,41 @@ mod host_default_screen_tests {
     /// — e.g. the `/serve` help line lost "(plaintext, trusted-LAN)". The panel
     /// now sizes itself to the widest content line. Render each overlay on a
     /// roomy terminal and assert the full text of the widest line survives.
+    /// `/help` in the Die 3D view lists every one of its commands, from the
+    /// view's own table, so a command cannot be added without being listed.
+    #[test]
+    fn help_in_the_die3d_view_lists_every_die3d_command() {
+        use super::{overlay_lines, DisplayMode, OverlayPanel};
+        let text = |mode| -> String {
+            overlay_lines(OverlayPanel::Help, mode, 56)
+                .iter()
+                .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        // Saga's help lists its keys, and every other help lists `S`.
+        let saga = text(DisplayMode::Saga);
+        assert!(saga.contains("why: what set each line off"), "{saga}");
+        assert!(text(DisplayMode::Insights).contains("Saga"));
+        let in_view = text(DisplayMode::Die3d);
+        for c in crate::animation::die3d::commands::COMMANDS {
+            let usage = crate::animation::die3d::commands::usage(c);
+            assert!(
+                in_view.contains(&usage),
+                "{usage} missing from /help in the die3d view"
+            );
+        }
+        assert!(in_view.contains("Space"), "the nudge key is listed");
+        // Elsewhere the panel stays short: one pointer line, not the list.
+        let elsewhere = text(DisplayMode::Insights);
+        let pointer = format!("{} settings", crate::animation::DIE3D_DISPLAY_NAME);
+        assert!(elsewhere.contains(&pointer), "{elsewhere}");
+        assert!(
+            !elsewhere.contains("/clouds [on|off]"),
+            "the list is the view's own"
+        );
+    }
+
     #[test]
     fn overlay_panel_does_not_truncate_wide_content() {
         use super::{line_cols, overlay_lines, render_overlay_panel, DisplayMode, OverlayPanel};
@@ -9656,6 +12903,10 @@ pub fn run_render_bench(
                     0,
                     false,
                     None,
+                    None,
+                    None,
+                    0.0,
+                    &grid_bus::ChipFlags::default(),
                     #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
                     &std::collections::HashMap::new(),
                 );
@@ -9811,6 +13062,26 @@ pub fn run_render_bench(
         arc.initialize_from_devices(backend.devices());
         arc.initialize_topology(backend);
         results.push(measure("arcade", 60, frames, || {
+            arc.update(backend);
+            term.draw(|f| ui_arcade(f, &arc, backend)).unwrap();
+        }));
+    }
+
+    // Arcade with every panel kind, Die 3D among them (the example layout in
+    // docs/arcade-layout.md). The Die 3D panel's clock runs at 60 frames a
+    // second, so its scene is rasterised every third frame, as on screen.
+    {
+        let mut term = mk_term();
+        let cfg = crate::animation::arcade_layout::ArcadeConfig {
+            rows: crate::animation::arcade_layout::example_rows(),
+        };
+        let mut arc = ArcadeVisualization::with_config(width as usize, height as usize, &cfg);
+        arc.initialize_from_devices(backend.devices());
+        arc.initialize_topology(backend);
+        let mut i = 0u32;
+        results.push(measure("arcade-panels", 60, frames, || {
+            i += 1;
+            arc.set_clock(f64::from(i) / 60.0);
             arc.update(backend);
             term.draw(|f| ui_arcade(f, &arc, backend)).unwrap();
         }));
@@ -10835,6 +14106,7 @@ mod reset_statusbar_tests {
                 hints.then_some("12.0fps"),
                 hints.then_some("⏷30"),
                 hints.then_some("◉ serving :8080 · 2 clients"),
+                None,
                 seg,
             )
         })
@@ -10993,5 +14265,648 @@ mod reset_statusbar_tests {
                 draw_bar(&b, w, None, hints);
             }
         }
+    }
+}
+
+/// Tests for the Insights layout helpers and the inset drawn beside the
+/// process table.
+#[cfg(test)]
+mod insights_inset_tests {
+    use super::*;
+    use crate::models::{Device, SmbusTelemetry, Telemetry};
+    use ratatui::backend::TestBackend;
+    use ratatui::buffer::Buffer;
+    use ratatui::widgets::Widget;
+    use ratatui::Terminal;
+    use std::hash::{Hash, Hasher};
+
+    /// A backend with fixed values. The mock backend draws OS-seeded noise,
+    /// which would change a pinned buffer hash from run to run.
+    struct Fixed {
+        devices: Vec<Device>,
+        telem: Vec<Telemetry>,
+        smbus: SmbusTelemetry,
+    }
+
+    impl Fixed {
+        /// `n` p300 boards at a steady 80 W.
+        fn new(n: usize) -> Fixed {
+            let devices: Vec<Device> = (0..n)
+                .map(|i| {
+                    Device::new(
+                        i,
+                        "p300".to_string(),
+                        format!("0000:{:02x}:00.0", i + 1),
+                        format!("(0,{i})"),
+                    )
+                })
+                .collect();
+            let telem = devices
+                .iter()
+                .map(|_| {
+                    let mut t = Telemetry::new();
+                    t.power = Some(80.0);
+                    t
+                })
+                .collect();
+            Fixed {
+                devices,
+                telem,
+                smbus: SmbusTelemetry::new(),
+            }
+        }
+    }
+
+    impl TelemetryBackend for Fixed {
+        fn init(&mut self) -> crate::error::BackendResult<()> {
+            Ok(())
+        }
+        fn update(&mut self) -> crate::error::BackendResult<()> {
+            Ok(())
+        }
+        fn devices(&self) -> &[Device] {
+            &self.devices
+        }
+        fn telemetry(&self, i: usize) -> Option<&Telemetry> {
+            self.telem.get(i)
+        }
+        fn smbus_telemetry(&self, _i: usize) -> Option<&SmbusTelemetry> {
+            Some(&self.smbus)
+        }
+        fn backend_info(&self) -> String {
+            "fixed".into()
+        }
+    }
+
+    /// A few fixed process rows.
+    fn proc_rows() -> Vec<crate::workload::ProcRow> {
+        (0..4)
+            .map(|i| crate::workload::ProcRow {
+                pid: 1000 + i,
+                name: format!("proc-{i}"),
+                cpu_pct: 10.0 * i as f32,
+                mem_bytes: 1 << 28,
+                inference: None,
+                active: false,
+                tt: None,
+            })
+            .collect()
+    }
+
+    /// Hash of every cell's symbol and style.
+    fn buffer_hash(buf: &Buffer) -> u64 {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for c in buf.content() {
+            c.symbol().hash(&mut h);
+            format!("{:?}{:?}{:?}", c.fg, c.bg, c.modifier).hash(&mut h);
+        }
+        h.finish()
+    }
+
+    /// Draw Insights for `n` devices into a `w` x `h` terminal, zoomed to
+    /// the page at `zoom`, with `inset` beside the process table when given.
+    fn draw(
+        w: u16,
+        h: u16,
+        n: usize,
+        zoom: Option<usize>,
+        inset: Option<&crate::animation::Die3dView>,
+    ) -> Buffer {
+        let backend = Fixed::new(n);
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let rows = proc_rows();
+        let cli = crate::cli::Cli::bench_default();
+        let particles = std::collections::HashMap::new();
+        let baseline = crate::animation::baseline::AdaptiveBaseline::new();
+        term.draw(|f| {
+            render_insights(
+                f,
+                &backend,
+                &rows,
+                0,
+                None,
+                &cli,
+                &particles,
+                &baseline,
+                0,
+                zoom,
+                12.5,
+                1 << 30,
+                1 << 33,
+                false,
+                None,
+                inset,
+                None,
+                0.0,
+                &grid_bus::ChipFlags::default(),
+                #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
+                &std::collections::HashMap::new(),
+            );
+        })
+        .unwrap();
+        term.backend().buffer().clone()
+    }
+
+    /// The inset rect for `n` devices at `w` x `h`, as the helper gives it.
+    fn rect_for(w: u16, h: u16, n: usize, zoom: Option<usize>) -> Option<Rect> {
+        let backend = Fixed::new(n);
+        let panel = insights_panel_devices(&backend.devices, zoom);
+        insights_inset_rect(Rect::new(0, 0, w, h), panel)
+    }
+
+    /// The row of `buf` at `y` as text, over columns `x0..x1`.
+    fn row_text(buf: &Buffer, y: u16, x0: u16, x1: u16) -> String {
+        (x0..x1).map(|x| buf[(x, y)].symbol()).collect()
+    }
+
+    #[test]
+    fn the_inset_rect_needs_122_by_16() {
+        let r = rect_for(150, 42, 2, None).expect("two chips at 150 x 42 fit an inset");
+        assert_eq!(r.width, 52);
+        assert_eq!(r.width, INSET_W);
+        assert_eq!(r.x + r.width, 150, "the rect sits on the right edge");
+        assert!(r.height >= INSET_MIN_H);
+        assert!(
+            rect_for(150, 42, 4, None).is_none(),
+            "four chips leave the table under 16 rows"
+        );
+        assert!(
+            rect_for(121, 42, 2, None).is_none(),
+            "121 columns leave the table under 70"
+        );
+        assert!(rect_for(122, 42, 2, None).is_some());
+        // Height: find the shortest screen that has an inset for two chips;
+        // the process area there is exactly 16 rows (after the status row).
+        let min_h = (10..=60u16)
+            .find(|&h| rect_for(150, h, 2, None).is_some())
+            .expect("some height has an inset");
+        let r = rect_for(150, min_h, 2, None).unwrap();
+        assert_eq!(r.height, 16, "the least inset height is 16");
+        assert!(
+            rect_for(150, min_h - 1, 2, None).is_none(),
+            "15 rows give no inset"
+        );
+    }
+
+    #[test]
+    fn the_process_table_keeps_70_columns() {
+        let backend = Fixed::new(2);
+        for w in 122..=200u16 {
+            let area = Rect::new(0, 0, w, 42);
+            let chunks = insights_chunks(area, &backend.devices);
+            let inset = insights_inset_rect(area, &backend.devices)
+                .unwrap_or_else(|| panic!("no inset at width {w}"));
+            assert!(
+                chunks[2].width - inset.width >= TABLE_MIN_W,
+                "table is {} wide at width {w}",
+                chunks[2].width - inset.width
+            );
+        }
+    }
+
+    /// Check one state: the inset's glyphs lie in the helper's rect, and the
+    /// process table's text does not.
+    fn check_rect_matches(w: u16, h: u16, n: usize, zoom: Option<usize>) {
+        let backend = Fixed::new(n);
+        let r = rect_for(w, h, n, zoom).expect("this state has an inset");
+        let mut view = crate::animation::Die3dView::inset(r.width as usize, r.height as usize);
+        view.update(&backend, None, 0.0);
+        let with = draw(w, h, n, zoom, Some(&view));
+        let without = draw(w, h, n, zoom, None);
+
+        // The cards and header above the process panel are unchanged.
+        for y in 0..r.y {
+            assert_eq!(
+                row_text(&with, y, 0, w),
+                row_text(&without, y, 0, w),
+                "row {y} above the panel"
+            );
+        }
+        // Inside the rect, every cell is what the inset's lines draw there.
+        let mut expect = Buffer::empty(Rect::new(0, 0, r.width, r.height));
+        Paragraph::new(view.render(None, 0.0)).render(expect.area, &mut expect);
+        let mut any_glyph = false;
+        for dy in 0..r.height {
+            for dx in 0..r.width {
+                let got = with[(r.x + dx, r.y + dy)].symbol();
+                assert_eq!(got, expect[(dx, dy)].symbol(), "inset cell ({dx},{dy})");
+                any_glyph |= got.chars().any(|c| ('\u{2800}'..='\u{28FF}').contains(&c));
+            }
+        }
+        assert!(any_glyph, "the inset drew a braille scene");
+        // The process table is left of the rect and its text stays there.
+        let mut found = false;
+        for y in r.y..r.y + r.height {
+            let left = row_text(&with, y, 0, r.x);
+            let right = row_text(&with, y, r.x, w);
+            found |= left.contains("proc-0");
+            assert!(!right.contains("proc-") && !right.contains("Processes"));
+        }
+        assert!(found, "process rows draw left of the rect");
+    }
+
+    /// The inset's width and minimum height are the size a two-die board
+    /// needs for its scene: the rows above the caption hold braille glyphs,
+    /// and the text summary does not take their place.
+    #[test]
+    fn the_inset_size_draws_a_two_die_board_scene() {
+        let backend = Fixed::new(2);
+        let mut view = crate::animation::Die3dView::inset(INSET_W as usize, INSET_MIN_H as usize);
+        view.update(&backend, None, 0.0);
+        let rows = view.render(None, 0.0);
+        assert_eq!(rows.len(), INSET_MIN_H as usize);
+        let scene_rows = &rows[..rows.len() - 1];
+        let braille = scene_rows
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .flat_map(|span| span.content.chars())
+            .filter(|c| ('\u{2800}'..='\u{28FF}').contains(c))
+            .count();
+        assert!(braille > 0, "the scene rows hold braille glyphs");
+    }
+
+    #[test]
+    fn the_rect_matches_the_renderer() {
+        check_rect_matches(150, 42, 2, None);
+        check_rect_matches(122, 42, 2, None);
+        check_rect_matches(200, 50, 1, None);
+    }
+
+    #[test]
+    fn a_zoomed_slice_uses_the_slice_for_the_rect() {
+        // 40 devices zoomed to the last page of 2: the card height comes from
+        // the slice of devices shown.
+        assert!(rect_for(150, 42, 40, Some(38)).is_some());
+        check_rect_matches(150, 42, 40, Some(38));
+        let backend = Fixed::new(40);
+        assert_eq!(insights_panel_devices(&backend.devices, Some(38)).len(), 2);
+        assert_eq!(insights_panel_devices(&backend.devices, Some(99)).len(), 0);
+        assert_eq!(insights_panel_devices(&backend.devices, None).len(), 40);
+    }
+
+    #[test]
+    fn the_fleet_view_gets_the_rect_the_renderer_uses() {
+        // 40 devices unzoomed draw the heat map, which is short, so the
+        // panel has room and the renderer must use the helper's rect.
+        assert!(rect_for(150, 42, 40, None).is_some());
+        check_rect_matches(150, 42, 40, None);
+        // Where the helper says there is no room, a view changes nothing.
+        assert!(rect_for(150, 42, 4, None).is_none());
+        let view = crate::animation::Die3dView::inset(52, 16);
+        assert_eq!(
+            buffer_hash(&draw(150, 42, 4, None, Some(&view))),
+            buffer_hash(&draw(150, 42, 4, None, None))
+        );
+    }
+
+    /// Buffer hashes taken on the code before `render_insights` was changed.
+    ///
+    /// The hashes were taken in a truecolor terminal, and colours are written
+    /// differently without truecolor (`colors::rgb`), so the test says so
+    /// instead of inheriting `COLORTERM` from whoever runs it. Without this it
+    /// passed on a machine with `COLORTERM=truecolor` and failed on CI.
+    #[test]
+    fn no_inset_view_means_the_old_layout() {
+        colors::with_truecolor(true, || {
+            assert_eq!(
+                buffer_hash(&draw(150, 42, 2, None, None)),
+                363425789546536760
+            );
+            assert_eq!(
+                buffer_hash(&draw(120, 40, 4, None, None)),
+                12509307249848498318
+            );
+        });
+    }
+
+    /// Chips of a Wormhole board (no Blackhole among them).
+    fn wormhole_devices(n: usize) -> Vec<Device> {
+        (0..n)
+            .map(|i| {
+                Device::new(
+                    i,
+                    "n150".to_string(),
+                    format!("0000:{:02x}:00.0", i + 1),
+                    format!("(0,{i})"),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_inset_is_created_when_there_is_room_and_a_blackhole_chip() {
+        let backend = Fixed::new(2);
+        let rect = inset_rect_for(150, 42, &backend.devices, None);
+        assert!(rect.is_some());
+        let mut inset = None;
+        assert!(sync_inset(
+            &mut inset,
+            rect,
+            has_blackhole_chip(&backend.devices)
+        ));
+        let r = rect.unwrap();
+        assert_eq!(
+            inset.as_ref().expect("made").size(),
+            (r.width as usize, r.height as usize)
+        );
+        // Not made where there is no room.
+        let mut none = None;
+        let small = inset_rect_for(100, 42, &backend.devices, None);
+        assert!(!sync_inset(&mut none, small, true));
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn a_resize_below_the_threshold_hides_it_and_keeps_the_view() {
+        let mut backend = Fixed::new(2);
+        backend.telem[0].power = Some(120.0);
+        let blackhole = has_blackhole_chip(&backend.devices);
+        let mut inset = None;
+        let rect = inset_rect_for(150, 42, &backend.devices, None);
+        assert!(sync_inset(&mut inset, rect, blackhole));
+        // Feed it so it has load calibration and a camera worth keeping.
+        for k in 0..20 {
+            inset
+                .as_mut()
+                .unwrap()
+                .update(&backend, None, k as f64 * 0.1);
+        }
+        let before = inset.as_ref().unwrap().kept_state();
+        // Too narrow: hidden (not updated) but kept.
+        let small = inset_rect_for(100, 42, &backend.devices, None);
+        assert!(small.is_none());
+        assert!(!sync_inset(&mut inset, small, blackhole));
+        resize_inset(&mut inset, small);
+        assert!(inset.is_some(), "the view survives being hidden");
+        // Back above the threshold, at another size: resized, state intact.
+        let big = inset_rect_for(160, 44, &backend.devices, None);
+        assert!(sync_inset(&mut inset, big, blackhole));
+        let view = inset.as_ref().unwrap();
+        let b = big.unwrap();
+        assert_eq!(view.size(), (b.width as usize, b.height as usize));
+        assert_eq!(view.kept_state(), before);
+    }
+
+    #[test]
+    fn leaving_insights_drops_the_inset() {
+        assert!(leaves_insights(DisplayMode::Insights, DisplayMode::Grid));
+        assert!(leaves_insights(DisplayMode::Insights, DisplayMode::Die3d));
+        assert!(!leaves_insights(DisplayMode::Grid, DisplayMode::Insights));
+        assert!(!leaves_insights(
+            DisplayMode::Insights,
+            DisplayMode::Insights
+        ));
+        // The loop's hook, as written there.
+        let mut inset = Some(crate::animation::Die3dView::inset(52, 20));
+        if leaves_insights(DisplayMode::Insights, DisplayMode::Grid) {
+            inset = None;
+        }
+        assert!(inset.is_none());
+    }
+
+    #[test]
+    fn no_blackhole_chip_means_no_inset() {
+        let devices = wormhole_devices(2);
+        assert!(!has_blackhole_chip(&devices));
+        assert!(has_blackhole_chip(&Fixed::new(1).devices));
+        let rect = inset_rect_for(150, 42, &devices, None);
+        assert!(rect.is_some(), "there is room; only the chip is missing");
+        let mut none = None;
+        assert!(!sync_inset(&mut none, rect, false));
+        assert!(none.is_none());
+        // An existing view is dropped when the chips go (backend swap).
+        let mut inset = Some(crate::animation::Die3dView::inset(52, 20));
+        assert!(!sync_inset(&mut inset, rect, false));
+        assert!(inset.is_none());
+    }
+}
+
+/// The bus wiring that lives in this module: the view names and the
+/// status-bar hint.
+#[cfg(test)]
+mod bus_wiring_tests {
+    use super::*;
+    use crate::backend::mock::MockBackend;
+    use crate::bus::tui_bus::{Attach, TuiBus, TuiBusOptions};
+    use ratatui::backend::TestBackend;
+
+    /// Every mode has its stable lowercase name, and no two share one.
+    #[test]
+    fn every_mode_has_a_stable_view_name() {
+        let all = [
+            (DisplayMode::Insights, "insights"),
+            (DisplayMode::Grid, "grid"),
+            (DisplayMode::Starfield, "starfield"),
+            (DisplayMode::MemoryCastle, "castle"),
+            (DisplayMode::MemoryFlow, "flow"),
+            (DisplayMode::Arcade, "arcade"),
+            (DisplayMode::Defrag, "defrag"),
+            (DisplayMode::InferenceMonitor, "inference"),
+            (DisplayMode::HivemindSweeper, "hivemind"),
+            (DisplayMode::Training, "training"),
+            (DisplayMode::Die3d, "die3d"),
+            (DisplayMode::Saga, "saga"),
+        ];
+        for (m, name) in all {
+            assert_eq!(view_name(m), name);
+        }
+        // The `v` cycle visits only modes named above.
+        let mut m = DisplayMode::Insights;
+        for _ in 0..20 {
+            assert!(all.iter().any(|(k, _)| *k == m));
+            m = next_display_mode(m);
+        }
+    }
+
+    fn mock() -> MockBackend {
+        let mut b = MockBackend::new(2);
+        b.init().unwrap();
+        b.update().unwrap();
+        b
+    }
+
+    fn bar(b: &MockBackend, bus_hint: Option<&str>) -> String {
+        let mut term = Terminal::new(TestBackend::new(400, 3)).unwrap();
+        term.draw(|f| {
+            render_global_statusbar(f, b, DisplayMode::Grid, None, None, None, bus_hint, None)
+        })
+        .unwrap();
+        let buf = term.backend().buffer();
+        (0..buf.area.width).map(|x| buf[(x, 2)].symbol()).collect()
+    }
+
+    /// A chip whose ARC heartbeat reads 0 shows `ARC!` after its readings; a
+    /// healthy chip, and one that reports no heartbeat, show nothing.
+    #[test]
+    fn the_status_bar_flags_a_stalled_arc() {
+        let mut b = mock();
+        assert!(!bar(&b, None).contains("ARC!"));
+        b.set_heartbeat_for_test(1, Some(0));
+        let stalled = bar(&b, None);
+        assert!(stalled.contains("ARC!"), "{stalled}");
+        // Only the chip that stalled: one marker, after the second chip.
+        assert_eq!(stalled.matches("ARC!").count(), 1, "{stalled}");
+        b.set_heartbeat_for_test(1, None);
+        assert!(
+            !bar(&b, None).contains("ARC!"),
+            "no heartbeat is not a stall"
+        );
+    }
+
+    /// Past four chips the bar shows one average column, and the stalls are
+    /// counted after it.
+    #[test]
+    fn the_averaged_status_bar_counts_stalled_arcs() {
+        let mut b = MockBackend::new(6);
+        b.init().unwrap();
+        b.update().unwrap();
+        b.set_heartbeat_for_test(0, Some(0));
+        b.set_heartbeat_for_test(3, Some(0));
+        let s = bar(&b, None);
+        assert!(s.contains("ARC!×2"), "{s}");
+    }
+
+    /// A local bus adds nothing to the status bar, so a default run's bar is
+    /// unchanged; an attached one names its socket.
+    #[cfg(unix)]
+    #[test]
+    fn the_status_bar_names_an_attached_bus_and_not_a_local_one() {
+        let b = mock();
+        let opts = TuiBusOptions::from_cli(
+            &<Cli as clap::Parser>::try_parse_from(["t", "--mock", "2"]).unwrap(),
+            BackendType::Mock,
+            "Mock",
+        );
+        let local = TuiBus::start(&opts, &b).unwrap();
+        assert_eq!(bus_status_hint(&local), None);
+        assert_eq!(bar(&b, bus_status_hint(&local).as_deref()), bar(&b, None));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let sock = tmp.path().join("run").join("bus.sock");
+        let _server =
+            tt_toplike_bus::SocketServer::spawn(local.host().unwrap().bus().clone(), &sock)
+                .unwrap();
+        let attached = TuiBus::start(
+            &TuiBusOptions {
+                attach: Attach::Required(sock.clone()),
+                ..opts
+            },
+            &b,
+        )
+        .unwrap();
+        let hint = bus_status_hint(&attached).unwrap();
+        // The served bus is a mock run, so the attached label says so.
+        assert_eq!(hint, format!("bus: {} (mock)", sock.display()));
+        assert!(bar(&b, Some(&hint)).contains(&hint));
+    }
+}
+
+#[cfg(test)]
+mod season_tag_tests {
+    /// The TUI writes the saga's season into its bus header before it opens
+    /// the bus, and the headless host does too (final review finding I4).
+    /// `run_tui` needs a terminal, so the wiring is pinned by its source,
+    /// as `config_read_tests` pins the config read; the tag itself is
+    /// tested in `crate::saga::config` and end to end in the driver tests.
+    #[test]
+    fn both_hosts_record_the_season_before_the_bus_opens() {
+        let src = include_str!("mod.rs");
+        let run_tui = src.find("\npub fn run_tui(").expect("run_tui");
+        let run_app = src.find("\nfn run_app(").expect("run_app");
+        let body = &src[run_tui..run_app];
+        let tag = body
+            .find("write_season_tag(\n        &mut bus_opts.bus.header_tags,")
+            .expect("run_tui writes the season tag into its bus options");
+        let open = body
+            .find("start_bus_after_panic_hook(&bus_opts")
+            .expect("run_tui opens its bus");
+        assert!(tag < open, "the tag is written before the bus opens");
+
+        let bin = include_str!("../../bin/tui.rs");
+        let main = bin
+            .find("\nfn run_headless_main(")
+            .expect("run_headless_main");
+        let body = &bin[main..];
+        let tag = body
+            .find("write_season_tag(")
+            .expect("the headless host writes the season tag");
+        // Both the replay and the live host take their bus config after it.
+        for user in ["let bus = bus_for(false);", "let bus = bus_for(synthetic);"] {
+            let at = body.find(user).expect(user);
+            assert!(tag < at, "{user} comes after the tag is written");
+        }
+    }
+}
+
+#[cfg(test)]
+mod config_read_tests {
+    /// The config file is read in `run_tui` before the terminal enters raw
+    /// mode, and `run_app` (which runs in raw mode) reads no config file.
+    #[test]
+    fn the_config_is_read_before_raw_mode() {
+        let src = include_str!("mod.rs");
+        let run_tui = src.find("\npub fn run_tui(").expect("run_tui");
+        let run_app = src.find("\nfn run_app(").expect("run_app");
+        let read = "loaded_config = crate::config::load_config();";
+        let raw = "enable_raw_mode().map_err(";
+        let read_at = src[run_tui..run_app]
+            .find(read)
+            .expect("run_tui reads the config");
+        let raw_at = src[run_tui..run_app]
+            .find(raw)
+            .expect("run_tui enables raw mode");
+        assert!(read_at < raw_at, "the config is read before raw mode");
+        // The test module (which quotes these names) comes after `run_app`.
+        let app_end = src[run_app..]
+            .find("\n}\n")
+            .map_or(src.len(), |i| run_app + i);
+        assert!(
+            !src[run_app..app_end].contains("config::load_config"),
+            "run_app reads no config file"
+        );
+    }
+
+    /// The plugin host is built and `--viz` resolved in `run_tui`, before
+    /// the backend, the bus, the saga and raw mode start, so an unknown id
+    /// exits on an untouched terminal with nothing begun; `run_app` builds
+    /// no host.
+    #[test]
+    fn plugins_are_resolved_before_anything_starts() {
+        let src = include_str!("mod.rs");
+        let run_tui = src.find("\npub fn run_tui(").expect("run_tui");
+        let run_app = src.find("\nfn run_app(").expect("run_app");
+        let body = &src[run_tui..run_app];
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("run_tui has no `{needle}`"))
+        };
+        let host = at("viz_host::VizHost::new(");
+        let start = at("viz.start_mode(cli)");
+        assert!(host < start, "the host exists before --viz is resolved");
+        // Stderr logging stays on until after the backend is made, as it
+        // always was, so a backend start-up warning (no hardware, using the
+        // mock) still reaches the terminal; the plugin scan logs before it.
+        let quiet = at("crate::logging::disable_stderr();");
+        assert!(
+            at("factory::create_backend(") < quiet,
+            "disable_stderr stays after create_backend"
+        );
+        assert!(host < quiet, "the plugin scan logs to stderr");
+        for later in [
+            "splash::start()",
+            "factory::create_backend(",
+            "start_bus_after_panic_hook(&",
+            "crate::saga::start_for_tui(",
+            "enable_raw_mode().map_err(",
+        ] {
+            assert!(start < at(later), "--viz is resolved before `{later}`");
+        }
+        let app_end = src[run_app..]
+            .find("\n}\n")
+            .map_or(src.len(), |i| run_app + i);
+        assert!(
+            !src[run_app..app_end].contains("VizHost::new"),
+            "run_app builds no plugin host"
+        );
     }
 }

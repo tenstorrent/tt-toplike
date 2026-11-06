@@ -398,6 +398,7 @@ impl LivenessProber {
         let _ = std::thread::Builder::new()
             .name("tt-liveness-probe".into())
             .spawn(move || {
+                crate::workload::background::lower_priority();
                 let mut detected: Vec<DetectedRuntime> = Vec::new();
                 let mut last_probe: Option<Instant> = None;
                 loop {

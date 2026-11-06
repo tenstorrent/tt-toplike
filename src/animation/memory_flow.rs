@@ -201,6 +201,15 @@ pub struct MemoryFlowVis {
     /// Arcade sets this `false` so the composite view owns a single shared
     /// telemetry strip instead of each embedded section printing W/°C.
     chrome: bool,
+
+    // ── Signal bus (see `memory_flow_bus`) ────────────────────────────────
+    /// What the bus puts on the view, as of the last `set_bus`. Empty
+    /// without a bus, and then the view draws what it drew before the bus.
+    bus_fx: crate::animation::memory_flow_bus::MemoryFlowFx,
+    /// What the view remembers between two `set_bus` calls.
+    bus_state: crate::animation::memory_flow_bus::MemoryFlowBusState,
+    /// The bus time of the last `set_bus`: the time the frames are drawn at.
+    bus_now: u64,
 }
 
 impl MemoryFlowVis {
@@ -223,7 +232,58 @@ impl MemoryFlowVis {
             grid_rows: 0,
             grid_cols: 0,
             chrome: true,
+            bus_fx: Default::default(),
+            bus_state: Default::default(),
+            bus_now: 0,
         }
+    }
+
+    /// Hand the view the signal bus's world (`TuiBus::read`), once per
+    /// update. It works out what the bus puts on the view (see
+    /// `memory_flow_bus`): lane states and heat from the DRAM channels, the
+    /// weight stream of a loading model, request pulses, ECC flashes, the
+    /// model row, reset flashes and sparks. Only the chips of `devices` (the
+    /// backend's) are drawn on. With `None` the view draws what it drew
+    /// before the bus, and the next world is read as a first sight.
+    pub fn set_bus(
+        &mut self,
+        world: Option<&dyn tt_toplike_bus::WorldRead>,
+        devices: &[crate::models::Device],
+    ) {
+        use crate::animation::memory_flow_bus::MemoryFlowFx;
+        use crate::animation::starfield_bus::FieldChip;
+        match world {
+            Some(w) => {
+                let chips = FieldChip::of(devices);
+                let now = w.now_mono_ns();
+                self.bus_fx =
+                    MemoryFlowFx::from_world(w, &chips, devices.len(), now, &mut self.bus_state);
+                self.bus_now = now;
+            }
+            None => {
+                self.bus_fx = MemoryFlowFx::default();
+                self.bus_state = Default::default();
+            }
+        }
+    }
+
+    /// What the bus puts on the view, as of the last `set_bus`.
+    #[cfg(test)]
+    pub(crate) fn bus_fx(&self) -> &crate::animation::memory_flow_bus::MemoryFlowFx {
+        &self.bus_fx
+    }
+
+    /// `status` (one entry per channel) with each channel the bus has a
+    /// state for replaced by it. Unchanged with no bus.
+    fn with_bus_status(&self, mut status: Vec<u8>) -> Vec<u8> {
+        if !self.bus_fx.lanes.is_empty() {
+            for (ch, s) in status.iter_mut().enumerate() {
+                if let Some(b) = self.bus_fx.lane_status(ch) {
+                    *s = b;
+                }
+            }
+        }
+        status
     }
 
     /// Toggle the power/temp fields in the fleet stats line.  `true` = the
@@ -449,6 +509,17 @@ impl MemoryFlowVis {
         lines.push(self.render_ddr_channels_bottom_agg(ddr_channels, agg_telem_power, smbus));
         lines.push(self.render_stats_fleet(devices, total_power, total_current, avg_temp));
 
+        // The bus effects (see `memory_flow_bus`). With no bus this does
+        // nothing.
+        if !self.bus_fx.is_empty() {
+            let stage = crate::animation::memory_flow_bus::FlowStage {
+                width: self.width,
+                channels: ddr_channels,
+                channel_width: (self.width.saturating_sub(15)) / ddr_channels.max(1),
+            };
+            crate::animation::memory_flow_bus::draw(&self.bus_fx, self.bus_now, &stage, &mut lines);
+        }
+
         lines
     }
 
@@ -538,7 +609,7 @@ impl MemoryFlowVis {
         ));
 
         let channel_width = (self.width.saturating_sub(15)) / num_channels.max(1);
-        let channel_status = Self::channel_status(smbus, num_channels);
+        let channel_status = self.with_bus_status(Self::channel_status(smbus, num_channels));
 
         for ch in 0..num_channels {
             let status = channel_status.get(ch).copied().unwrap_or(0);
@@ -557,7 +628,7 @@ impl MemoryFlowVis {
                     };
                     spans.push(Span::styled(
                         "═".repeat(filled),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                        Style::default().bg(colors::canvas_bg()).fg(color),
                     ));
                     spans.push(Span::styled(
                         "·".repeat(empty),
@@ -627,7 +698,15 @@ impl MemoryFlowVis {
                 ));
             } else {
                 // Draw core background heat map
-                let in_core_area = x_norm > 0.1 && x_norm < 0.9 && y_norm > 0.2 && y_norm < 0.8;
+                // The grid is sized by the first `update`; a flow drawn
+                // before one (the arcade right after a layout switch) has
+                // no grid yet and draws no heat map.
+                let in_core_area = self.grid_cols > 0
+                    && self.grid_rows > 0
+                    && x_norm > 0.1
+                    && x_norm < 0.9
+                    && y_norm > 0.2
+                    && y_norm < 0.8;
 
                 if in_core_area {
                     // Map position to core grid
@@ -666,7 +745,7 @@ impl MemoryFlowVis {
 
                     spans.push(Span::styled(
                         core_char.to_string(),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                        Style::default().bg(colors::canvas_bg()).fg(color),
                     ));
                 } else {
                     // Outside core area - empty space
@@ -698,7 +777,7 @@ impl MemoryFlowVis {
         ));
 
         let channel_width = (self.width.saturating_sub(15)) / num_channels.max(1);
-        let channel_status = Self::channel_status(smbus, num_channels);
+        let channel_status = self.with_bus_status(Self::channel_status(smbus, num_channels));
 
         for ch in 0..num_channels {
             let status = channel_status.get(ch).copied().unwrap_or(0);
@@ -717,7 +796,7 @@ impl MemoryFlowVis {
                     };
                     spans.push(Span::styled(
                         "═".repeat(filled),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                        Style::default().bg(colors::canvas_bg()).fg(color),
                     ));
                     spans.push(Span::styled(
                         "·".repeat(empty),

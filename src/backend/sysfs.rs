@@ -1483,15 +1483,17 @@ mod tests {
     /// Write the twelve `pcie_perf_counters/` files tt-kmd exposes, with all the
     /// traffic parked on one counter per direction so the folded totals are
     /// exactly `words_in` / `words_out` (see `pcie_counters::IN_COUNTERS`).
+    /// Into the chip is `slv_rd_data_word_sent0`, out of it is
+    /// `slv_posted_wr_data_word_received0`.
     fn write_pcie_counters(dir: &Path, words_in: u64, words_out: u64) {
         for (f, v) in [
-            ("slv_posted_wr_data_word_received0", words_in),
+            ("slv_posted_wr_data_word_received0", words_out),
             ("slv_posted_wr_data_word_received1", 0),
             ("slv_nonposted_wr_data_word_received0", 0),
             ("slv_nonposted_wr_data_word_received1", 0),
             ("mst_rd_data_word_received0", 0),
             ("mst_rd_data_word_received1", 0),
-            ("slv_rd_data_word_sent0", words_out),
+            ("slv_rd_data_word_sent0", words_in),
             ("slv_rd_data_word_sent1", 0),
             ("mst_posted_wr_data_word_sent0", 0),
             ("mst_posted_wr_data_word_sent1", 0),
@@ -1540,13 +1542,13 @@ mod tests {
             "first sample primes only"
         );
 
-        // Tick 2, exactly 1 s later: +250 words in, +500 words out. At 4 bytes
-        // per 32-bit data word that's 1000 B/s down and 2000 B/s up.
+        // Tick 2, exactly 1 s later: +250 words in, +500 words out. A counter
+        // word is a 64-byte NoC flit, so that's 16000 B/s down and 32000 B/s up.
         write_pcie_counters(&counters, 1_250, 2_500);
         backend.update_at(t0 + sec).unwrap();
         let bw = backend.pcie_bandwidth(0).expect("two samples ⇒ a rate");
-        assert_eq!(bw.rx_bytes_per_sec, 1000.0);
-        assert_eq!(bw.tx_bytes_per_sec, 2000.0);
+        assert_eq!(bw.rx_bytes_per_sec, 16_000.0);
+        assert_eq!(bw.tx_bytes_per_sec, 32_000.0);
 
         // The counter directory disappears mid-run (tt-kmd unloaded, device
         // reset, node torn down). The cached rate must go with it.
@@ -1573,8 +1575,8 @@ mod tests {
         write_pcie_counters(&counters, 101_500, 203_000);
         backend.update_at(t0 + 4 * sec).unwrap();
         let bw = backend.pcie_bandwidth(0).expect("post-recovery rate");
-        assert_eq!(bw.rx_bytes_per_sec, 1000.0, "+250 words over 1 s");
-        assert_eq!(bw.tx_bytes_per_sec, 2000.0, "+500 words over 1 s");
+        assert_eq!(bw.rx_bytes_per_sec, 16_000.0, "+250 words over 1 s");
+        assert_eq!(bw.tx_bytes_per_sec, 32_000.0, "+500 words over 1 s");
     }
 
     /// Create a fake hwmon dir whose `device` symlink resolves to `bus_id`,

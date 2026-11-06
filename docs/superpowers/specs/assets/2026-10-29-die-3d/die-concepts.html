@@ -1,0 +1,188 @@
+<h2>Looking into the chip while it thinks</h2>
+<p class="subtitle">Three ways to show the physical device lighting up and connecting. All three are animated. Tile positions and routes are illustrative, not read from a real card. Which one is closest to what you picture?</p>
+
+<div class="cards">
+  <div class="card" data-choice="a-xray" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#07191a"><canvas id="ca" width="420" height="300" style="width:100%"></canvas></div>
+    <div class="card-body">
+      <h3>A. X-ray of the die</h3>
+      <p>The die as it sits in silicon: GDDR6 on the two long edges, Ethernet on top, Tensix in the middle. Weights stream in from DRAM (left), cross the mesh as dots on the NoC wires, and each Tensix tile lights as it computes. Purple wires are NoC0, cyan wires are NoC1.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="b-fold" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#07191a"><canvas id="cb" width="420" height="300" style="width:100%"></canvas></div>
+    <div class="card-body">
+      <h3>B. Physical and logical, side by side</h3>
+      <p>The same activity drawn twice. Left is the die. Right is the NoC's own grid (the folded torus). One straight route on the right is a zig-zag on the left, so you can see why "1 hop" is about 2 cells of silicon and where the fold seam is.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="c-card" onclick="toggleSelect(this)">
+    <div class="card-image" style="background:#07191a"><canvas id="cc" width="420" height="300" style="width:100%"></canvas></div>
+    <div class="card-body">
+      <h3>C. Card cutaway</h3>
+      <p>Zoomed out one level: the whole board. GDDR6 chips top and bottom, Ethernet ports left, PCIe and power right, the die in the middle. Data paths glow end to end: host over PCIe, into the die, out to GDDR. The die itself stays small and heat-coloured.</p>
+    </div>
+  </div>
+</div>
+
+<div class="section">
+  <h3>What each view needs from the hardware</h3>
+  <ul>
+    <li><b>A and B</b> need per-tile traffic. Today we only have chip-wide numbers, so these animate from chip activity until we read per-tile NoC counters. That is the opt-in exalens mode from step 4.</li>
+    <li><b>C</b> works with what we already read: PCIe bandwidth, GDDR activity, Ethernet link state, power. It is the only one that can be fully real in default mode.</li>
+    <li>The tile layout and the die-to-NoC coordinate fold are fixed per architecture, so the layout needs no device access.</li>
+  </ul>
+</div>
+
+<script>
+(function () {
+  const COLS = 17, ROWS = 12;
+  const C = { bg:'#07191a', tile:'#12312f', dram:'#6FABA0', eth:'#8f95e0', mgmt:'#7a7f9a',
+              hot:'#FA512E', warm:'#F6BC42', n0:'#b07be0', n1:'#74C5DF', line:'#1c4442' };
+
+  // die cell -> kind. Illustrative: DRAM on the two long edges, Ethernet on top, management on the bottom row.
+  function kind(x, y) {
+    if (x === 0 || x === COLS - 1) return (y >= 1 && y <= ROWS - 2) ? 'dram' : 'mgmt';
+    if (y === 0) return 'eth';
+    if (y === ROWS - 1) return 'mgmt';
+    return 'tensix';
+  }
+  // die index -> noc0 index: 0,1,N-1,2,N-2,... odd ascend, even fold back down
+  function fold(d, n) { return d === 0 ? 0 : (d % 2 ? (d + 1) / 2 : n - d / 2); }
+
+  function mix(a, b, t) {
+    const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+    const r = (v, s) => Math.round(((pa >> s) & 255) * (1 - t) + ((pb >> s) & 255) * t);
+    return 'rgb(' + r(0, 16) + ',' + r(0, 8) + ',' + r(0, 0) + ')';
+  }
+  function heatColor(h) { return h < .5 ? mix(C.tile, C.warm, h * 2) : mix(C.warm, C.hot, (h - .5) * 2); }
+
+  // activity wave: weights stream left->right, a compute front sweeps the mesh and loops
+  function heat(x, y, t) {
+    const front = ((t * 0.9) % (COLS + 6)) - 3;
+    const d = Math.abs(x - front);
+    const wave = Math.max(0, 1 - d / 4);
+    const shimmer = 0.15 * (0.5 + 0.5 * Math.sin(t * 5 + x * 1.7 + y * 2.3));
+    return Math.min(1, wave * 0.9 + shimmer * wave + 0.06);
+  }
+
+  function setup(id) {
+    const cv = document.getElementById(id), g = cv.getContext('2d');
+    return { cv, g, w: cv.width, h: cv.height };
+  }
+  const label = (g, s, x, y, col) => { g.fillStyle = col || '#7fa9a6'; g.font = '11px monospace'; g.fillText(s, x, y); };
+
+  // ---------- A: die x-ray ----------
+  const A = setup('ca');
+  const cs = 22, ox = (A.w - COLS * cs) / 2, oy = 20;
+  function drawDie(g, ox, oy, cs, t, opts) {
+    for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) {
+      const k = kind(x, y), px = ox + x * cs, py = oy + y * cs;
+      let col = C.tile;
+      if (k === 'tensix') col = heatColor(heat(x, y, t));
+      else if (k === 'dram') col = mix(C.tile, C.dram, 0.25 + 0.5 * heat(x === 0 ? 0 : COLS, y, t));
+      else if (k === 'eth') col = mix(C.tile, C.eth, 0.3 + 0.2 * Math.sin(t * 3 + x));
+      else col = mix(C.tile, C.mgmt, 0.25);
+      g.fillStyle = col; g.fillRect(px + 1, py + 1, cs - 2, cs - 2);
+    }
+    if (!opts || opts.wires) {
+      // NoC wires: NoC0 flows east/south, NoC1 flows west/north, dots ride the wires
+      for (let y = 1; y < ROWS - 1; y++) {
+        const yy = oy + y * cs + cs / 2;
+        const on = heat(8, y, t) > .25;
+        g.strokeStyle = on ? C.n0 : C.line; g.globalAlpha = on ? .8 : .5;
+        g.beginPath(); g.moveTo(ox + cs / 2, yy - 3); g.lineTo(ox + COLS * cs - cs / 2, yy - 3); g.stroke();
+        g.strokeStyle = on ? C.n1 : C.line;
+        g.beginPath(); g.moveTo(ox + cs / 2, yy + 3); g.lineTo(ox + COLS * cs - cs / 2, yy + 3); g.stroke();
+        g.globalAlpha = 1;
+        if (on) {
+          const p = ((t * 6 + y * 3) % (COLS * cs - cs));
+          g.fillStyle = C.n0; g.fillRect(ox + cs / 2 + p, yy - 5, 4, 4);
+          g.fillStyle = C.n1; g.fillRect(ox + COLS * cs - cs / 2 - p, yy + 1, 4, 4);
+        }
+      }
+    }
+  }
+  // ---------- B: physical vs logical ----------
+  const B = setup('cb'), bcs = 11;
+  function drawB(t) {
+    const g = B.g; g.fillStyle = C.bg; g.fillRect(0, 0, B.w, B.h);
+    const ox1 = 12, ox2 = 12 + COLS * bcs + 22, oy1 = 38;
+    label(g, 'PHYSICAL (die)', ox1, 18); label(g, 'LOGICAL (noc0)', ox2, 18);
+    // heat in physical space, looked up from the logical coord so both panels show the same tile
+    for (let dy = 0; dy < ROWS; dy++) for (let dx = 0; dx < COLS; dx++) {
+      const k = kind(dx, dy), nx = fold(dx, COLS), ny = fold(dy, ROWS);
+      const h = k === 'tensix' ? heat(nx, ny, t) : 0;
+      const col = k === 'tensix' ? heatColor(h) : k === 'dram' ? mix(C.tile, C.dram, .4) : k === 'eth' ? mix(C.tile, C.eth, .35) : mix(C.tile, C.mgmt, .25);
+      g.fillStyle = col; g.fillRect(ox1 + dx * bcs + 1, oy1 + dy * bcs + 1, bcs - 2, bcs - 2);
+      g.fillRect(ox2 + nx * bcs + 1, oy1 + ny * bcs + 1, bcs - 2, bcs - 2);
+    }
+    // one route: straight along noc0 row 5 from x=1 to x=16 (wraps via the fold apex)
+    const ny = 5, pts = [];
+    for (let nx = 1; nx <= 9; nx++) pts.push(nx);
+    const inv = (n, N) => { for (let d = 0; d < N; d++) if (fold(d, N) === n) return d; return 0; };
+    const dyP = inv(ny, ROWS);
+    g.lineWidth = 2; g.strokeStyle = C.n0;
+    g.beginPath(); pts.forEach((nx, i) => { const X = ox2 + nx * bcs + bcs / 2, Y = oy1 + ny * bcs + bcs / 2; i ? g.lineTo(X, Y) : g.moveTo(X, Y); }); g.stroke();
+    g.beginPath(); pts.forEach((nx, i) => { const X = ox1 + inv(nx, COLS) * bcs + bcs / 2, Y = oy1 + dyP * bcs + bcs / 2; i ? g.lineTo(X, Y) : g.moveTo(X, Y); }); g.stroke();
+    g.lineWidth = 1;
+    const k = Math.floor((t * 4) % pts.length), nx = pts[k];
+    g.fillStyle = '#fff';
+    g.fillRect(ox2 + nx * bcs + 3, oy1 + ny * bcs + 3, bcs - 6, bcs - 6);
+    g.fillRect(ox1 + inv(nx, COLS) * bcs + 3, oy1 + dyP * bcs + 3, bcs - 6, bcs - 6);
+    label(g, 'one route, 8 logical hops', ox1, oy1 + ROWS * bcs + 22, '#b07be0');
+    label(g, 'spans ~16 cells of silicon, doubling back at the fold', ox1, oy1 + ROWS * bcs + 38, '#7fa9a6');
+  }
+  // ---------- C: card cutaway ----------
+  const Cc = setup('cc');
+  function drawC(t) {
+    const g = Cc.g; g.fillStyle = C.bg; g.fillRect(0, 0, Cc.w, Cc.h);
+    const bx = 20, by = 30, bw = 380, bh = 240;
+    g.strokeStyle = '#2a5a57'; g.strokeRect(bx, by, bw, bh);
+    label(g, 'PCB', bx + 4, by - 8);
+    // GDDR6 chips along top and bottom
+    for (let i = 0; i < 4; i++) for (const yy of [by + 10, by + bh - 28]) {
+      const act = 0.5 + 0.5 * Math.sin(t * 3 + i * 1.3 + (yy > by + 100 ? 2 : 0));
+      g.fillStyle = mix(C.tile, C.dram, 0.3 + 0.6 * act); g.fillRect(bx + 70 + i * 68, yy, 54, 18);
+    }
+    label(g, 'GDDR6', bx + 74, by + 44); label(g, 'GDDR6', bx + 74, by + bh - 36);
+    // die in the middle
+    const dcs = 9, dx0 = bx + 110, dy0 = by + 62;
+    drawDie(g, dx0, dy0, dcs, t, { wires: false });
+    // Ethernet ports on left
+    for (let i = 0; i < 3; i++) { g.fillStyle = mix(C.tile, C.eth, 0.35 + 0.3 * Math.sin(t * 2 + i)); g.fillRect(bx + 6, by + 70 + i * 34, 28, 22); }
+    label(g, 'ETH', bx + 8, by + 62);
+    // PCIe + power on the right
+    g.fillStyle = mix(C.tile, C.mgmt, .5); g.fillRect(bx + bw - 22, by + 60, 18, 110);
+    label(g, 'PCIe', bx + bw - 40, by + 52); label(g, 'PWR', bx + bw - 40, by + 190);
+    // glowing data paths with travelling dots: PCIe -> die, die <-> GDDR, die <-> ETH
+    function path(x1, y1, x2, y2, col, speed, off) {
+      g.strokeStyle = col; g.globalAlpha = .45; g.beginPath(); g.moveTo(x1, y1); g.lineTo(x2, y2); g.stroke(); g.globalAlpha = 1;
+      const p = ((t * speed + off) % 1);
+      g.fillStyle = '#fff'; g.beginPath(); g.arc(x1 + (x2 - x1) * p, y1 + (y2 - y1) * p, 2.5, 0, 7); g.fill();
+    }
+    const cx = dx0 + COLS * dcs / 2, cy = dy0 + ROWS * dcs / 2;
+    path(bx + bw - 22, by + 115, dx0 + COLS * dcs, cy, C.n1, .5, 0);
+    path(dx0, cy, bx + 34, by + 80, C.eth, .35, .3);
+    for (let i = 0; i < 4; i++) {
+      path(bx + 97 + i * 68, by + 28, cx - 30 + i * 20, dy0, C.dram, .6, i * .2);
+      path(cx - 30 + i * 20, dy0 + ROWS * dcs, bx + 97 + i * 68, by + bh - 28, C.dram, .6, i * .2 + .5);
+    }
+    label(g, 'host data', bx + bw - 96, by + 128, C.n1);
+  }
+
+  const t0 = performance.now();
+  function frame(now) {
+    const t = (now - t0) / 1000;
+    A.g.fillStyle = C.bg; A.g.fillRect(0, 0, A.w, A.h);
+    drawDie(A.g, ox, oy, cs, t);
+    label(A.g, 'GDDR6', ox + 2, A.h - 8); label(A.g, 'ETH', ox + COLS * cs / 2 - 10, 14);
+    label(A.g, 'weights in -> compute front ->', ox + 70, A.h - 8, C.warm);
+    drawB(t); drawC(t);
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>

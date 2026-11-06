@@ -429,6 +429,8 @@ impl ServingCreature {
             return vec![];
         }
 
+        // The colour of blank cells, which are spaces: it is never seen. This view
+        // paints no background; the frame's is `colors::canvas_bg`.
         let bg = colors::rgb(0, 0, 0);
         let dim = colors::rgb(90, 90, 90);
         let mut lines: Vec<Line<'static>> = Vec::new();

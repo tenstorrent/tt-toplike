@@ -3,6 +3,8 @@
 
 //! Workload detection, process monitoring, and inference classification.
 
+pub mod background;
+pub mod device_holders;
 pub mod hivemind;
 pub mod host_processes;
 pub mod inference;

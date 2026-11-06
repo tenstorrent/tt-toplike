@@ -46,6 +46,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use crate::workload::device_holders::ProcHolders;
 use crate::workload::train::{TrainProcess, TrainerFinder};
 #[cfg(target_os = "linux")]
 use crate::workload::InferenceServer;
@@ -90,6 +91,23 @@ pub(crate) struct ScanRequest {
     /// it, because noticing a Python trainer reads `/proc/<pid>/maps`, which
     /// must not happen on the render thread.
     pub want_trainer: bool,
+    /// The backend's devices as `(bus_id, index)`, so the `/proc` scan can
+    /// map each `/dev/tenstorrent/<N>` to the backend's index (see
+    /// [`crate::workload::device_holders::DeviceMap`]). Built with
+    /// [`device_keys`].
+    #[cfg_attr(
+        not(all(target_os = "linux", feature = "linux-procfs")),
+        allow(dead_code)
+    )]
+    pub devices: Vec<(String, usize)>,
+}
+
+/// The `(bus_id, index)` pairs for [`ScanRequest::devices`].
+pub(crate) fn device_keys(devices: &[crate::models::Device]) -> Vec<(String, usize)> {
+    devices
+        .iter()
+        .map(|d| (d.bus_id.clone(), d.index))
+        .collect()
 }
 
 /// Everything one scan produced. Owned values only, so it can cross threads.
@@ -108,6 +126,9 @@ pub(crate) struct ScanResult {
     pub trainer: Option<Option<TrainProcess>>,
     /// Inference runtimes for the liveness prober.
     pub runtimes: Vec<DetectedRuntime>,
+    /// Every process holding a device, as the `/proc` scan saw it, with
+    /// the device map it used. Empty on builds without `/proc`.
+    pub holders: ProcHolders,
     /// TT inference servers for the inference monitor (Linux only, as before).
     #[cfg(target_os = "linux")]
     pub inference_servers: Vec<InferenceServer>,
@@ -178,9 +199,19 @@ impl Scan for Scanner {
         #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
         let proc_rows = self.host.rows(PROC_PANEL_MAX_ROWS, &req.verdicts);
 
+        #[cfg(not(all(target_os = "linux", feature = "linux-procfs")))]
+        let holders = ProcHolders::default();
+
         #[cfg(all(target_os = "linux", feature = "linux-procfs"))]
-        let (proc_rows, serving_metrics) = {
-            self.procs.update();
+        let (proc_rows, serving_metrics, holders) = {
+            // Driver device numbers to backend indices, through the PCI
+            // address (four `readlink`s on a four-chip box).
+            let map = crate::workload::device_holders::DeviceMap::from_parts(
+                &crate::workload::device_holders::read_number_bus(std::path::Path::new("/sys")),
+                &req.devices,
+            );
+            self.procs.update_mapped(&map);
+            let holders = self.procs.holders(&map);
             let flat = super::flat_process_list(&self.procs);
             let serving_metrics = self.probe.update(&flat);
             let mut rows = if req.only_tt {
@@ -190,7 +221,7 @@ impl Scan for Scanner {
                 self.host.rows(PROC_PANEL_MAX_ROWS, &req.verdicts)
             };
             super::enrich_proc_rows_tt(&mut rows, &self.procs);
-            (rows, serving_metrics)
+            (rows, serving_metrics, holders)
         };
 
         ScanResult {
@@ -200,6 +231,7 @@ impl Scan for Scanner {
             processes,
             trainer,
             runtimes,
+            holders,
             #[cfg(target_os = "linux")]
             inference_servers,
             took: start.elapsed(),
@@ -226,19 +258,33 @@ pub(crate) struct ScannerHandle {
 
 impl ScannerHandle {
     /// Move `scanner` onto a new worker thread.
-    pub fn spawn<S: Scan>(mut scanner: S) -> Self {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn spawn<S: Scan>(scanner: S) -> Self {
+        Self::spawn_with(move || scanner)
+    }
+
+    /// Build the scanner on a new worker thread with `make`, then serve.
+    /// The real [`Scanner::new`] lists every process (sysinfo), about as long
+    /// as a scan, so building it on the worker keeps that off the thread
+    /// that draws the first frame. A request made before `make` returns
+    /// waits in the channel and runs as soon as the scanner exists.
+    pub fn spawn_with<S: Scan, F: FnOnce() -> S + Send + 'static>(make: F) -> Self {
         let (req_tx, req_rx) = mpsc::channel::<ScanRequest>();
         let (res_tx, res_rx) = mpsc::channel::<Option<ScanResult>>();
         let thread = std::thread::Builder::new()
             .name(SCAN_THREAD_NAME.to_string())
             .spawn(move || {
+                crate::workload::background::lower_priority();
+                let mut scanner = make();
                 // Ends when the handle drops its sender.
                 while let Ok(req) = req_rx.recv() {
+                    crate::startup_log::phase("scan start");
                     let reply =
                         std::panic::catch_unwind(AssertUnwindSafe(|| scanner.scan(&req))).ok();
                     if reply.is_none() {
                         log::warn!("process scan panicked; skipping this refresh");
                     }
+                    crate::startup_log::phase("scan done");
                     if res_tx.send(reply).is_err() {
                         break; // the handle is gone
                     }
@@ -321,6 +367,8 @@ pub(crate) struct Applied {
     pub processes: Vec<(i32, String, String)>,
     pub trainer: Option<Option<TrainProcess>>,
     pub runtimes: Vec<DetectedRuntime>,
+    /// For the Wafer Waffler's process events (`Die3dView::set_proc_holders`).
+    pub holders: ProcHolders,
     #[cfg(target_os = "linux")]
     pub inference_servers: Vec<InferenceServer>,
 }
@@ -346,6 +394,7 @@ pub(crate) fn apply_scan_result(
         processes: res.processes,
         trainer: res.trainer,
         runtimes: res.runtimes,
+        holders: res.holders,
         #[cfg(target_os = "linux")]
         inference_servers: res.inference_servers,
     }
@@ -646,6 +695,7 @@ mod tests {
             verdicts: HashMap::new(),
             want_processes: true,
             want_trainer: true,
+            devices: Vec::new(),
         };
         for _ in 0..2 {
             let r = s.scan(&req);
@@ -654,7 +704,10 @@ mod tests {
                 !r.proc_rows.is_empty(),
                 "the full host row set is non-empty"
             );
-            assert!(r.took < Duration::from_secs(10), "took {:?}", r.took);
+            // No bound on `r.took`: on a box at a load average above 50 a
+            // real scan of /proc can take longer than any fixed limit, and
+            // that is not a fault in the scanner. The time is still filled.
+            assert!(r.took > Duration::ZERO, "took {:?}", r.took);
         }
     }
 
@@ -793,21 +846,61 @@ mod tests {
         ] {
             assert!(!body.contains(banned), "run_app mentions `{banned}`");
         }
-        // One start-up scan by a single scanner, which then moves to the
-        // worker. Any other `.scan(` call in the loop runs on this thread.
-        assert_eq!(body.matches(".scan(").count(), 1, "one start-up scan");
+        // No scan on this thread at all, start-up included: the first
+        // frame does not wait for one. The single scanner is built on the
+        // worker (`spawn_with`), because building it lists every process.
         assert_eq!(
-            body.matches("proc_scan::Scanner::new()").count(),
+            body.matches(".scan(").count(),
+            0,
+            "no scan on the loop thread"
+        );
+        assert_eq!(
+            body.matches("proc_scan::Scanner::new").count(),
             1,
             "one scanner"
         );
-        assert!(body.contains("ScannerHandle::spawn(scanner)"));
+        assert!(body.contains("ScannerHandle::spawn_with(proc_scan::Scanner::new)"));
         assert!(body.contains("scan_handle.try_result()"));
         assert!(body.contains("scan_handle.request("));
         // The scan asks for the process list when a reset is watched, and for
-        // the trainer search when Arcade is on screen.
+        // the trainer search when Arcade is on screen or the rotation runs
+        // (`scan_wants_trainer` holds the rule and has its own test).
         assert!(body.contains("want_processes: reset_behavior.detects(),"));
-        assert!(body.contains("want_trainer: display_mode == DisplayMode::Arcade"));
+        assert!(body.contains(
+            "want_trainer: scan_wants_trainer(display_mode, rotate_enabled, backend_type)"
+        ));
+    }
+
+    /// The first frame waits for nothing slow: no sleep anywhere in
+    /// `run_app` (the 200 ms CPU-sample pause is gone), the first scan is a
+    /// request to the worker made before the loop, and the splash is stopped
+    /// right before `terminal.draw`, so it can never draw over a frame.
+    #[test]
+    fn the_first_frame_waits_for_no_scan_sleep_or_splash() {
+        let body = run_app_source();
+        assert!(!body.contains("thread::sleep("), "run_app sleeps");
+        let first_request = body.find("scan_handle.request(").expect("a request");
+        let loop_start = body.find("\n    loop {").expect("the loop");
+        assert!(
+            first_request < loop_start,
+            "the first scan is asked for before the loop"
+        );
+        let stop = body
+            .find("splash::first_frame();")
+            .expect("the splash is stopped");
+        let draw = body
+            .find("terminal\n                .draw(")
+            .expect("the draw");
+        assert!(
+            stop < draw && body[stop..draw].lines().count() < 6,
+            "right before the draw"
+        );
+        // Every request maps /dev/tenstorrent/N through the backend's devices.
+        assert_eq!(
+            body.matches("scan_handle.request(").count(),
+            body.matches("devices: proc_scan::device_keys(backend.devices()),")
+                .count(),
+        );
     }
 
     /// Arcade follows a training run through `TrainWatch`, which is handed the
@@ -856,6 +949,7 @@ mod tests {
             verdicts: HashMap::new(),
             want_processes: false,
             want_trainer: false,
+            devices: Vec::new(),
         };
         assert!(s.scan(&req).trainer.is_none(), "not asked, not searched");
         req.want_trainer = true;

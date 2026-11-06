@@ -1,0 +1,150 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+#
+# thermal-board: temperature and power for every chip, on one screen.
+#
+# This is an example view written in YAML. You can read it as a tutorial and
+# copy it as a starting point (`tt-toplike viz new <name> --yaml` makes a copy
+# for you).
+# Every key is explained below. The full format is in the plugin reference
+# (docs/viz-plugins.md), and a JSON Schema that editors can use to check and
+# complete this file is at viz/schema/viz-v1.schema.json.
+#
+# A file in viz/examples/ starts switched off; a copy anywhere else in viz/ or
+# in the user folder starts switched on. A file that is off can be turned on in
+# one of two ways:
+#   * in the toplike config file:   [viz]
+#                                   enable = ["thermal-board"]
+#   * or for one run:               tt-toplike --viz thermal-board
+#
+# Edit and save this file while tt-toplike runs and the view reloads within a
+# few seconds. If the edit has a mistake, the last good version keeps drawing
+# and the loader reports the problem.
+#
+# Signals used (both are measured per chip on the bus; a chip with no reading
+# yet shows `--`):
+#   tt_asic_temperature_celsius   chip temperature, in degrees C
+#   tt_tdp_w                      the chip's live power draw in watts. The
+#                                 name comes from the telemetry source.
+
+# Format version. Must be 1. Required.
+version: 1
+
+# Unique id: lowercase letters, digits and single hyphens (kebab-case),
+# starting with a letter, at most 48 characters. This is the name used in
+# `enable = [...]` and `--viz`. Required.
+id: thermal-board
+
+# Name shown in the view cycle and the title bar. Required.
+title: Thermal Board
+
+# Smallest terminal this view draws well in: [columns, rows]. Optional.
+# A smaller terminal shows a "needs W x H" message instead of the view.
+# Here: two gauges side by side need about 60 columns, and one chip needs
+# two lines plus a few lines for the tables.
+min_size: [60, 12]
+
+# Lines for the legend strip. Optional. Without it, one line per widget is
+# made from the widgets themselves.
+legend:
+  - "left bars: chip temperature in C (yellow from 70, red from 85)"
+  - "right bars: chip power draw in W (yellow from 200, red from 260)"
+  - "tables: hottest chip first, and the heaviest power draw first"
+
+# One paragraph shown by the explain key. Optional. Plain English.
+explain: >-
+  Thermal Board shows one row per chip. The left bar is the chip's
+  temperature and the right bar is how much power it is drawing. A bar turns
+  yellow when the reading gets high and red when it is too high to leave
+  alone: temperature turns red at 85 C. The tables at the bottom list the
+  chips from hottest to coolest, and from highest to lowest power draw, so
+  the chip to look at first is always at the top.
+
+# Rows, drawn top to bottom. Required. At most 16 rows and 64 widgets in all.
+# The renderer also draws at most 64 widgets per screen, counting each chip;
+# when rows do not fit, the last line says "+N more".
+layout:
+  # A row that repeats once per chip. `each: chip` is the only value so far.
+  # Without `each`, a row is drawn once.
+  - each: chip
+    # height is the number of terminal lines, or `fill` (see the last row).
+    # Two lines let a gauge put its label on the first line and its bar on
+    # the second. With one line, the label and the bar share a line.
+    height: 2
+    # cells are the widgets side by side in this row. Cells have no gap
+    # between them, so the temperature value at the right end of the left
+    # gauge runs into the start of the power bar. To get a gap, use two rows
+    # per chip (one gauge each).
+    cells:
+      # weight is this cell's share of the row width (1 to 100, default 1).
+      # Equal weights give each cell half the row.
+      - weight: 1
+        # widget picks the widget: gauge, sparkline, table, log, grid,
+        # heat_strip or text. A gauge is a filled bar with the value at the
+        # end.
+        widget: gauge
+        # signal is the bus signal to show (any non-empty name).
+        signal: tt_asic_temperature_celsius
+        # kind is the kind of thing the signal belongs to. The default is
+        # chip, so it is left out here.
+        # label is the caption. {chip} is replaced by the chip's short name,
+        # such as 01:00.0, so each row says which chip it shows.
+        label: "{chip} temperature (C)"
+        # max is the value that fills the bar. Without it the bar scales to
+        # the highest value seen so far (or 100), which moves as readings
+        # change. 100 C is a fixed, easy-to-read scale for a temperature.
+        max: 100
+        # thresholds recolour the bar and its number once the value reaches
+        # `at`. The highest threshold reached wins, and the order in the file
+        # does not matter. Below every threshold the bar has its normal
+        # colour. Colours: primary, secondary, success, error, warning, info,
+        # text, muted, border, red, yellow, green, cyan, blue, magenta,
+        # white, gray. The red at 85 stands in for a red border: this format
+        # has no border widget, so the gauge itself turns red.
+        thresholds:
+          - at: 70
+            color: yellow
+          - at: 85
+            color: red
+
+      - weight: 1
+        widget: gauge
+        # tt_tdp_w is the live power draw in watts.
+        signal: tt_tdp_w
+        label: "{chip} power (W)"
+        # 300 W is a sensible full scale for a Tenstorrent board.
+        max: 300
+        thresholds:
+          - at: 200
+            color: yellow
+          - at: 260
+            color: red
+
+  # height: fill takes whatever lines are left after the fixed rows. If two
+  # rows use `fill`, they share the remainder.
+  - height: fill
+    cells:
+      # A table lists one line per chip, `name value`, with the largest value
+      # first. The label becomes a header line when there is room. A table
+      # shows one signal, so power gets a second table beside it: this one is
+      # sorted by temperature, that one by power.
+      - weight: 1
+        widget: table
+        signal: tt_asic_temperature_celsius
+        label: "Hottest first (C)"
+        # Thresholds colour each number in a table the same way as in a
+        # gauge.
+        thresholds:
+          - at: 70
+            color: yellow
+          - at: 85
+            color: red
+      - weight: 1
+        widget: table
+        signal: tt_tdp_w
+        label: "Most power first (W)"
+        thresholds:
+          - at: 200
+            color: yellow
+          - at: 260
+            color: red
