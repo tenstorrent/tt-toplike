@@ -192,3 +192,82 @@ fn mark_failed_keep_viz_sets_failed_status_and_keeps_the_viz() {
     assert!(r.replace(h, mk("keeper")));
     assert_eq!(r.entries()[0].status, EntryStatus::Ok);
 }
+
+// ---- register_folder: plugin code at start-up is guarded -------------------
+//
+// `register_folder` registers into the global registry, so each test uses its
+// own id and none depends on another.
+
+/// A plugin whose constructor panics.
+fn make_that_panics() -> Box<dyn Viz> {
+    panic!("constructor blew up")
+}
+
+/// A plugin that builds, then panics when asked for its title.
+struct TitlePanics;
+impl Viz for TitlePanics {
+    fn id(&self) -> &str {
+        "folder-title-panics"
+    }
+    fn title(&self) -> &str {
+        panic!("title blew up")
+    }
+    fn render(&mut self, _b: &mut Buffer, _a: Rect, _c: &VizCtx) {}
+    fn legend(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn explain(&self) -> String {
+        String::new()
+    }
+    fn help(&self) -> String {
+        String::new()
+    }
+}
+fn make_title_panics() -> Box<dyn Viz> {
+    Box::new(TitlePanics)
+}
+
+fn make_ok() -> Box<dyn Viz> {
+    Box::new(Stub("folder-ok".to_string()))
+}
+
+fn make_bad_id() -> Box<dyn Viz> {
+    Box::new(Stub("Not Kebab".to_string()))
+}
+
+#[test]
+fn a_plugin_that_panics_in_make_is_skipped_not_fatal() {
+    let r = super::registry::register_folder("p", true, make_that_panics);
+    match r {
+        Err(RegisterError::Panicked(m)) => assert!(m.contains("constructor blew up"), "{m}"),
+        other => panic!("expected Panicked, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_plugin_that_panics_in_title_is_skipped_not_fatal() {
+    let r = super::registry::register_folder("t", true, make_title_panics);
+    match r {
+        Err(RegisterError::Panicked(m)) => assert!(m.contains("title blew up"), "{m}"),
+        other => panic!("expected Panicked, got {other:?}"),
+    }
+    assert!(super::registry::handle_of("folder-title-panics").is_none());
+}
+
+#[test]
+fn a_good_folder_plugin_registers_once() {
+    assert!(super::registry::register_folder("ok", true, make_ok).is_ok());
+    assert!(super::registry::handle_of("folder-ok").is_some());
+    assert_eq!(
+        super::registry::register_folder("ok", true, make_ok),
+        Err(RegisterError::Duplicate)
+    );
+}
+
+#[test]
+fn a_folder_plugin_with_a_bad_id_is_refused() {
+    assert_eq!(
+        super::registry::register_folder("bad", true, make_bad_id),
+        Err(RegisterError::BadId)
+    );
+}

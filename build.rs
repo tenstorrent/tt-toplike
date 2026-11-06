@@ -78,21 +78,8 @@ fn main() {
         // The id comes from the plugin itself; the README requires it to
         // equal the folder name with `_` replaced by `-`.
         code.push_str(&format!(
-            "    {{\n\
-             \x20       let probe = {name}::make();\n\
-             \x20       let id = probe.id().to_string();\n\
-             \x20       let title = probe.title().to_string();\n\
-             \x20       drop(probe);\n\
-             \x20       if let Err(e) = crate::viz::registry::register(\n\
-             \x20           &id,\n\
-             \x20           &title,\n\
-             \x20           crate::viz::Source::Folder,\n\
-             \x20           {name}::ENABLED_BY_DEFAULT,\n\
-             \x20           Box::new({name}::make),\n\
-             \x20       ) {{\n\
-             \x20           log::warn!(\"viz plugin `{{id}}` (folder `{name}`) not registered: {{e}}\");\n\
-             \x20           errors.push(e);\n\
-             \x20       }}\n\
+            "    if let Err(e) = crate::viz::registry::register_folder(\"{name}\", {name}::ENABLED_BY_DEFAULT, {name}::make) {{\n\
+             \x20       errors.push(e);\n\
              \x20   }}\n"
         ));
     }

@@ -62,6 +62,9 @@ pub enum RegisterError {
     BadId,
     /// A viz with this id is already registered.
     Duplicate,
+    /// The plugin panicked while it was being built or asked for its id and
+    /// title. The string is the panic message. The plugin is not registered.
+    Panicked(String),
 }
 
 impl fmt::Display for RegisterError {
@@ -69,6 +72,7 @@ impl fmt::Display for RegisterError {
         match self {
             RegisterError::BadId => write!(f, "viz id must be kebab-case: [a-z0-9]+(-[a-z0-9]+)*"),
             RegisterError::Duplicate => write!(f, "a viz with this id is already registered"),
+            RegisterError::Panicked(m) => write!(f, "the plugin panicked during start-up: {m}"),
         }
     }
 }
@@ -346,6 +350,53 @@ pub fn register(
     }
     let viz = make();
     with_global(|r| r.register_built(id, title, source, enabled_by_default, viz))
+}
+
+/// Register a Rust plugin folder, with every call into plugin code guarded.
+///
+/// `make`, `id()`, `title()` and the viz's `Drop` are plugin code. They run
+/// under `catch_unwind`, so a plugin that panics at start-up is skipped with
+/// [`RegisterError::Panicked`] and the process carries on. The viz is built
+/// once: that instance is the one registered. `folder` names the plugin in the
+/// log line. The generated `register_all` calls this for each folder.
+pub fn register_folder(
+    folder: &str,
+    enabled_by_default: bool,
+    make: fn() -> Box<dyn Viz>,
+) -> Result<VizHandle, RegisterError> {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let built = catch_unwind(AssertUnwindSafe(|| {
+        let viz = make();
+        let id = viz.id().to_string();
+        let title = viz.title().to_string();
+        (viz, id, title)
+    }));
+    let (viz, id, title) = match built {
+        Ok(t) => t,
+        Err(payload) => {
+            let text = if let Some(s) = payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            let e = RegisterError::Panicked(text);
+            log::warn!("viz plugin (folder `{folder}`) not registered: {e}");
+            return Err(e);
+        }
+    };
+    let result = if is_valid_id(&id) {
+        with_global(|r| r.register_built(&id, &title, Source::Folder, enabled_by_default, viz))
+    } else {
+        // Drop the viz under the guard too: its Drop is plugin code.
+        let _ = catch_unwind(AssertUnwindSafe(move || drop(viz)));
+        Err(RegisterError::BadId)
+    };
+    if let Err(e) = &result {
+        log::warn!("viz plugin `{id}` (folder `{folder}`) not registered: {e}");
+    }
+    result
 }
 
 /// [`Registry::entries`] on the global registry. Called by the host's view
