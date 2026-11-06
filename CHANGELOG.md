@@ -34,8 +34,8 @@ list is a summary and is not kept for every release.
 - `tt-toplike viz new <name>` makes a Rust plugin from the example (in a checkout), `tt-toplike viz
   new <name> --yaml` makes a YAML plugin, and `tt-toplike viz list` shows every view with its
   source and status (`ok`, `hidden` or `failed`).
-- Two examples ship, both hidden until you ask for them: `example-pulse` (Rust, in the binary) and
-  `thermal-board` (YAML, found when tt-toplike runs inside a checkout; an installed binary can make a
+- Three examples ship, all hidden until you ask for them: `example-pulse` and `game-of-life` (both
+  Rust, in the binary) and `thermal-board` (YAML, found when tt-toplike runs inside a checkout; an installed binary can make a
   copy with `tt-toplike viz new <name> --yaml`). Ask with `--viz` or `[viz] enable`.
 - Limits: a plugin draws a full-screen view only. It cannot take keys of its own, add a panel to
   the arcade layout, or add a signal, and YAML has no custom drawing. `AGENTS.md` has an "Add a viz"

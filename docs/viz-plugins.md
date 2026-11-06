@@ -36,16 +36,19 @@ Contents
 
 When both would do, start with YAML. It is shorter, and a mistake in it cannot crash the program.
 
-The two examples in the repository are the best starting point. Read them before you write
+The three examples in the repository are the best starting point. Read them before you write
 anything:
 
 * `src/viz/plugins/example_pulse/` is the Rust example (a power sparkline per chip, coloured by
   temperature).
+* `src/viz/plugins/game_of_life/` is a Rust example that keeps state between frames: Conway's
+  Game of Life with one band per chip. A chip's power seeds new cells in its band and a sharp rise
+  drops a glider; its temperature colours them.
 * `viz/examples/thermal-board.yaml` is the YAML example (temperature and power bars per chip, and
   two tables). Every key in it has a comment.
 
-Both are hidden by default: they are not in the `v` cycle until you ask for them (section 6).
-`example-pulse` is compiled into the binary. `thermal-board` is found when tt-toplike runs inside a
+All three are hidden by default: they are not in the `v` cycle until you ask for them (section 6).
+`example-pulse` and `game-of-life` are compiled into the binary. `thermal-board` is found when tt-toplike runs inside a
 checkout of the repository (the current folder, or a folder above the executable). An installed
 binary can make its own copy with `tt-toplike viz new <name> --yaml`.
 
