@@ -1482,8 +1482,9 @@
           The lane names the model, the port and the chips the server holds
           open, and the work in flight and finished. A training run shows its
           step and loss direction. The stars take a tint for the kind of work
-          and flare once per finished request. The clip is an audio-model
-          server making tracks on a 4-chip Blackhole box.
+          and flare once per finished request. The clip is simulated
+          telemetry (<code>--mock 4</code>): a Llama server and a training
+          run, which tint the stars amber.
         </p>
         <div class="mode-hints">
           <span class="mode-hint"><kbd>i</kbd> open the Inference view</span>
@@ -1493,7 +1494,7 @@
       <video class="mode-gif" src="assets/tt-toplike-arcade-lanes.mp4"
              poster="assets/tt-toplike-arcade-lanes.png"
              autoplay loop muted playsinline
-             aria-label="Arcade mode on a 4-chip Blackhole box with a lane under the starfield title: SERVE MiniMax-Music3, port 20000, chips 0 and 1, 1 in flight, 9 done"></video>
+             aria-label="Arcade mode on four simulated boards with two lanes under the starfield title: TRAIN nano_gpt at step 96 of 24,000, and SERVE Llama-3.3-70B on port 8000, chips 0 and 1, 3 running; the stars are amber"></video>
     </div>
   </div>
 </section>
