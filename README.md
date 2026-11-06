@@ -303,7 +303,7 @@ and `tt-toplike --viz <id>` starts on one. Three examples ship, hidden until you
 reference, written so that a coding agent can follow it, is
 [docs/viz-plugins.md](docs/viz-plugins.md).
 
-<img src="assets/tt-toplike-viz-plugins.gif" alt="The thermal-board view, written as one YAML file, followed by the example-pulse view that ships in the binary, both started with --viz" width="100%" />
+<img src="assets/tt-toplike-viz-plugins.gif" alt="Three plugin views on simulated telemetry: thermal-board (one YAML file), example-pulse (a Rust folder) and game-of-life, where each chip feeds a band of Conway's Game of Life and a rise in power sends a glider" width="100%" />
 
 ## Installation
 

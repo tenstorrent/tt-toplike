@@ -126,7 +126,7 @@ in its own pull request.
 
 **Limits:** full screen only, no keys of its own, no arcade panels, no new signals, no custom
 drawing in YAML. The `Viz` trait has no key method. The examples to
-copy are `src/viz/plugins/example_pulse/` and `viz/examples/thermal-board.yaml`. A test,
+copy are `src/viz/plugins/example_pulse/` (reads and draws), `src/viz/plugins/game_of_life/` (keeps state between frames, steps on `ctx.now_mono_ns`, reacts to chip power; use a seeded generator, not `rand` or the system clock) and `viz/examples/thermal-board.yaml`. A test,
 `agents_md_recipe_names_real_commands` in `src/viz/docs_tests.rs`, fails when a command named here
 is renamed or removed.
 

@@ -198,6 +198,27 @@ the draw thread. The trait needs `Send` but not `Sync`.
 * **No right-side border characters.** Use left and bottom bars only. A right-hand border breaks
   when the terminal is narrower than expected.
 
+### A plugin that keeps state: `game-of-life`
+
+`render` takes `&mut self`, so a plugin can remember things between frames. `src/viz/plugins/game_of_life/`
+is the example: Conway's Game of Life, one vertical band per chip. Its pattern is worth copying for any view
+that animates or accumulates:
+
+* **Step on the bus clock, not on frames.** `ctx.now_mono_ns` is the clock. The view runs one generation per
+  125 ms of it, and never more than four in one frame, so a slow draw or a long pause does not make it race.
+  Two renders at the same time run no extra generation.
+* **React to the readings.** Each frame it reads `tt_tdp_w` per chip and keeps that chip's own lowest and
+  highest value. The nearer the top of the range, the more cells it adds to that chip's band. A rise of more than
+  15% of the range drops a glider. Compare with the chip's own range, not a fixed number, because chips differ.
+* **Resize without losing the state.** When the area changes it keeps the cells that still fit.
+* **Be repeatable.** It uses a small fixed-seed random generator written in the file, so the same readings at the
+  same times draw the same board and a test can check it. Avoid `rand` and the system clock in a plugin.
+* **Test the state, not only the frame.** Its tests check the rules (a blinker flips, a glider wraps), that a busy
+  chip feeds its own band and an idle chip does not, that generations follow the clock, and the empty-world and
+  tiny-area cases. A golden frame would break on every change to the generator.
+
+Run it with `tt-toplike --mock 4 --viz game-of-life`. Its folder `README.md` lists the settings.
+
 ### Test helpers
 
 `src/viz/testkit.rs` has what a plugin test needs:

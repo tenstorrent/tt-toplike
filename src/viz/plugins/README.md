@@ -23,6 +23,14 @@ pub fn make() -> Box<dyn crate::viz::Viz> { Box::new(MyViz::new()) }
 * Put the rest of the plugin (extra files, helpers, golden test frames) in
   the same folder. Declare extra files with `mod` lines inside your `mod.rs`.
 
+## Examples
+
+* `example_pulse/` is the smallest one: reads the world and history, draws, keeps no state.
+* `game_of_life/` keeps state between frames: it steps on the bus clock, reacts to chip power,
+  resizes without losing its board and uses its own seeded random generator. Copy it when the
+  view animates or accumulates. The section "A plugin that keeps state" in
+  `docs/viz-plugins.md` explains the pattern.
+
 ## Testing
 
 Use `crate::viz::testkit` to render the plugin to text and compare it with a
