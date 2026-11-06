@@ -283,6 +283,10 @@ run or a quiet season ends a world, and the next one has a new maze. One chronic
 happens on every floor, each line tagged with its floor, and `y` says in a sentence what set each
 line off. One chip looks as it did before the party.
 
+<img src="assets/tt-toplike-saga.gif" alt="Saga on four simulated chips: four floors drawn side by side, each with its own hero walking a dungeon, heroes crossing between floors through Ethernet portals, and one chronicle on the right telling what happens on every floor" width="100%" />
+
+<img src="assets/tt-toplike-saga.png" alt="A still from Saga: floors F1 to F4 with a hero each, and the chronicle listing a world taking shape, heroes mapping rooms and two heroes setting out to cross floors through a portal" width="100%" />
+
 The same recorded log always tells the same saga. `tt-toplike-tui --bus-inspect DIR
 --saga-digest` prints a digest you can compare between a recording and a replay of it. This is
 phase 1: monsters, treasure and fights come later. Full details, the `[saga]` config and the
@@ -298,6 +302,8 @@ You can add a full-screen view without touching the rest of the program. Write o
 and `tt-toplike --viz <id>` starts on one. Two examples ship, hidden until you ask for them: `example-pulse` is in the binary, and `thermal-board` is found when tt-toplike runs inside a checkout. The
 reference, written so that a coding agent can follow it, is
 [docs/viz-plugins.md](docs/viz-plugins.md).
+
+<img src="assets/tt-toplike-viz-plugins.gif" alt="The thermal-board view, written as one YAML file, followed by the example-pulse view that ships in the binary, both started with --viz" width="100%" />
 
 ## Installation
 
@@ -474,6 +480,10 @@ tt-toplike --devices 0,2
 
 Arcade's rows and panels (starfield, castle, flow, defrag, Wafer Waffler, training, inference, saga, each double or triple wide if you like) are set in the `[arcade]` section of `~/.config/tt-toplike/config.toml`, the only config file tt-toplike reads. The arcade also has eight built-in layouts (`classic`, `now-serving`, `defrag-wide`, `waffler`, `workload`, `deck`, `skyline`, `memory-lane`); `now-serving` puts the inference server over the Wafer Waffler and Saga. `}` and `{` step through them and your own `[[arcade.layouts]]`. See [docs/arcade-layout.md](docs/arcade-layout.md). `tt-toplike --check-config` lists every problem in that file with its line, and every layout.
 
+<img src="assets/tt-toplike-arcade-layouts.gif" alt="The arcade stepping through five built-in layouts with the } key, from the classic rows to now-serving, which puts the inference server over the Wafer Waffler and Saga" width="100%" />
+
+Start on a layout from the command line with `tt-toplike --mode arcade --arcade-layout NAME`.
+
 The Inference view, the Training view and the Wafer Waffler each carry a backdrop behind what they show: the scene (forge, storm, aurora), the sky, and the clouds, each following real signals. Each draws its own by default and can be switched to another of the three or off, in the `[backdrop]` section of the same file or with `w` and `/backdrop` at run time. Other views, the arcade among them, carry no backdrop. See [docs/backdrop.md](docs/backdrop.md).
 
 Saga, the quest view, tells a story from the signal bus: a world per stretch of activity, a dungeon floor per chip, a hero on each floor whose health follows its chip. The TUI runs its story on a small background thread from start-up, whether or not the view is on screen, so the story has no gaps. The `[saga]` section of the same file sets it:
@@ -568,6 +578,10 @@ The top-left band shows how each step went and what the hardware did about it. A
 ### Wafer Waffler — the board and its dies (`3`)
 
 Press `3` for the **Wafer Waffler**. Each die is a slice of silicon wafer, its tiles make a waffle grid, and the camera waffles between them. It draws each Blackhole board in isometric perspective, one block per die with the Tensix, GDDR, Ethernet and management tiles in place, in cells of one of three styles: braille dots (2 x 4 per cell, the finest), quarter blocks (the same picture, chunkier) or half blocks. `/cells` sets one. The default, `auto`, starts in a style picked from what the hardware reports when the view opens, and changes style when something happens on the hardware, at a camera cut, and never within two minutes of the last change. In a view under 100 x 30 it leaves half blocks out. `/blocks` (or `/cells blocks`) changes between the two block styles only. `/braille`, `/cells quarter` and `/cells half` hold one. The colours follow `/theme`: grayskull is greys with one hot pink, and the default theme is full colour (heat from blue through amber to red-pink, green memory, orange Ethernet).
+
+<img src="assets/tt-toplike-wafer-waffler.gif" alt="The Wafer Waffler on a simulated Blackhole board: one isometric board drawn in half-block cells, per-tile glow, a die flag reading BH2 with its power, and the camera cutting between corners as events happen" width="100%" />
+
+<img src="assets/tt-toplike-wafer-waffler.png" alt="A still from the Wafer Waffler: a p150 board in isometric view with a history panel at the top left and the command footer along the bottom" width="100%" />
 
 **What is real and what is estimated.** The per-tile glow is an estimate from chip activity, and the footer says so: `per-tile glow: estimate from chip load`. The view does not read per-tile NoC counters; that is a separate, later and experimental plan (`docs/superpowers/plans/2026-10-29-die-3d-tier1-counters.md`). Activity is each chip's power measured against that chip's own idle over the last day, up to its highest draw in the last ten minutes. A view opened while a job is already running has no idle to measure against, so a chip at a steady draw shows no activity until its power changes. These are real readings: chip power, temperature, GDDR temperature and PCIe traffic in and out (from the tt-kmd counters), plus Ethernet and harvest data when the backend provides them. The clouds behind the dies are decoration. Their drift follows PCIe traffic and their brightness follows chip load. The history panel (`/history`, top left) plots the last 60 seconds of each chip's power and the box's PCIe traffic as sparklines, and shows each chip's latest temperature. Those are measured values, one sample a second. Each sparkline cell is the mean of two or three samples. A power line is scaled to at least 5 W and a PCIe line to at least 10 MB/s, so a small wobble stays near the bottom of its line.
 
