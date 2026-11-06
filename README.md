@@ -113,7 +113,7 @@ Every running `tt-smi -r` is tracked. While more than one runs, the status segme
 
 While a training run, a model load or a model serving is active, the top rows of Arcade's starfield become a lane: the model name, the port and chips it holds, what it is doing, and the key that opens its full view (`[i]` for inference, `[t]` for training). The stars take a tint for the kind of work and flare once per finished request. With nothing running, Arcade looks as it always did.
 
-<img src="assets/tt-toplike-arcade-lanes.gif" alt="Arcade mode on a 4-chip Blackhole box with a lane under the starfield title reading SERVE MiniMax-Music3, port 20000, chips 0,1, 1 in flight, 9 done, and [i] to open the Inference view" width="100%" />
+<img src="assets/tt-toplike-arcade-lanes.gif" alt="Arcade mode on four simulated boards with two lanes under the starfield title: TRAIN nano_gpt at step 96 of 24,000 and SERVE Llama-3.3-70B on port 8000, chips 0,1, 3 running, with [t] and [i] to open the Training and Inference views" width="100%" />
 
 ---
 
