@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+#
+# A definition with a widget name the format does not have. Parsing must
+# fail and the message must name `pie_chart`.
+version: 1
+id: bad-widget
+title: Bad Widget
+layout:
+  - height: 3
+    cells:
+      - widget: pie_chart
+        signal: power_w

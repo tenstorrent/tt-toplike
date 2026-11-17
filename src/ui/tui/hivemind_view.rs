@@ -20,6 +20,7 @@ use ratatui::{
     Frame,
 };
 
+use super::hivemind_bus::HivemindBus;
 use crate::ui::colors;
 use crate::workload::hivemind::{
     collector::CollectorStatus,
@@ -180,11 +181,15 @@ fn truncate_to_width(s: &str, max_w: usize) -> String {
     if max_w == 0 {
         return String::new();
     }
+    if unicode_width::UnicodeWidthStr::width(s) <= max_w {
+        return s.to_string();
+    }
+    // Cut: the kept text and the `…` together fit in `max_w`.
     let mut out = String::new();
     let mut w = 0usize;
     for ch in s.chars() {
         let cw = UnicodeWidthChar::width(ch).unwrap_or(1);
-        if w + cw > max_w {
+        if w + cw + 1 > max_w {
             out.push('…');
             break;
         }
@@ -192,6 +197,108 @@ fn truncate_to_width(s: &str, max_w: usize) -> String {
         w += cw;
     }
     out
+}
+
+/// One feed row as the feed pane draws it: a row of the sweeper's own feed
+/// (`FeedRowView`) or a bus row (`hivemind_bus::BusRow`).
+struct FeedItem {
+    severity: Severity,
+    label: &'static str,
+    /// The source column's colour: dim for the sweeper's rows, the shared
+    /// workload or spark colour for bus rows.
+    label_fg: Color,
+    device: Option<u8>,
+    display: String,
+    count: u64,
+    rate: f32,
+    spark: Vec<u8>,
+    is_reset: bool,
+    /// A bus event from before the view first read the world (or from while
+    /// it was away): every span is drawn dim.
+    history: bool,
+    /// A bus row: its source label is cut to the column's width, which is
+    /// sized to the board's sources.
+    from_bus: bool,
+}
+
+/// The feed pane's line for `row`, `left_w` columns wide with the source
+/// column `label_w` wide.
+fn feed_line(
+    row: &FeedItem,
+    label_w: usize,
+    left_w: usize,
+    dim: Color,
+    accent: Color,
+) -> Line<'static> {
+    let dev_str = match row.device {
+        Some(d) => format!("D{d}"),
+        None => "host".to_string(),
+    };
+    // Trailing "x<count>  <rate>/s  <spark>" summary: how often the
+    // coalesced row fires.
+    let count_str = format!("x{}", row.count);
+    let rate_str = format!("{:.1}/s", row.rate);
+    let spark_str: String = row.spark.iter().map(|&c| spark_char(c)).collect();
+    let trailing = format!("  {count_str}  {rate_str}  {spark_str}");
+    let trailing_w = unicode_width::UnicodeWidthStr::width(trailing.as_str());
+
+    let prefix_w = 7 /* severity */ + 1 + label_w + 1 + 4 /* dev field */ + 1;
+    let text_w = left_w.saturating_sub(prefix_w).saturating_sub(trailing_w);
+    // A detected reset gets a distinct glyph/color on the source label
+    // and display text, additive to (not replacing) the existing
+    // severity-based coloring of the severity-label column — see
+    // `reset_accent`. An ordinary row keeps exactly the prior styling.
+    let source_style = if row.is_reset {
+        Style::default()
+            .fg(reset_accent())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(row.label_fg)
+    };
+    let display_text = if row.is_reset {
+        // The glyph is two columns wide, then a space.
+        let glyph_w = unicode_width::UnicodeWidthStr::width(RESET_GLYPH) + 1;
+        format!(
+            "{RESET_GLYPH} {}",
+            truncate_to_width(&row.display, text_w.saturating_sub(glyph_w))
+        )
+    } else {
+        truncate_to_width(&row.display, text_w)
+    };
+    let display_span = if row.is_reset {
+        Span::styled(
+            display_text,
+            Style::default()
+                .fg(reset_accent())
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw(display_text)
+    };
+    let label = if row.from_bus && unicode_width::UnicodeWidthStr::width(row.label) > label_w {
+        truncate_to_width(row.label, label_w)
+    } else {
+        row.label.to_string()
+    };
+    let mut spans = vec![
+        Span::styled(
+            format!("{:<7}", severity_label(row.severity)),
+            severity_style(row.severity),
+        ),
+        Span::raw(" "),
+        Span::styled(format!("{label:label_w$}"), source_style),
+        Span::raw(" "),
+        Span::styled(format!("{:<4}", dev_str), Style::default().fg(dim)),
+        Span::raw(" "),
+        display_span,
+        Span::styled(trailing, Style::default().fg(accent)),
+    ];
+    if row.history {
+        for s in &mut spans {
+            s.style = s.style.add_modifier(Modifier::DIM);
+        }
+    }
+    Line::from(spans)
 }
 
 /// Rolling total events/sec across the whole board (see
@@ -477,10 +584,12 @@ fn detail_lines(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn render_hivemind(
     f: &mut Frame,
     area: Rect,
     hive: &Hivemind,
+    bus: &HivemindBus,
     cursor: (usize, usize),
     auto_focus: bool,
     unified: bool,
@@ -579,6 +688,13 @@ pub fn render_hivemind(
             Style::default().fg(dim),
         ),
     ]));
+
+    // ── Bus strip: the model on each local chip (see `hivemind_bus`) ────
+    // Placed under the title so a short terminal cuts the feed before it.
+    // No model on any chip: no row.
+    if let Some(strip) = bus.strip_line(left_w) {
+        header_body.push(strip);
+    }
 
     // ── Collector status line ───────────────────────────────────────────
     let mut collector_spans: Vec<Span> = Vec::new();
@@ -690,64 +806,51 @@ pub fn render_hivemind(
         selected.map(|(src, col)| (src, column_to_device(col)))
     };
     let feed_rows = hive.feed().rows(cell_filter, sev_floor);
+    // Bus rows pass the same cell filter and severity floor (see
+    // `hivemind_bus`). Live bus rows merge with the sweeper's rows by
+    // time, newest first; bus history follows, dimmed.
+    let bus_rows = bus.rows(cell_filter, sev_floor);
     let mut feed_lines: Vec<Line> = Vec::new();
-    for row in feed_rows.iter().take(feed_h) {
-        let dev_str = match row.device {
-            Some(d) => format!("D{d}"),
-            None => "host".to_string(),
+    let (mut own, mut from_bus) = (feed_rows.iter().peekable(), bus_rows.iter().peekable());
+    while feed_lines.len() < feed_h {
+        let take_bus = match (own.peek(), from_bus.peek()) {
+            (None, None) => break,
+            (Some(_), None) => false,
+            (None, Some(_)) => true,
+            (Some(r), Some(b)) => !b.history && b.last > r.last,
         };
-        // Trailing "x<count>  <rate>/s  <spark>" summary — a coalesced row's
-        // whole point is showing how often it's firing, not just its text.
-        let count_str = format!("x{}", row.count);
-        let rate_str = format!("{:.1}/s", row.rate);
-        let spark_str: String = row.spark.iter().map(|&c| spark_char(c)).collect();
-        let trailing = format!("  {count_str}  {rate_str}  {spark_str}");
-        let trailing_w = unicode_width::UnicodeWidthStr::width(trailing.as_str());
-
-        let prefix_w = 7 /* severity */ + 1 + label_w + 1 + 4 /* dev field */ + 1;
-        let text_w = left_w.saturating_sub(prefix_w).saturating_sub(trailing_w);
-        // A detected reset gets a distinct glyph/color on the source label
-        // and display text, additive to (not replacing) the existing
-        // severity-based coloring of the severity-label column — see
-        // `reset_accent`. An ordinary row keeps exactly the prior styling.
-        let source_style = if row.is_reset {
-            Style::default()
-                .fg(reset_accent())
-                .add_modifier(Modifier::BOLD)
+        let item = if take_bus {
+            let Some(b) = from_bus.next() else { break };
+            FeedItem {
+                severity: b.severity,
+                label: b.label,
+                label_fg: colors::rgb(b.rgb[0], b.rgb[1], b.rgb[2]),
+                device: b.device,
+                display: format!("{}{}", super::hivemind_bus::MARK, b.display),
+                count: b.count,
+                rate: b.rate,
+                spark: b.spark().to_vec(),
+                is_reset: b.is_reset(),
+                history: b.history,
+                from_bus: true,
+            }
         } else {
-            Style::default().fg(dim)
+            let Some(r) = own.next() else { break };
+            FeedItem {
+                severity: r.max_severity,
+                label: r.source.label(),
+                label_fg: dim,
+                device: r.device,
+                display: r.display.clone(),
+                count: r.count,
+                rate: r.rate,
+                spark: r.spark.clone(),
+                is_reset: r.is_reset,
+                history: false,
+                from_bus: false,
+            }
         };
-        let display_text = if row.is_reset {
-            format!(
-                "{RESET_GLYPH} {}",
-                truncate_to_width(&row.display, text_w.saturating_sub(2))
-            )
-        } else {
-            truncate_to_width(&row.display, text_w)
-        };
-        let display_span = if row.is_reset {
-            Span::styled(
-                display_text,
-                Style::default()
-                    .fg(reset_accent())
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::raw(display_text)
-        };
-        feed_lines.push(Line::from(vec![
-            Span::styled(
-                format!("{:<7}", severity_label(row.max_severity)),
-                severity_style(row.max_severity),
-            ),
-            Span::raw(" "),
-            Span::styled(format!("{:label_w$}", row.source.label()), source_style),
-            Span::raw(" "),
-            Span::styled(format!("{:<4}", dev_str), Style::default().fg(dim)),
-            Span::raw(" "),
-            display_span,
-            Span::styled(trailing, Style::default().fg(accent)),
-        ]));
+        feed_lines.push(feed_line(&item, label_w, left_w, dim, accent));
     }
 
     let mut body = header_body;
@@ -799,10 +902,12 @@ pub fn render_hivemind(
         display_lines.push(Line::from(spans));
     }
     // ── KITT scanner bar: one dedicated row, just above the bottom border ──
-    // Driven by total board activity (`FeedAgg::total_rate`) — idle reads as
-    // dim/wide/brisk, busy reads as bright/tight/deliberate.
+    // Driven by total board activity (`FeedAgg::total_rate`) or the bus's
+    // requests and tokens/s, whichever is larger (`HivemindBus::kitt_activity`).
+    // An idle beam is dim, wide and brisk; a busy one is bright, tight and
+    // slow.
     if beam_reserved {
-        let activity = kitt_activity_norm(hive.feed().total_rate());
+        let activity = bus.kitt_activity(hive.feed().total_rate(), now);
         let mut spans = vec![Span::styled("║ ", border_style)];
         for (glyph, color) in beam_cells(content_w, kitt.pos, activity) {
             spans.push(Span::styled(glyph.to_string(), Style::default().fg(color)));
@@ -852,14 +957,35 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
         ln!(vec![
             Span::styled("░▒▓█   ", Style::default().fg(colors::rgb(120, 220, 200))),
             Span::styled(
-                "= decaying heat + a tiny recent-activity spark; pulses on new events",
+                "= heat that decays; pulses on a new event",
                 Style::default().fg(dim)
             ),
         ]),
         ln!(vec![
             Span::styled("feed   ", Style::default().fg(colors::rgb(200, 230, 255))),
             Span::styled(
-                "= coalesced events (count/rate/spark) for the selected cell",
+                "= repeated events folded, with count and rate",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("strip  ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "= each chip's model from the bus (~ = estimate)",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("bus:   ", Style::default().fg(colors::rgb(200, 230, 255))),
+            Span::styled(
+                "= a row from the bus; dim = before you opened ~",
+                Style::default().fg(dim)
+            ),
+        ]),
+        ln!(vec![
+            Span::styled("       ", Style::default().fg(dim)),
+            Span::styled(
+                "  model rows belong to no cell: f shows them",
                 Style::default().fg(dim)
             ),
         ]),
@@ -876,7 +1002,7 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
                 Style::default().fg(colors::rgb(200, 230, 255))
             ),
             Span::styled(
-                "= busiest cell, tracked automatically",
+                "= the busiest cell, tracked by itself",
                 Style::default().fg(dim)
             ),
         ]),
@@ -910,7 +1036,7 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
                 Style::default().fg(colors::rgb(200, 230, 255))
             ),
             Span::styled(
-                "= toggle unified feed (all cells vs. selected)",
+                "= one feed for all cells, or the selected one",
                 Style::default().fg(dim)
             ),
         ]),
@@ -920,7 +1046,7 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
                 Style::default().fg(colors::rgb(200, 230, 255))
             ),
             Span::styled(
-                "= cycle severity floor (trace→info→notice→warn→error)",
+                "= raise the severity floor (trace→…→error)",
                 Style::default().fg(dim)
             ),
         ]),
@@ -940,7 +1066,7 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
                 Style::default().fg(colors::rgb(200, 230, 255))
             ),
             Span::styled(
-                "= KITT scanner — dim/wide/brisk idle, bright/tight/slow when busy",
+                "= KITT scanner: dim and brisk idle, bright and slow busy",
                 Style::default().fg(dim)
             ),
         ]),
@@ -952,48 +1078,57 @@ pub(crate) fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'stati
 pub(crate) const EXPLAIN_TEXT: &[&str] = &[
     "HivemindSweeper — Activity Sniffer",
     "",
-    "Opt-in, read-only sniffer that correlates driver",
-    "messages, compile-cache churn, log tails, and /proc",
-    "activity into one source × device/host heat board.",
+    "An opt-in, read-only sniffer. Driver messages, compile",
+    "cache churn, log tails and /proc activity land on one",
+    "source × device/host heat board.",
     "",
-    "Each cell's glyph (░▒▓█) decays over time — a cold",
-    "cell just hasn't seen activity recently. A cell also",
-    "shows a tiny recent-activity spark and briefly pulses",
-    "brighter right after a new event.",
+    "A cell's glyph (░▒▓█) decays over time, so a cold cell",
+    "has been quiet; it pulses bright on a new event. The",
+    "feed below folds repeated events into one row with a",
+    "count and rate, for the selected cell or all cells (f).",
+    "FOCUS names the busiest cell and tracks it by itself;",
+    "arrows (or h/j/k) pin it, Enter hands it back.",
     "",
-    "The feed pane below coalesces repeated/near-identical",
-    "events (e.g. device-poll open/close churn) into one",
-    "row with a running count and events/sec rate, for",
-    "whichever cell is selected (or every row, unified).",
+    "The line under the title is each chip's model from the",
+    "signal bus (~ marks an estimate). Feed rows starting",
+    "\"bus:\" come from the bus: models, requests, resets from",
+    "tools such as gozer, and an attached host's sparks.",
+    "A tt-smi -r run elsewhere shows as a magenta ⚡ row and",
+    "warms the cells of the chips it targets.",
     "",
-    "A tt-smi -r run in another terminal appears as a magenta",
-    "⚡ row and warms the cell of each chip it targets (the",
-    "Host column when none could be resolved). It gets no",
-    "takeover animation here, only this row.",
-    "",
-    "The FOCUS pane names the busiest cell and describes it — heat, events,",
-    "rate, worst severity, age, and its top coalesced rows — and tracks that",
-    "cell on its own, so this screen explains itself without being driven.",
-    "Arrows (or vim h/j/k) pin the focus to a cell of your choosing; Enter",
-    "hands it back. f toggles the unified feed, s raises the severity floor,",
-    "l opens this legend.",
-    "",
-    "/watch <path> or /watch pid <n> points the sniffer at",
-    "a log file or a process's device fds + open logs.",
-    "/wrap <cmd…> spawns and captures a command — the one",
-    "side effect here, so it asks for confirmation first",
-    "(repeat the same /wrap to confirm).",
-    "",
-    "A red KITT-style scanner bar sweeps the bottom row,",
-    "grounding the view. It reflects TOTAL board activity:",
-    "idle is dim, wide, and brisk; busy activity makes it",
-    "slow down, focus into a tighter beam, and brighten.",
+    "/watch <path> or /watch pid <n> aims the sniffer.",
+    "/wrap <cmd…> runs a command, the only thing here that",
+    "changes anything, so repeat it to confirm. The red KITT",
+    "scanner at the bottom follows total activity: dim and",
+    "brisk when idle, bright and slow when busy.",
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::workload::hivemind::{event::*, grid::Column, Hivemind};
+
+    /// A bus row's source label wider than the column is cut to the
+    /// column's width, `…` included: "Workload" in 6 columns is "Workl…".
+    #[test]
+    fn a_bus_rows_label_is_cut_to_the_full_column_width() {
+        let row = FeedItem {
+            severity: Severity::Info,
+            label: "Workload",
+            label_fg: Color::Reset,
+            device: None,
+            display: "x".into(),
+            count: 1,
+            rate: 0.0,
+            spark: Vec::new(),
+            is_reset: false,
+            history: false,
+            from_bus: true,
+        };
+        let line = feed_line(&row, 6, 80, Color::Reset, Color::Reset);
+        let texts: Vec<&str> = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(texts.contains(&"Workl…"), "{texts:?}");
+    }
 
     /// The sweeper's job is answering "what is touching my hardware right
     /// now". If that answer needs arrow keys, the screen says nothing to
@@ -1233,6 +1368,7 @@ mod tests {
                                     f,
                                     area,
                                     hive,
+                                    &HivemindBus::default(),
                                     (0, 0),
                                     auto_focus,
                                     unified,

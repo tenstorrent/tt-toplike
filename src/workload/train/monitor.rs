@@ -176,6 +176,10 @@ pub struct TrainState {
     /// Surfaced in the header: this tool's premise is that every pixel maps
     /// to a real signal, so synthetic data has to say so.
     pub is_mock: bool,
+    /// This run was read from the signal bus (`animation::train_bus`), not
+    /// from a local trainer. The header then says `bus`, and `is_mock` means
+    /// the bus marked the readings as estimates.
+    pub seen_on_bus: bool,
 }
 
 impl TrainState {
@@ -1524,10 +1528,55 @@ mod tests {
         // first version of this test did that and measured 13%.
         let mut child = std::process::Command::new("/bin/sh")
             .arg("-c")
-            .arg("i=0; while [ $i -lt 100000000 ]; do i=$((i+1)); done")
+            .arg("i=0; while [ $i -lt 1000000000 ]; do i=$((i+1)); done")
             .spawn()
             .expect("spawn busy child");
         let pid = child.id() as i32;
+
+        // The test controls both halves of the rate, so neither the box's
+        // load nor the wall clock can move the answer: the child is frozen
+        // with SIGSTOP at each sample, which fixes its CPU ticks, and the
+        // monitor is handed timestamps this test chooses. A
+        // loaded box only makes the waits below take longer; nothing here
+        // bounds them in time.
+        let field = |n: usize| -> String {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("stat");
+            let rest = stat.rsplit_once(')').expect("comm").1.to_string();
+            rest.split_whitespace()
+                .nth(n)
+                .unwrap_or_default()
+                .to_string()
+        };
+        // utime + stime: indexes 11 and 12 after the comm field.
+        let ticks =
+            || -> u64 { field(11).parse::<u64>().unwrap() + field(12).parse::<u64>().unwrap() };
+        let signal = |sig: &str| {
+            let ok = std::process::Command::new("kill")
+                .args([sig, &pid.to_string()])
+                .status()
+                .is_ok_and(|s| s.success());
+            assert!(ok, "kill {sig} {pid}");
+        };
+        let stop = || {
+            signal("-STOP");
+            // Delivery is asynchronous: wait until the kernel shows it
+            // stopped (state T), so its ticks no longer move.
+            while field(0) != "T" {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let run_until = |target: u64| {
+            signal("-CONT");
+            while ticks() < target {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            stop();
+        };
+
+        // Some CPU before the baseline, so a lifetime average (ticks since
+        // start over the time given) would differ from the rate.
+        run_until(10);
+        let before = ticks();
 
         let mut m = TrainMonitor::new();
         let t0 = Instant::now();
@@ -1535,8 +1584,11 @@ mod tests {
         m.sample_host_cost(pid, t0);
         assert_eq!(m.state.host_cpu_pct, None, "one reading cannot be a rate");
 
-        std::thread::sleep(Duration::from_millis(600));
-        m.sample_host_cost(pid, Instant::now());
+        run_until(before + 20);
+        let used = ticks() - before;
+        // Tell the monitor four times the CPU time used has passed: 25%.
+        let cpu_secs = used as f64 / 100.0; // USER_HZ, as the monitor uses
+        m.sample_host_cost(pid, t0 + Duration::from_secs_f64(cpu_secs * 4.0));
 
         child.kill().ok();
         child.wait().ok();
@@ -1544,10 +1596,10 @@ mod tests {
         let cpu = m
             .state
             .host_cpu_pct
-            .expect("a busy process must report CPU");
+            .expect("a process that used CPU must report CPU");
         assert!(
-            cpu > 20.0,
-            "a spin loop should show substantial CPU, got {cpu:.1}%"
+            (cpu - 25.0).abs() < 0.01,
+            "CPU must be the rate between the two samples (25%), got {cpu:.3}%"
         );
         assert!(
             m.state.host_rss_bytes.is_some_and(|r| r > 0),

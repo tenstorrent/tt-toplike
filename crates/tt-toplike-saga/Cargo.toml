@@ -1,0 +1,17 @@
+[package]
+name = "tt-toplike-saga"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.93"
+authors = ["Tenstorrent <software@tenstorrent.com>"]
+license = "Apache-2.0"
+description = "Deterministic quest-view core for tt-toplike, driven by signal bus records"
+repository = "https://github.com/tenstorrent/tt-toplike"
+
+# The dependency list is a fence: tests/fences.rs fails if anything beyond the
+# bus crate and serde appears here. The core stays pure and deterministic.
+[dependencies]
+tt-toplike-bus = { path = "../tt-toplike-bus" }
+# Used only to rebuild an EntityKey from text (the bus crate has no public
+# constructor for an arbitrary `kind:id`); see chronicle.rs, `alias_entity`.
+serde = "1.0"

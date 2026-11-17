@@ -20,21 +20,38 @@
 pub mod activity;
 pub mod activity_lanes;
 pub mod arcade;
+pub mod arcade_bus;
+pub mod arcade_layout;
+pub mod arcade_presets;
 pub mod atmosphere;
+pub mod backdrop;
+#[cfg(test)]
+mod backdrop_cost;
+#[cfg(test)]
+mod backdrop_pins;
 pub mod baseline;
+pub(crate) mod bus_intake;
+#[cfg(test)]
+pub(crate) mod bus_test_support;
+pub mod castle_bus;
 pub mod common;
 pub mod defrag;
+pub mod defrag_bus;
+pub mod die3d;
 pub mod duel;
 pub mod inference_load;
 pub mod memory_castle;
 pub mod memory_flow;
+pub mod memory_flow_bus;
 pub mod model_starfield;
 pub mod serving_creature;
 pub mod serving_panels;
 pub mod snake;
 pub mod starfield;
+pub mod starfield_bus;
 pub mod takeover;
 pub mod topology;
+pub mod train_bus;
 pub mod train_canvas;
 pub mod train_sky;
 pub mod train_tapestry;
@@ -46,6 +63,7 @@ pub use arcade::ArcadeVisualization;
 pub use baseline::AdaptiveBaseline;
 pub use common::*;
 pub use defrag::DefragVis;
+pub use die3d::{Die3dView, DIE3D_DISPLAY_NAME, DIE3D_MODE_ALIAS, DIE3D_NAME_STORY};
 pub use duel::{duel_balance, DuelState};
 pub use inference_load::LoadSnake;
 pub use memory_castle::MemoryCastle;

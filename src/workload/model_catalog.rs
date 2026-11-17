@@ -105,20 +105,22 @@ impl CatalogRefresher {
         let cache_bg = Arc::clone(&cache);
         let _ = std::thread::Builder::new()
             .name("tt-catalog-refresh".into())
-            .spawn(move || loop {
-                if let Some(json) = curl_fetch(CATALOG_URL) {
-                    let models = parse_catalog(&json);
-                    if !models.is_empty() {
-                        // Best-effort cache write (ignore errors).
-                        let path = catalog_cache_path();
-                        if let Some(dir) = path.parent() {
-                            let _ = std::fs::create_dir_all(dir);
+            .spawn(move || {
+                loop {
+                    if let Some(json) = curl_fetch(CATALOG_URL) {
+                        let models = parse_catalog(&json);
+                        if !models.is_empty() {
+                            // Best-effort cache write (ignore errors).
+                            let path = catalog_cache_path();
+                            if let Some(dir) = path.parent() {
+                                let _ = std::fs::create_dir_all(dir);
+                            }
+                            let _ = std::fs::write(&path, &json);
+                            cache_bg.store(Arc::new(models));
                         }
-                        let _ = std::fs::write(&path, &json);
-                        cache_bg.store(Arc::new(models));
                     }
+                    std::thread::sleep(REFRESH_INTERVAL);
                 }
-                std::thread::sleep(REFRESH_INTERVAL);
             });
         CatalogRefresher { cache }
     }
@@ -130,6 +132,7 @@ impl CatalogRefresher {
 
 /// Fetch a URL via `curl` (dep-free HTTPS). `None` on missing curl / error / non-2xx.
 fn curl_fetch(url: &str) -> Option<String> {
+    crate::startup_log::phase("curl exec");
     let out = Command::new("curl")
         .args(["-fsS", "--max-time", "20", url])
         .output()

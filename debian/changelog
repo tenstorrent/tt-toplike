@@ -1,3 +1,586 @@
+tt-toplike (0.19.0) noble; urgency=medium
+
+  * Viz plugins: a full-screen view can now be added without touching the
+    rest of the program. There are two tiers. A Rust plugin is a folder
+    under src/viz/plugins/ that the build finds by itself. A YAML (or JSON)
+    plugin is one file in viz/ or in ~/.config/tt-toplike/viz/ with gauge,
+    sparkline, table, log, grid, heat_strip and text widgets, thresholds
+    that recolour them, and a JSON Schema for editors. The program checks
+    the YAML folders every 2 seconds, so a saved edit appears without a
+    restart; an edit that does not load keeps the last good version drawing
+    and says why in "tt-toplike viz list" and the log.
+  * --viz <id> starts on a plugin view and switches it on for the run. In
+    config.toml, [viz] enable = ["id"] adds views to the "v" cycle, and a
+    [viz.<id>] table is handed to that plugin. The cycle goes from the
+    Wafer Waffler to each enabled plugin in id order, then to Insights.
+    /mode <id> and /viz <id> switch too, and a plugin has its own legend
+    (l), explanation (!) and help (?) panels. A panic in a plugin turns
+    that plugin off and the program goes on.
+  * "tt-toplike viz new <name>" makes a Rust plugin from the example (in a
+    checkout), "tt-toplike viz new <name> --yaml" makes a YAML one, and
+    "tt-toplike viz list" shows every view with its source and status.
+  * Two examples ship, both hidden until asked for with --viz or [viz]
+    enable: example-pulse (Rust, in the binary) and thermal-board (YAML,
+    found when tt-toplike runs inside a checkout; an installed binary can
+    make a copy with "tt-toplike viz new <name> --yaml").
+  * Limits: a plugin draws a full-screen view only. It cannot take keys of
+    its own, add a panel to the arcade layout, or add a signal. YAML has
+    no custom drawing. The reference is docs/viz-plugins.md.
+  * Nothing on the signal bus changed. The bus crate stays at 0.2.0 and the
+    saga crate at 0.3.0.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Wed, 04 Nov 2026 19:20:00 -0800
+
+tt-toplike (0.18.0) noble; urgency=medium
+
+  * Saga heroes cross Ethernet links. Each portal on a floor's north edge
+    is bound to its Ethernet port, and a new bus event, LinkPeer, names the
+    port at the other end of a link. A hero whose model spans two chips, or
+    whose link has just come up, walks to the portal and steps through it
+    into the floor of the chip at the other end. The crossing takes 3
+    ticks, and both tiles show it. If the link drops on the way, the hero
+    is thrown back out of the portal it left from.
+  * Portals take the far floor's colour when the link is open, go dim when
+    it is closed, and glow while a hero crosses. A tile with no hero says
+    so and keeps its map, and a tile can hold several heroes. The chronicle
+    tells each crossing on both floors, and a line built from estimated
+    readings (every --mock reading) ends in "~". A tile that is not focused
+    shows a held picture, so a hero who has crossed away can show on it for
+    up to 5 ticks.
+  * On real hardware no backend writes LinkPeer yet, so the far side of a
+    link is unknown and no hero crosses. Only --mock (a ring of its own
+    chips) and recorded logs carry it.
+  * --mock with two or more chips now flaps one ring port per chip from
+    time to time (dark for 8 to 12 seconds every 60 to 80 seconds, each chip
+    at its own time), so a mock saga shows crossings. The port's cage in the
+    Wafer Waffler goes dark for those seconds.
+  * When a model goes away, another ready model on the same link offers its
+    crossing again. A LinkPeer whose port number is not plain digits (/+5,
+    /05), or that cables two ports of one chip, is ignored. The "!" text
+    and the "l" legend explain crossing and the "~" mark, and "y" on a line
+    caused by a live-mask reading says the chip changed which of its links
+    are live.
+  * The saga digest's encoding is now version 3, so --saga-digest prints a
+    different number than 0.17 did for the same log. The bus crate is 0.2.0
+    and the saga crate is 0.3.0.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Wed, 04 Nov 2026 10:45:00 -0800
+
+tt-toplike (0.17.0) noble; urgency=medium
+
+  * Saga has a party: every chip's floor has its own hero, born with the
+    world, and all of them quest at the same time. With more than one chip
+    the view shows every floor at once as a grid of tiles, each following
+    its hero under a one-row HUD (floor tag, name, vitality, quest). The
+    focused tile is drawn with its light and glow; the others are drawn
+    calmer, so 32 chips at 140x40 send the terminal about 19 KB/s.
+  * In Saga, "[" and "]" move the focus from floor to floor, and the page
+    follows the focus; "z" shows the focused floor alone. A roster row lists
+    every hero and says how many chips have no floor. A box with more than
+    32 chips gets floors for the first 32.
+  * One chronicle holds every floor's lines, each tagged with its floor. One
+    floor's quest lines are written per second, and a hero not heard for 300
+    ticks goes first. A party's birth writes one line for the whole party.
+  * A model's dungeon now spans every chip, with the model's sage on the
+    floors of the chips it names.
+  * A hero never leaves its floor yet; crossing between linked chips comes
+    next.
+  * One chip draws the same view and tells the same story as before. The
+    saga digest's encoding is now version 2, so --saga-digest prints a
+    different number than 0.16 did for the same log. The saga crate is
+    0.2.0.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 20:30:00 -0800
+
+tt-toplike (0.16.7) noble; urgency=medium
+
+  * Fixes wrong background colours in macOS Terminal.app over SSH. 0.16.2
+    let COLORTERM=truecolor turn on 24-bit colour inside tmux, but a tmux
+    server keeps the COLORTERM of the session that started it, so a pane
+    could claim truecolor in a terminal that cannot draw it. tmux is back to
+    256 colours. New: TT_TOPLIKE_COLOR=truecolor or 256 settles the colour
+    depth by hand and beats every guess, tmux included.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 20:00:00 -0800
+
+tt-toplike (0.16.6) noble; urgency=medium
+
+  * The status bar flags a stalled ARC: a chip whose firmware heartbeat
+    reads 0 shows a red "ARC!" after its readings, and with more than four
+    chips the averaged column ends with "ARC!xN". A chip that reports no
+    heartbeat is not flagged. The arcade's removed hero used to show this.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 16:00:00 -0800
+
+tt-toplike (0.16.5) noble; urgency=medium
+
+  * Arcade mode no longer has the @ hero that moved over the whole screen,
+    or its trail: it distracted from the panels. The duel on the top row
+    while a model serves is unchanged. The ring round the hero for each
+    request completed and the hero's heartbeat from tokens per second went
+    with it; a request completed still makes the duel's snake lunge.
+  * The arcade no longer shows a faults register, an ARC heartbeat of 0, an
+    undervolt (a busy Blackhole under 0.65 V) or a harvesting state. It
+    showed them only through the hero's glyph. Throttling still
+    desaturates the starfield; harvested Tensix columns and GDDR
+    temperatures still show in Insights.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 15:00:00 -0800
+
+tt-toplike (0.16.4) noble; urgency=medium
+
+  * Saga is an arcade panel (view = "saga", at least 20x6). The now-serving
+    layout shows it in place of defrag: the inference server over the Wafer
+    Waffler and Saga. The panel draws the Saga view's map, fog and trail
+    under a one-row HUD (hero, vitality, quest), with a chronicle strip from
+    60x12. Before the first world, or with [saga] enabled = false, it says
+    so on one line. The full Saga view did not change.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 14:00:00 -0800
+
+tt-toplike (0.16.3) noble; urgency=medium
+
+  * Saga's why line (the y key) is a sentence instead of the raw cause: "this
+    goes back to the model mock-llama coming online (record 379)". When
+    nothing set the hero's move off, it says so. Only the view changed; the
+    story and its digests are the same.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 13:00:00 -0800
+
+tt-toplike (0.16.2) noble; urgency=medium
+
+  * tmux no longer forces 256 colours. COLORTERM=truecolor (or 24bit) turns
+    on full colour inside tmux as it does outside it. Without that variable
+    every terminal, tmux included, still gets 256 colours, so macOS
+    Terminal.app over SSH keeps its safe behaviour. For full colour in tmux,
+    add: set -as terminal-features ',*:RGB'
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 12:00:00 -0800
+
+tt-toplike (0.16.1) noble; urgency=medium
+
+  * Saga has a new look; the story and its digests are unchanged. Walls are
+    drawn as box-drawing lines (thin inside a floor, double on the outer
+    shell) and solid rock is blank. The hero's light shows what it can see,
+    the map keeps what it has seen at a low brightness, and unexplored cells
+    stay dark; the memory starts over on a new world or floor. The hero
+    glows and leaves a fading trail, and the goal and a visited sage pulse.
+    New glyphs: sage, goal, vault, gate, portal, door, exit, floor and
+    ruin. Biomes have their own brand colours, a hot chip warms its floor,
+    the chronicle marks each line's tone and puts names in bold, and the
+    status row shows a vitality bar, the mapped share and the tick.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Tue, 03 Nov 2026 09:00:00 -0800
+
+tt-toplike (0.16.0) noble; urgency=medium
+
+  * Saga, phase 1: a view where a hero quests through a dungeon built from
+    the machine's own signals. S opens it from any view and --mode saga
+    starts in it; S or Esc leaves. Each chip is a floor, and a Blackhole
+    floor follows the chip's tile grid. A model becoming ready, a reset, a
+    model going away, a training run or a quiet season ends a world, and
+    the next one has a new maze. The chronicle tells what happens, and y
+    shows each line's cause. See docs/saga.md.
+  * The same recorded log always tells the same saga. --bus-inspect DIR
+    --saga-digest prints its digest, so a recording and a replay of it can
+    be compared. A live run, a replay of its recording in another TUI and
+    the digest agree: view changes and replay gaps do not count, and the
+    log header records the season length (saga.season_ticks).
+  * Each run starts with its own world: the seed takes every bit of the
+    last 64 readings.
+  * The saga's clock is a chip; if it stops sweeping for three updates,
+    the next chip takes over. A reused --bus-dir starts the saga at this
+    session's first record.
+  * [saga] in config.toml: enabled, names ("real" or "generated") and
+    season_minutes. An unknown names value hides names.
+  * Monsters, treasure, fights and the saga.* bus events come in phase 2.
+    Saga has not been run on real hardware by a person yet.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 20:11:18 -0800
+
+tt-toplike (0.15.5) noble; urgency=medium
+
+  * The backdrop applies only to the views that carry one of their own:
+    the Inference view (scene), the Training view (sky) and the Wafer
+    Waffler (clouds). Each still takes any of the three kinds or off. Every
+    other view, the arcade among them, carries no backdrop; w and /backdrop
+    there say "no backdrop on this view" and change nothing.
+  * The arcade draws nothing behind its panels, and its c key is gone.
+    now-serving no longer turns on clouds; its Wafer Waffler panel draws
+    its own clouds as before.
+  * [arcade] cloudfield, a layout's backdrop or cloudfield, /arcade
+    cloudfield, a [backdrop.views] entry for a view that takes none, and a
+    [backdrop] default other than off are read and ignored with a note.
+    None of them is an error.
+  * --check-config prints "arcade starts with NAME: N rows".
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 19:11:18 -0800
+
+tt-toplike (0.15.4) noble; urgency=medium
+
+  * A shared backdrop. Any view can draw a signal-driven background behind
+    its content: scene (the Inference atmosphere), sky (the Training aurora
+    and stars) or clouds (the Wafer Waffler's clouds). The Inference view,
+    the Training view and the Wafer Waffler keep their own as before. w cycles
+    the backdrop of the view on screen, /backdrop sets it, and [backdrop] in
+    the config file sets a default and a choice per view. The Starfield
+    refuses scene and sky, because its stars are Tensix cores.
+  * Arcade layouts. { and } step through eight built-in layouts (classic,
+    now-serving, defrag-wide, waffler, workload, deck, skyline, memory-lane)
+    and your own [[arcade.layouts]] tables in the config file. A layout can set
+    the arcade's backdrop. --arcade-layout NAME starts with one, and
+    /arcade layout next, prev, a name or list works on the command bar.
+  * No arcade row ends in a right-side border character at any width. A
+    vertical, a right corner, a right-edge joint, a right-hand block or an
+    ASCII bar in the last column is drawn as a space, and nothing else
+    changes. The default layout differs from 0.15.3 only by that last
+    column at 418 sizes.
+  * A message set by a layout, backdrop or arcade key goes away when you leave
+    that view, and an informational one goes after about four seconds.
+  * Fix: switching layouts no longer shows "no Tenstorrent device found" for
+    one frame.
+  * The backdrop writes far less to the terminal: a serving model's scene
+    went from 1.17 MB/s to 74 KB/s on a blank 200x60 view.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 18:11:18 -0800
+
+tt-toplike (0.15.3) noble; urgency=medium
+
+  * Die 3D is now the Wafer Waffler. /waffler and --mode waffler open it, and
+    /die3d and --mode die3d still do. The name lives in one place in the code.
+  * Every explain, legend and help overlay is shorter and fits 80 columns
+    in 24 rows (help) or 30 rows (legend and explain) with no scrolling. The
+    Insights explain text keeps its ECC paragraph on a short terminal, and
+    the Starfield text no longer says the orbit radius follows memory
+    bandwidth.
+  * Arcade can be laid out in the config file. [[arcade.row]] tables in
+    ~/.config/tt-toplike/config.toml pick the panels (starfield, castle, flow,
+    defrag, die3d, training, inference) and give each a width weight, so
+    width = 3 makes a panel triple wide. A bad file keeps the default
+    layout and says why on the status line. tt-toplike --check-config prints
+    every problem with its line. The default layout draws what it drew
+    before, at every terminal size. The c key and /arcade cloudfield on|off
+    turn on a backdrop behind the arcade while an inference service loads or
+    serves.
+  * The config file is read only if it is a regular file of at most
+    256 KiB, and a problem reading it is reported instead of ignored.
+  * Tests that depended on the terminal's colour settings or on a real process
+    now pass under TERM=dumb, as CI runs them.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 17:11:18 -0800
+
+tt-toplike (0.15.2) noble; urgency=medium
+
+  * The rest of the views read the signal bus. Starfield shows a cluster for
+    each model coming up, a comet for each completed request and a flare for
+    an ECC rise. Memory Flow streams a loading model's weights to its
+    channels. Memory Castle lights a tower for a model, and Defrag fills its
+    blocks from the model's load progress and clears them when it goes down.
+    Grid portraits and the Insights chip panels show the model, its phase and
+    its tokens per second. The Training view can show a run seen on a
+    headless host, and shows a model serving on the same chips.
+  * The --rotate rotation and R now visit Die 3D when the box has a
+    Blackhole chip. The v cycle does not.
+  * The % mark on the arcade hero no longer shows on an idle Blackhole chip.
+    It needs a core voltage under 0.65 V (the old floor was 0.75 V, the
+    nominal voltage) and a clock above the 800 MHz idle clock. Other
+    architectures keep the 0.75 V floor.
+  * Fix: tests that waited on the wall clock or raced a thread failed on a
+    loaded machine. They now use a fixed clock or no time bound.
+  * Not yet run on real hardware, in a live terminal, or attached to a
+    headless host. The three copies of the bus intake rules (arcade, Die 3D
+    and the new shared module) are not yet one.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 17:00:00 -0800
+
+tt-toplike (0.15.1) noble; urgency=medium
+
+  * Arcade reads the signal bus. A model coming up fills a gauge on the chip's
+    side of the screen as it loads, and settles when it is ready. Each
+    completed request makes a hit, and the hero's pace follows tokens per
+    second. Kernel compiles and sparks give small particles, a reset flashes
+    the chip, and the duel shows an attached host's serving stats. A value
+    from the mock backend carries the ~ mark.
+  * The ~ hivemind view reads the signal bus. A strip above the board shows a
+    model flag and a bring-up bar for each local chip. Model, request,
+    kernel-compile, spark and reset events join the feed. The scanner at the
+    bottom surges on each completed request and runs faster with tokens per
+    second. Events that were already in the bus when the view opened are
+    dimmed. On a bus this TUI hosts, the view hides only the sparks and
+    compiles the sweeper itself published.
+  * The cut rows in the ~ feed are one column shorter than before, so a
+    cut row no longer runs a column past its pane.
+  * Fix: after a late log lock moved the head forward, a socket subscriber
+    could stall or skip records. The in-memory window is now cleared at the
+    jump and a read behind it is refused with a Dropped error.
+  * The `i` view, Die 3D, arcade and ~ now draw the same signals. Arcade and
+    ~ have not been run on real hardware or an attached headless host.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 15:00:00 -0800
+
+tt-toplike (0.15.0) noble; urgency=medium
+
+  * New: the signal bus. Every source writes its readings to one ordered,
+    timestamped log, and every view reads from it. The log records samples,
+    events, gaps and the provenance of each value (measured, derived,
+    estimated or decoration). A headless host keeps 24 hours or 5 GB of log
+    in a directory only the owner can read (--bus-retain HOURS[,GB] changes
+    that). A TUI without --record or --bus-dir keeps its bus in memory. The
+    log is described in docs/bus.md.
+  * Replay and inspect. --record DIR makes a normal TUI record to a directory.
+    --bus-inspect DIR prints a summary of a recording (add --entity or
+    --signal to narrow it). --replay DIR --speed N plays a recording back
+    through a headless host. Replay reports holes in a log as gaps.
+  * The socket. A host serves its bus on a Unix socket in a private directory
+    (--bus-socket PATH). A client can ask for a snapshot, follow live records
+    or replay. A second TUI on the same machine attaches to a live host that
+    has the same chips. --bus-attach SOCKET attaches on request, and
+    --no-bus-attach turns the start-up probe off. The probe skips a host with
+    a different host identity or a mock backend.
+  * --headless runs the host with no screen, for systemd (Restart=on-failure,
+    no root). It takes a lock on the log directory and on the socket, so two
+    hosts cannot write one log. --bus-dir DIR sets the log directory.
+    --mock-workloads makes a --headless --mock host also scan this box's
+    real processes and model servers and record them against the mock
+    chips, so its log holds real process and model names.
+  * Sources: the chip backend, the inference monitor, training runs,
+    hivemind, the process scan, --remote scrapes and gozer leases. Gozer
+    leases are read with gozer's read-only commands, and the governor only
+    permits what the lease list shows (it can be up to 60 seconds stale after
+    a failed refresh).
+  * Secrets in command lines are replaced with <redacted> before they reach
+    the log. The matcher covers tokens, keys, passwords, URL credentials and
+    common flag and variable names. It has known false positives and known
+    leaks, both listed in docs/bus.md.
+  * tt-station frames are now built from the bus. The bytes a client sees are
+    unchanged.
+  * The no-TTY --serve loop now runs on the headless host. SIGTERM and SIGINT
+    flush the bus and exit 0; before, they killed the process. A --remote
+    relay re-broadcasts the origin's frame byte for byte. Nothing is sent
+    until the first raw tt-smi frame exists.
+  * Die 3D reads the bus: model flags, a bring-up fill that grows with load
+    progress, pulses on events, sparks, and per-channel DRAM rows. The legend
+    and the explain text name each of these, and estimated values are marked
+    with ~.
+  * The i (inference monitor) view reads an attached host's world. A host that
+    disconnects shows a (host disconnected) or (reconnecting) marker, and the
+    rotation uses the attached rows.
+  * Limits of this release. It has not been run on real hardware with the
+    bus. The tile glow in Die 3D is still an estimate. The per-tile counter
+    sidecar is not included, because a live reader on a chip blocks gozer
+    reset and release. The order of the DRAM rows within a side is not
+    documented, so the viewer keeps its own order and says so. Deferred review
+    findings are listed in docs/bus.md section 13.
+  * The root package is 0.15.0. The new crate tt-toplike-bus stays at 0.1.0.
+  * CI runs the bus crate's tests and clippy, and the tui_panic_hook
+    integration test.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Mon, 02 Nov 2026 12:00:00 -0800
+
+tt-toplike (0.14.5) noble; urgency=medium
+
+  * Die 3D: the arrow keys move the window over a scene that is clipped (too
+    big for the terminal). They stop at the scene's edge, and a key back moves
+    at once. They do nothing when the whole scene fits. The footer says
+    "arrows pan" next to the clipped note.
+  * Die 3D footer: below 172 columns the action keys ([ ] board, space cut,
+    3 leave) now stay with the state words once those fit (about 107 columns).
+    They used to drop together with the /command names, at 172 columns.
+  * The explain text said a process opening or closing a device dissolves. It
+    cuts with chaos, as the README says, and the text now names the tt-smi 6.0
+    or later that supplies the processes.
+  * The 0.13.x entry above no longer gives one test box's idle power (0.30 of a
+    125 W limit) as if every chip had it.
+  * die3d/mod.rs: its tests moved to die3d/tests.rs (5,000 lines to 1,770).
+  * CI and the release build use the macos-15 runner; macos-14 retires on
+    2 November 2026.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sat, 31 Oct 2026 14:50:45 -0700
+
+tt-toplike (0.14.4) noble; urgency=medium
+
+  * Review fixes. The unattended rotation no longer counts a Down service as a
+    model that is starting or running, and it learns about a training run from
+    the background scan instead of walking /proc on the render thread.
+  * A cut that starts while another is running starts from the camera on screen
+    (it jumped to the earlier cut's destination).
+  * A chip's idle is the 10th percentile of each minute, and a reading of a watt
+    or less is ignored, so one glitch no longer sets the idle for a day.
+  * Docs: the rotation text names Grid and Die 3D as left out, the history panel
+    text says what it plots, and the design spec's status is current.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 18:30:00 -0700
+
+tt-toplike (0.14.3) noble; urgency=medium
+
+  * Fix the Windows build: the rotation's inference peek used values that only
+    exist on Linux.
+  * The black background goes through the colour-support check again, so a
+    terminal without truecolor (tmux, macOS Terminal.app over SSH) gets its own
+    default background and not a truecolor fill. 0.13.25 to 0.14.2 sent a literal
+    truecolor black everywhere.
+  * One test pinned buffer hashes taken in a truecolor terminal and failed
+    without COLORTERM; it fixes the colour mode itself now.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 17:30:00 -0700
+
+tt-toplike (0.14.2) noble; urgency=medium
+
+  * The unattended rotation (--rotate, R) skips Training and the Inference
+    Monitor unless something is going: a training run, or a model server that is
+    starting or running. It used to visit them for 10 s each even when they were
+    empty. It looks at both every 3 s while it is on another view. A run that
+    ends while its view is on screen still gets the 10 s glance. Die 3D is not
+    in the rotation (it is entered with 3).
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 17:00:00 -0700
+
+tt-toplike (0.14.1) noble; urgency=medium
+
+  * Die 3D: the camera turns by itself after 15 s with no cut (it was 45 s, which
+    was too long to ever see).
+  * Die 3D: /blocks and /braille are shortcuts for /cells blocks and /cells
+    braille, and /cells block works as well as /cells blocks.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 16:30:00 -0700
+
+tt-toplike (0.14.0) noble; urgency=medium
+
+  * Die 3D: the view's settings are slash commands now, and the keys are the ones
+    that mean the same everywhere. [ and ] change board, Space cuts the camera
+    (it is the nudge key). /board /scene /cut /autocut /transition /cells /bg
+    /labels /clouds /history replace the letter keys m c C B T X L W H, and
+    /help lists them (in full inside the view).
+  * Die 3D: /theme works here. Grayskull keeps the greys with one hot pink, and
+    the default theme is a new full-colour palette.
+  * Die 3D: cuts are reasoned by what happened. The default transition, rotate,
+    spins when nothing happened (Space, or after 45 s with no cut) and cuts an
+    event by its reason: chaos for a chip (load rise, PCIe burst, temperature
+    rising 4 C above its own level) or a process opening or closing a device, a
+    dissolve for memory (GDDR at 65 C) or the board (an Ethernet link changing).
+    Shuffle is gone. /transition chaos, dissolve or spin still pins one.
+  * Die 3D: the cell style follows the hardware. /cells auto (the default) starts
+    in braille, quarter blocks or half blocks, picked from what the hardware
+    reports, and changes at a camera cut after something happens, never within
+    two minutes of the last change. /cells blocks changes between the two block
+    forms only. /cells braille, quarter and half hold one. Quarter blocks are new.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 16:00:00 -0700
+
+tt-toplike (0.13.25) noble; urgency=medium
+
+  * Every screen has a solid black background by default, including the Die 3D
+    view and its inset on the Insights screen. The Die 3D view used to default to
+    a transparent background, which showed the terminal's own colour behind the
+    scene. The background is chosen in one place now (colors::canvas_bg), and no
+    view paints a literal black any more. Set TT_TOPLIKE_TRANSPARENT=1 to draw on
+    the terminal's own background instead. The T key in the Die 3D view still
+    flips it.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 15:30:00 -0700
+
+tt-toplike (0.13.23) noble; urgency=medium
+
+  * Die 3D view: a narrow window no longer loses the scene. Below the four pixel
+    tile (a two-die board needs 51 columns for it) the scene shrinks to a two
+    pixel tile, which a two-die board fits whole in 25 x 8 cells. A window
+    smaller than that shows the middle of the whole scene, and the last row
+    (or the footer) says "clipped, needs 25x8". The text summary now starts
+    below 16 x 6. The scene of every board still falls back to one board at the
+    four pixel tile, and the Insights inset is unchanged.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 14:00:00 -0700
+
+tt-toplike (0.13.22) noble; urgency=medium
+
+  * Die 3D view: it now draws below 100 x 30, where it used to refuse. As the view
+    area shrinks, the clouds and the history panel go first, then the footer
+    shrinks to one row, then the flags go, and the scene itself shrinks down
+    to about 40 x 12. Below that the view shows a text summary with one line
+    per chip.
+  * Insights screen: a small Die 3D inset beside the process table when the
+    process area is at least 122 x 16 (the inset is 52 columns wide). It shows one board, or every board
+    when they fit, or the busiest chip's board (held for 10 s) otherwise.
+    Key 3 opens the full view. It costs about 0.06 ms a frame at 52 x 16 for
+    p150 boards and 0.11 ms for a two-die board (p300). A two-die board needs
+    an inset 51 x 16 for its scene, so the 52 x 16 inset draws it.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 12:00:00 -0500
+
+tt-toplike (0.13.21) noble; urgency=medium
+
+  * Die 3D view: the tile wave follows the direction of PCIe traffic. Inbound
+    data sends fronts from the connector edge toward the back of the die,
+    outbound data sends them toward the connector, and a heavier rate lights
+    its front brighter. A chip with no traffic keeps the sideways sweep.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 11:00:00 -0500
+
+tt-toplike (0.13.20) noble; urgency=medium
+
+  * Die 3D view: the chip labels are now flags. Each die has a pin on its
+    rim and a one-cell pole to the name and power (BH0 44W), which sit on open
+    space outside the board and never over the picture. A pole may cross a
+    board to reach open space. L turns the flags on and off.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 30 Oct 2026 09:00:00 -0500
+
+tt-toplike (0.13.19) noble; urgency=medium
+
+  * New Die 3D view, opened with the 3 key. It draws each Blackhole board in
+    isometric perspective with braille characters (B switches to half-block
+    cells), in a Grayskull-style palette. It shows one board or every board
+    (m), and [ and ] choose the board. Chips that are not Blackhole are named
+    in the footer and not drawn. The view is not in the v rotation; 3 or Esc
+    leaves it.
+  * The glow on each tile is an estimate from chip activity and the footer
+    says so ("per-tile glow: estimate from chip load"). Per-tile NoC counters
+    are not read. They are a separate, experimental plan.
+  * The camera cuts to another angle (four corners, top-down, low) when a
+    chip's activity rises or PCIe traffic bursts. Activity is measured against
+    each chip's own idle over the last day, because an idle chip already
+    draws a fixed share of its power limit. A burst is 50 MB/s
+    of PCIe traffic, and the detector re-arms at 10 MB/s. Cuts use chaos,
+    dissolve or a spin, shuffled (X sets one). The footer names the corner
+    nearest the viewer, and both ends during a cut. Each die carries a label
+    such as BH0 44W.
+  * Clouds drift behind the dies (W). They are decoration: their drift follows
+    PCIe traffic and their brightness follows chip load. A history panel (H)
+    plots the last 60 seconds of each chip's power and the box's PCIe
+    traffic as sparklines, and shows each chip's latest temperature. Those
+    are measured values.
+  * T switches between the terminal's own background and pure black, C turns
+    automatic cuts off, L turns the chip labels off. The footer's second row
+    lists every switch with its state. The legend (l), explain (!) and help (?)
+    overlays describe the view.
+  * Faster: at most 20 redraws a second at rest and 30 during a cut, and the
+    tile wave steps 12 times a second. Changed cells per frame fell by more
+    than half (about 347 to 157 for one board and 358 to 174 for four,
+    braille at 150 x 42; one release-build run on a shared machine).
+  * The view area needs 100 x 30 cells. In the TUI the status bar takes a row,
+    so the smallest terminal is 100 x 31. The history panel needs 120 x 37.
+    150 x 42 or larger looks best.
+  * A PCIe counter file that could not be read for one sample made the rate
+    spike when it came back, because its whole value counted as one step.
+    It now adds nothing until it has been read twice in a row.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 29 Oct 2026 15:00:00 +0000
+
+tt-toplike (0.13.18) noble; urgency=medium
+
+  * PCIe bandwidth was 16 times too low. A tt-kmd counter word is one 64-byte
+    NoC flit, not a 4-byte word. Measured on a Blackhole p300c: a 268,378,112-byte
+    host-to-device copy moved the counter by 4,193,421 words.
+  * The into-chip and out-of-chip directions were swapped. The counters are on
+    the NoC side of the PCIe tile: the chip reading host memory is data into the
+    chip, and the chip writing host memory is data out of it. The directions for
+    the host-initiated counters (mst_*) follow from that and were not measured.
+  * A 32-bit counter that wraps between two samples no longer drops that sample.
+    The step is taken per counter, and a step over half the range counts as a
+    device reset and reads as zero.
+
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 29 Oct 2026 12:00:00 +0000
+
 tt-toplike (0.13.17) noble; urgency=medium
 
   * Arcade and the Inference atmosphere no longer flare for events that did
@@ -97,7 +680,7 @@ tt-toplike (0.13.11) noble; urgency=medium
     already been returning nothing. Reported and first fixed by Eugene
     Valkov (issue 35).
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 16 Oct 2026 12:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Wed, 14 Oct 2026 11:00:00 +0000
 
 tt-toplike (0.13.10) noble; urgency=medium
 
@@ -327,7 +910,7 @@ tt-toplike (0.13.0) noble; urgency=medium
   * Fix: `/mode training` is recognized; it was reachable only as
     `--mode training`.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sat, 29 Aug 2026 23:00:00 +0000
 
 tt-toplike (0.12.0) noble; urgency=medium
 
@@ -346,7 +929,7 @@ tt-toplike (0.12.0) noble; urgency=medium
     would have drawn a permanently empty board; entry is now a choke point
     mirroring the existing exit one.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sat, 29 Aug 2026 22:00:00 +0000
 
 tt-toplike (0.11.2) noble; urgency=medium
 
@@ -356,7 +939,7 @@ tt-toplike (0.11.2) noble; urgency=medium
     this is purely a scriptable entry point for launchers, kiosks and
     systemd units that previously needed an interactive `t`.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sat, 29 Aug 2026 21:00:00 +0000
 
 tt-toplike (0.11.1) noble; urgency=medium
 
@@ -380,7 +963,7 @@ tt-toplike (0.11.1) noble; urgency=medium
   * Docs: recorded a Training view demo (README + project site), and added
     a `t · training` mode row to the site.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Sun, 30 Aug 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Sat, 29 Aug 2026 20:00:00 +0000
 
 tt-toplike (0.11.0) noble; urgency=medium
 
@@ -450,7 +1033,7 @@ tt-toplike (0.10.2) noble; urgency=medium
     roster entries, almost all stuck on "down". Detection now walks each
     match's process ancestry and keeps only the root of each match family.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 28 Aug 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 27 Aug 2026 23:00:00 +0000
 
 tt-toplike (0.10.1) noble; urgency=medium
 
@@ -475,7 +1058,7 @@ tt-toplike (0.10.1) noble; urgency=medium
     before the gddr_telemetry change above, isolating this as unrelated
     and pre-existing.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 28 Aug 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 27 Aug 2026 22:00:00 +0000
 
 tt-toplike (0.10.0) noble; urgency=medium
 
@@ -528,7 +1111,7 @@ tt-toplike (0.10.0) noble; urgency=medium
     packed aggregate carries genuine counts, the row would hide errors it
     used to show. Both are on the manual-verification checklist.
 
- -- Taylor Singletary <tsingletary@tenstorrent.com>  Fri, 28 Aug 2026 00:00:00 +0000
+ -- Taylor Singletary <tsingletary@tenstorrent.com>  Thu, 27 Aug 2026 21:00:00 +0000
 
 tt-toplike (0.9.0) noble; urgency=medium
 
@@ -1172,7 +1755,7 @@ tt-toplike (0.4.2) noble; urgency=medium
   * Fix dead code warnings: remove unused _in_tmux detection, unused _temp
     parameter from MemoryFlowVis constructors, and dead fetch_smbus_snapshot.
 
- -- Tenstorrent <software@tenstorrent.com>  Fri, 24 Apr 2026 00:00:00 +0000
+ -- Tenstorrent <software@tenstorrent.com>  Thu, 23 Apr 2026 23:00:00 +0000
 
 tt-toplike (0.4.1) noble; urgency=medium
 
@@ -1243,7 +1826,7 @@ tt-toplike (0.3.0) noble; urgency=medium
     covering LLM inference vs video generation patterns, idle baseline activity,
     and the tt-smi -r reset light show sequence.
 
- -- Tenstorrent <software@tenstorrent.com>  Wed, 16 Apr 2026 00:00:00 +0000
+ -- Tenstorrent <software@tenstorrent.com>  Wed, 15 Apr 2026 23:00:00 +0000
 
 tt-toplike (0.1.0) noble; urgency=medium
 

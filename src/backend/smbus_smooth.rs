@@ -152,6 +152,7 @@ pub fn apply_ema(
     copy_opt(&incoming.gddr_uncorr_errs, &mut existing.gddr_uncorr_errs);
     copy_opt(&incoming.harvesting_state, &mut existing.harvesting_state);
     copy_opt(&incoming.eth_live_status, &mut existing.eth_live_status);
+    copy_opt(&incoming.eth_peers, &mut existing.eth_peers);
     copy_opt(&incoming.enabled_eth, &mut existing.enabled_eth);
     copy_opt(&incoming.enabled_gddr, &mut existing.enabled_gddr);
     copy_opt(&incoming.enabled_l2cpu, &mut existing.enabled_l2cpu);
@@ -763,6 +764,7 @@ mod tests {
             gddr_uncorr_errs: Some(0),
             harvesting_state: Some(0),
             eth_live_status: Some(0),
+            eth_peers: None,
             enabled_eth: Some(0),
             enabled_gddr: Some(0xff),
             enabled_l2cpu: Some(0),

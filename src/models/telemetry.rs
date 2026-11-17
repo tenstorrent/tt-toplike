@@ -153,6 +153,18 @@ fn de_opt_usize_str<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<usi
     })
 }
 
+/// One Ethernet link's far end: this chip's `port` is wired to port
+/// `peer_port` of the chip at `peer_bus_id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EthPeer {
+    /// The port on this chip.
+    pub port: u8,
+    /// PCI bus id of the chip at the far end (the key the bus uses for it).
+    pub peer_bus_id: String,
+    /// The port on the far chip.
+    pub peer_port: u8,
+}
+
 /// SMBUS telemetry (low-level hardware status)
 ///
 /// Contains detailed hardware status information from the System Management Bus.
@@ -329,6 +341,13 @@ pub struct SmbusTelemetry {
 
     /// ETH_LIVE_STATUS bitmask: bit N set → ETH port N has a live link.
     pub eth_live_status: Option<u64>,
+
+    /// Which port sits at the other end of each Ethernet link, when the
+    /// backend knows. `None` for every real backend: no firmware or driver
+    /// path reports the far end today, so a real chip's links stay
+    /// unbound. Only the mock backend fills it (a ring of chips). The bus
+    /// source turns a changed list into `LinkPeer` events.
+    pub eth_peers: Option<Vec<EthPeer>>,
 
     /// ENABLED_ETH bitmask.
     pub enabled_eth: Option<u32>,
@@ -711,6 +730,7 @@ impl SmbusTelemetry {
             gddr_uncorr_errs: None,
             harvesting_state: None,
             eth_live_status: None,
+            eth_peers: None,
             enabled_eth: None,
             enabled_gddr: None,
             enabled_l2cpu: None,

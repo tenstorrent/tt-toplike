@@ -78,6 +78,60 @@ N"` or `git show <version tag>` if you need the original detail.
 
 ---
 
+## Add a viz
+
+A viz is a full-screen view that you add without touching shared code. The reference is
+`docs/viz-plugins.md`; read it before you write anything. This is the short recipe.
+
+**Commands in a checkout.** In a checkout of the repository, run every `tt-toplike ...` command below
+as `cargo run --features tui --bin tt-toplike-tui -- ...` (for example `cargo run --features tui
+--bin tt-toplike-tui -- viz list`). The plain `tt-toplike ...` form is for an installed binary. A Rust
+plugin needs a rebuild, and `cargo run` does that. A YAML file needs none.
+
+1. **Pick a tier.** A YAML file is the default: gauges, sparklines, tables, a log, a grid, a heat
+   strip or text, with colours that change at thresholds. Use a Rust folder only when you need your
+   own drawing, state between frames, or a `[viz.<id>]` setting.
+2. **Read the signal names** in `src/bus/signals.rs`. Use a name from that file. A viz cannot add a
+   signal. (`tt_fan_speed_rpm` is fan speed; `tt_tdp_w` is the chip's live power draw; `tt_asic_temperature_celsius`
+   is temperature.)
+3. **Run the scaffold.**
+   * YAML: `tt-toplike viz new <name> --yaml` writes `viz/<name>.yaml` in a checkout (or the user
+     folder `~/.config/tt-toplike/viz/` elsewhere). Edit that one file.
+   * Rust: `tt-toplike viz new <name>` (in a checkout) copies `src/viz/plugins/example_pulse/` to
+     `src/viz/plugins/<snake_name>/` with `mod.rs`, `tests.rs` and `README.md`. Edit those. Rebuild.
+   * `<name>` is kebab-case, at most 48 characters, and not a built-in view name or an existing viz id.
+     `tt-toplike viz list` shows what exists.
+4. **Run it with no hardware:** `cargo run --features tui --bin tt-toplike-tui -- --mock 4 --viz <name>` (or `tt-toplike --mock 4 --viz <name>` with an installed binary). A viz that is off by default
+   needs `--viz <id>` or `[viz] enable = ["<id>"]` in `config.toml`. Open the legend (`l`), explain
+   (`!`) and help (`?`) panels to check their text. A YAML file reloads on save within about 2
+   seconds.
+5. **Test it.** `env -u COLORTERM -u TMUX TERM=dumb cargo test --lib --features tui viz::`. A Rust
+   plugin keeps its tests and golden frames in its own folder (`golden/`, made with
+   `UPDATE_GOLDEN=1 cargo test --lib --features tui viz::plugins::<snake_name>`; read each new frame
+   before you commit it). A YAML file is loaded and drawn at three sizes by
+   `src/viz/all_examples_tests.rs`, which needs no file from you.
+6. **Never open real hardware in a viz or a viz test.** Read the bus through `ctx.world` (Rust) or a
+   widget (YAML). Tests build a fake world with `WorldBuilder` (`src/viz/testkit.rs`). Do not
+   import `ttnn` or `ttml`, and do not take a chip lease for a viz.
+
+7. **Before you open a pull request,** run what CI runs: `cargo fmt --all --check`, then
+   `cargo clippy --features tui -- -D warnings`, then
+   `cargo clippy --no-default-features --features tui,json-backend -- -D warnings`, then the test
+   command from step 5.
+
+**What a pull request may touch:** only its own folder `src/viz/plugins/<name>/` (Rust) or its own
+file `viz/<name>.yaml` (YAML). It edits no shared file: that rules out `Cargo.toml`, `build.rs`,
+`src/cli.rs`, `src/ui`, `src/bus`, the docs and another viz's files. If the viz seems to need a shared change, ask for it
+in its own pull request.
+
+**Limits:** full screen only, no keys of its own, no arcade panels, no new signals, no custom
+drawing in YAML. The `Viz` trait has no key method. The examples to
+copy are `src/viz/plugins/example_pulse/` (reads and draws), `src/viz/plugins/game_of_life/` (keeps state between frames, steps on `ctx.now_mono_ns`, reacts to chip power; use a seeded generator, not `rand` or the system clock) and `viz/examples/thermal-board.yaml`. A test,
+`agents_md_recipe_names_real_commands` in `src/viz/docs_tests.rs`, fails when a command named here
+is renamed or removed.
+
+---
+
 ## Phase 0–1: Planning & Foundation (Jan 11, 2026)
 
 Prompt: "I want to see what this app would be like written in Rust." Research
@@ -1407,3 +1461,1051 @@ Tests: `a_new_featured_service_restarts_the_smoothed_gauges`,
 `start_time`. The first three were seen to fail with the fix disabled (a leftover
 tide of 0.76; the replacement process taken for the trainer; the old run kept).
 No version bump: these are fixes inside an unmerged PR.
+
+### PCIe counter units and direction (Oct 29, 2026, v0.13.18)
+
+Prompt: "what could we learn from dtsunami/tt-baremetal's bhtop and apply to our
+tt-toplike?" Reading bhtop showed that tt-kmd's `pcie_perf_counters` files are the PCIe
+tile's NIU counters (same indices as `NIU_*` in tt-isa-documentation), where a data word is
+a 64-byte flit. We had assumed 4 bytes per word since #23.
+
+Calibrated on chip 2 of a p300c under a gozer lease: ttnn host-to-device and device-to-host
+copies of 256 MiB and 1 GiB, with the sysfs counters read around each. Words moved were
+1/64 of the bytes (0.015625). Host-to-device raised `slv_rd_data_word_sent0` and
+device-to-host raised `slv_nonposted_wr_data_word_received0`, the reverse of what the module
+comments said. Fixed the unit, the direction, and the wrap (the files were summed as u64, so
+a wrapping counter dropped that sample).
+
+The `mst_*` directions are inferred and marked so in the code, docs and tests. ttnn never used
+the BAR path, so a calibration through an MMIO write and read would settle them.
+
+Decisions: the snapshot keeps the 12 raw u32 values so the wrap is handled per counter. A step
+over half the counter range reads as a device reset (a wrap of nearly the full range is
+indistinguishable from a small step backwards). More than one wrap between samples cannot be
+detected; at 1 Hz it would need over 275 GB/s.
+
+### Copilot review of PR 37 and CI (Oct 30 2026, v0.14.3 and v0.14.4)
+
+The first push to the PR found three CI failures the local runs had hidden. Lesson: run tests
+as CI does (`env -u COLORTERM -u TMUX TERM=dumb`), and `cargo check --target
+x86_64-pc-windows-gnu` / `aarch64-apple-darwin` (installed) for anything behind
+`cfg(target_os)`. 0.14.3: Windows did not compile (the inference peek used Linux-only values); a
+literal truecolor black went to terminals without truecolor; one test pinned hashes taken with
+`COLORTERM=truecolor` (it failed from the commit that added it; `colors::with_truecolor` pins the
+mode per thread now). `Test (macOS)` fails in one second with no steps: a GitHub brownout of the
+macos-14 image (retired 2 Nov 2026), not the code. The workflow needs a newer image.
+
+Copilot's review, each claim checked against the code before acting:
+- Fixed: a `Down` service counted as running (`inference_rows_active`); the training probe walked
+  `/proc` on the render thread, against `proc_scan.rs`'s own guard (the rotation now asks the
+  scan worker, `scan_wants_trainer` and `RotationActivity::note_trainer`); a cut during a
+  transition started from the earlier cut's destination (`Director::shown_camera`); one glitch
+  reading set a chip's idle for a day (floor at 1 W, per-minute 10th percentile).
+- Not a bug, replied with evidence: "`chip_line` omits chip power" (it starts with `chip_label`,
+  which has it, and `each_chip_gets_one_line` asserts it); "canvases still paint black" (four
+  files hold a *foreground* colour for space cells and never call `.bg(`; comments reworded);
+  "the Die 3D opaque path bypasses the capability check" (its scene pixels are truecolor by design).
+- Docs: the PR title said 0.14.2 while the code said 0.14.3 (release metadata is the version).
+- Tests that used 0 W as a chip's idle now use 37 W: no powered chip reads under a watt.
+
+### Copy pass and the Wafer Waffler name (Nov 2 2026, on 0.15.2, no version bump)
+
+Prompt: "review all our explainer, help, and legend copy and make sure it's short and direct and to
+the point (and still fun!)", plus renaming Die 3D to a fun name the user liked, "Wafer Waffler".
+- Every overlay now fits without scrolling at 80 columns: Help in 24 rows, Legend and Explain in 30.
+  `every_overlay_fits_its_row_target_at_80_columns` holds every mode to it (a line count against
+  `overlay_row_target`, then a real render). `overlay_inventory` (ignored) prints the table;
+  `OVERLAY_TEXT=1` prints the text too.
+- Help packs keys three to a line and commands two to a line. In the Waffler, Help lists its own
+  keys and all twelve commands (shortened `CommandInfo::help`) and two rows of global keys.
+- The Insights explain text was cut off at 44 rows and lost the ECC paragraph; it fits in 28 now.
+- The Waffler's explain text is a summary; the legend keeps every per-symbol phrase the old tests
+  required of both. The text tests now ask the legend for the detail and the explain text for the
+  summary (what is measured, estimated or decoration).
+- Review fix wave: the Starfield text said orbit radius tracks bandwidth (the radius is fixed; speed
+  and brightness follow activity); the Insights ECC sentence moved up so 80 x 24 shows it, with a
+  test; the Waffler explain text's numbers (15 s, idle + 25 W, 10 minutes, chaos vs dissolve) are
+  tested against `IDLE_ROTATE_SECS`, `MIN_SPAN_W`, `WINDOW_SAMPLES` and `camera::rotate_kind`; the
+  name is a macro (`crate::die3d_display_name!`) so `--help` and constant strings follow it, and
+  `docs_name_the_view_by_its_current_name` fails until README, docs/bus.md and the site follow a
+  rename; `host_cpu_and_rss_are_sampled_from_a_real_process` freezes its child with SIGSTOP and
+  passes its own timestamps, so load cannot change the 25% it expects.
+- The name is `animation::die3d::DIE3D_DISPLAY_NAME` (provisional), from that macro. Code identifiers
+  stay `die3d`. `--mode die3d|waffler`, `/mode die3d|waffler`, `/die3d` and `/waffler` open it
+  (none of these existed before). `no_user_facing_text_uses_the_old_die3d_name` scans source
+  strings, the clap `--help` text, README, QUICK_START, docs/*.md and the site.
+- Stale text fixed: the hero `%` threshold (Blackhole 0.65 V while busy), the rotation now visits
+  the Waffler (README, `--rotate` help), Esc quits only from the `v`-cycle views, Memory Flow's
+  speed and density drivers, docs/bus.md's "the other views read what they read before", README's
+  "the arcade hero duel reads the local monitor".
+
+### The roaming hero removed (Nov 3 2026, branch `arcade-no-hero`, 0.16.5)
+
+Prompt (Taylor): "The hero in arcade mode that moves between tiles is just too distracting now.
+let's go ahead and say goodbye to it." Decisions:
+
+* Removed: the `@` that moved over the whole arcade, its trail, its expression glyphs and colours
+  (`!` throttled or faulted, `?` ARC stalled, `%` undervolt, `( )` harvested), `is_undervolt`
+  and the Blackhole 0.65 V rule, the lane clamp, the layout-switch carry-over and
+  `Layout::bands`, which only the hero used. Entries above that describe the hero are history.
+* Two bus effects were drawn on the hero and went with it: the `✦` ring per request completed
+  and the heartbeat from tokens per second (`ArcadeFx::hits`, `tokens_per_s`,
+  `heartbeat_frames`). They had no place to go without the hero; re-anchoring them would have
+  been a new design. The per-chip hits (Memory Castle, Defrag) and `new_requests` (the duel's
+  snake) stay.
+* Kept: the Row 1 hero vs snake duel. Its hero lunges against the power baseline, which the
+  hero's block used to feed. `update` feeds the baseline itself with the same readings; a
+  400-tick scripted power trace gives the same duel state and Row 1 before and after.
+* Signals the arcade no longer shows anywhere: the faults register, an ARC heartbeat of 0,
+  undervolt and `harvesting_state`. Throttling still desaturates the starfield; harvested
+  Tensix columns and GDDR temperatures still show in Insights.
+* No config key or flag toggled the hero, so `--check-config` has nothing new to report.
+* Re-pinning: every arcade hash pin moved (GOLDEN, LAYOUT_GOLDEN, BUSY_GOLDEN, the arcade
+  backdrop pins, the base grid). The new values came from 0.16.4 with only the hero overlay and
+  the hit ring switched off (an env-var toggle in a throwaway build), and the new code draws
+  exactly those frames, including styled dumps of 26 frames. The same audit first reproduced the
+  old pins, so the instrument was checked before it was trusted.
+* Guard: `the_roaming_hero_is_gone` compares a classic 140x40 frame over 40 busy mock ticks with
+  its parts (title, Row 1, rules, `panel_lines`); the only `@` allowed is the duel's. Seen red
+  against 0.16.4 (an `@` over the Castle panel) and against one stray trail cell.
+
+### Saga as an arcade panel (Nov 3 2026, branch `saga-panel`, 0.16.4)
+
+Prompt (Taylor): "add the Saga to 'now serving' arcade view instead of defrag". Decisions:
+
+* `View::Saga` (`saga`, rule label `Ψ SAGA`, at least 20x6, the view's own `MAP_MIN`). The brief
+  suggested `⚔`; it has an emoji form that some terminals draw two columns wide, so the label uses
+  the map's sage glyph, which is one column everywhere.
+* `now-serving` is inference over the Wafer Waffler and Saga at the old weights. Other presets keep
+  defrag; `deck` says "every view but saga".
+* The seam: `saga_view::render_saga_panel(&PanelFeed, &SagaMemory, area, frame)` builds the panel
+  from the view's own `map_rows`, its status row (now `status_after`, so the HUD can put the label
+  mark first) and `chronicle_rows` (a new `hint` flag; the arcade has no `y`). The full view calls
+  the same three, and its eight golden frames did not move. A combined "map plus HUD" function was
+  not added: the full view puts the status row at the bottom and the chronicle between, so the
+  shared unit is the renderers themselves.
+* Data: the TUI feeds `ArcadeVisualization::set_saga` once per update with the driver's
+  `Published` state (an `Arc`) and the `SagaMemory` of the lead's floor (`PartyMemory::lead`). The
+  arcade copies the memory into its own
+  buffers with `SagaMemory::copy_from` (`clone_from` keeps capacity) and observes the fed state,
+  so the fog matches the state whatever order the loop runs in. `relayout` keeps both, so the
+  frame after `{` `}` shows the map.
+* The panel takes no backdrop (`backdrop::accepts("saga")` is empty, asserted in
+  `only_the_inference_training_and_waffler_views_take_a_backdrop`).
+* Overlays: the arcade's help, legend and explain text name none of the Die 3D, Training or
+  inference panels, so they do not name Saga either.
+* The first tmux capture at 80x24 showed the 39-column HUD cut inside the vitality bar, with no
+  quest. `hud_row` now has a short form (label, name or its first word, percentage, quest) for a
+  panel too narrow for the status row up to the end of its quest. Three of the four panel goldens
+  moved with it, and the commit says which.
+* Tests: the panel's four golden frames (70x16 and 20x6 at two cut points) are new; the wiring
+  test compares the arcade's Saga rectangle cell for cell with `render_saga_panel`. Mutations seen
+  red: `set_saga` dropping the feed (three arcade tests and the golden), the strip showing the `y`
+  hint (the size test and the golden), the HUD printing the quest's raw target (the panel's
+  generated-names test and the golden).
+
+### Version history: 0.16.1 (Nov 3 2026)
+
+0.16.1 restyles the Saga view; the core and its digests are unchanged. Prompt (Taylor): "saga mode
+right now could be better. it seems very random right now. the colors aren't quite right. we could
+be more creative with our symbology and character choice for ASCII art." Decisions:
+
+* Walls autotile from an N/E/S/W arm mask into box-drawing tiles (`Glyphs::wall_tile`, four tables
+  in `pack.rs`); a wall face joins a neighbour only when the pair borders open space, so a wall two
+  cells thick draws two parallel lines and no ladder. Doors, vaults, portals and the gate count as
+  set in the wall, so lines run up to them. Rock is blank.
+* Fog lives view-side in `saga_view::SagaMemory`, keyed by world id, seed and floor, fed by the TUI
+  loop on every update in every view (one `published()` clone per update). Gaps between
+  observations are filled with the core's `astar`. A memory for another floor draws as empty.
+  Since party Task A.6 the loop keeps a `PartyMemory`, one `SagaMemory` per floor, each lit by
+  every hero standing on it with one trail per hero, and each floor's heat comes from its own chip
+  (`floor_chip`, `PartyMemory::set_heats`). Since party Task A.7 the view draws a tile per floor
+  (`saga_party.rs`), each from `PartyMemory::floor(i)`; the arcade panel draws the lead's floor.
+* The right-border rule is kept by never drawing in the map pane's last column (the tiles include
+  `┐ ┤ ╗`). `the_map_keeps_its_last_column_blank` and the extended `no_row_ends_in_a_right_side_border`
+  (every cell seen, hero at each corner) fail if the inset goes.
+* The floor's heat comes from the backend's temperature for the hero's chip, matched by
+  `EntityKey::chip(bus_id)`; no match means the biome's own colour.
+* The eight view goldens were re-pinned; the three digest goldens in
+  `crates/tt-toplike-saga/tests/determinism.rs` did not move.
+
+### Version history: 0.16.0 (Nov 2 2026)
+
+0.16.0 adds Saga, phase 1: the `tt-toplike-saga` crate, its driver thread, the view (`S`) and
+`--bus-inspect DIR --saga-digest`. See "Saga" at the end of this file and `docs/saga.md`.
+
+### Version history: 0.15.5 (Nov 2 2026)
+
+0.15.5 limits the shared backdrop to the Inference view, the Training view and the Wafer Waffler
+(`backdrop::accepts`); the arcade carries none.
+
+### The backdrop only where a view carries one (Nov 2 2026, branch `preview`)
+
+Prompt: "disable the cloud layer behind the arcade mode. only apply it to modules that already
+carry clouds."
+- The shared backdrop applies to the three views with a background of their own: the Inference
+  view (scene), the Training view (sky) and the Wafer Waffler (clouds). Each still takes every
+  kind. Every other view (Insights, Grid, Starfield, Castle, Flow, Arcade, Defrag, `~`) takes
+  none. `backdrop::accepts` is the single table for this; adding a view is one arm. `refusal`,
+  `BackdropConfig::choice`, `BackdropSettings::set`, `command` and `key_message` all read it.
+- The arcade has no backdrop: its `Backdrop`, signals and load scales are gone, and so are the
+  `c` key, `toggled_backdrop`, `apply_backdrop`, `NamedLayout::backdrop` and
+  `ArcadeConfig::cloudfield`. `now-serving` no longer sets clouds. The Die 3D panel in a layout
+  still draws its own clouds.
+- `[arcade] cloudfield` (any value), a layout's `backdrop` or `cloudfield`, `/arcade
+  cloudfield`, `[backdrop.views]` entries for a view that takes none and a `default` other than
+  off are read and ignored with a note, never a problem. `w` and `/backdrop` in a view that
+  takes none say "no backdrop on this view". The legend of such a view has no backdrop line.
+- The 12 `arcade ... cloudfield true` pins went with the arcade's backdrop; the 12 cloudfield-off
+  pins kept their values under new names, and the base grid and every other pin are unchanged.
+  The arcade-only cost measurements (`backdrop_cost`, `backdrop_layer_cost`) went too.
+- Tests: each refusing view draws a byte-identical frame with any setting, after `w` and
+  `/backdrop`, and reads no signal; the three views still draw theirs. Letting the arcade
+  accept in the table turns six tests red.
+
+### Version history: 0.15.4 (Nov 2 2026)
+
+0.15.4 adds the shared backdrop (`src/animation/backdrop.rs`, `docs/backdrop.md`) and the arcade layout
+presets with `{` and `}` (`src/animation/arcade_presets.rs`). The built-in layout order lives in one table in
+`arcade_presets.rs`.
+
+### Version history: 0.15.3 (Nov 2 2026)
+
+0.15.3 adds the arcade layout engine (`src/animation/arcade_layout.rs`, `docs/arcade-layout.md`), the Wafer
+Waffler name (`crate::die3d_display_name!`), and the overlay row targets (Help 24, Legend and Explain 30
+rows at 80 columns, held by `every_overlay_fits_its_row_target_at_80_columns`). The config loader
+(`src/config.rs`) reads one regular file and reports every problem.
+
+### Version history: 0.15.2 (Nov 2 2026)
+
+0.15.2 puts the remaining views on the signal bus (`src/animation/{starfield,memory_flow,castle,defrag,train}_bus.rs`,
+`bus_intake.rs`, `src/ui/tui/grid_bus.rs`), adds Die 3D to the unattended rotation (`ROTATION`, gated on a
+Blackhole chip by `rotation_visits`), and replaces the arcade hero's 0.75 V undervolt floor with
+`is_undervolt` (Blackhole 0.65 V and a busy clock). `WorldRead::entities(kind)` is new in the bus crate.
+
+### Configurable arcade layout (Nov 2 2026, branch `arcade-layout`)
+
+Prompt: "add the 3d view to arcade if you want. make defrag the big double wide. or triple wide."
+The user asked for one shared `config.toml`, a Die 3D panel at arcade quality, Training and the
+inference server as panels, a cloudfield switch, and no change with no config.
+- `src/animation/arcade_layout.rs` is the layout engine: rows of weighted panels to rectangles,
+  cut at `floor(total * running / sum)` in integer arithmetic. The default rows (4, 3, 3 high;
+  castle 11 to defrag 9) give the old fixed layout exactly; tests compare them with the old f32
+  arithmetic at every size up to 2000. A panel under its view's minimum leaves its row and is
+  named on the rule.
+- `config::load_from` reads `~/.config/tt-toplike/config.toml` through `toml_edit` spans, so
+  every problem has a file and line. (A `./.toplikerc` override was built and then removed in
+  the fix wave: a repo you check out must not change tt-toplike, and a symlinked `.toplikerc`
+  to `/dev/zero` or a FIFO hung the TUI. `config::read_config_file` now reads only a regular
+  file of at most 256 KiB, before raw mode.) `--check-config`
+  prints them and exits 1. The old loader dropped parse errors (`.ok()`); it now reports them.
+- The arcade builds one view per shown panel. The Die 3D panel is the full `Die3dView` at the
+  panel's size; `Die3dView::render_at` takes the bus clock so the arcade can draw it in
+  `render` without the world. Training reuses `TrainView`, inference reuses the `Snake`.
+- Pinning the old frames found two things the old render did that the engine must copy: the
+  bottom panel (the flow) pushes every line it returns, including a legend line in the footer
+  row and, at 40x12, two rows past the terminal; and the castle and flow rules run one column
+  wide because `bbs_rule` cuts by characters and the labels hold a wide emoji. Both stay, pinned.
+- The arcade never had a backdrop. `cloudfield` lays `atmosphere.rs` behind the whole view,
+  off by default (`c`, `/arcade cloudfield on|off`). It is separate from the black fill:
+  measured at 200x60, the black fill repaints the same cells and costs about 4.4 KB a frame
+  (15%) more on the wire than the terminal's own background.
+- Docs: `docs/arcade-layout.md`; the gauge rule is in `docs/bus.md`.
+- Fix wave after review. The review found the default layout differed from the old arcade at
+  heights 3 to 8 and widths 1 and 2 (a row given no content rows hid its 1x1 panel and wrote
+  `needs 1x1` on the rule). `View::fits` now lets an empty panel of a 1x1 view stay and draw
+  nothing. `src/animation/fixtures/arcade_base_grid.txt` holds the old arcade's frame hashes
+  over 4440 sizes, captured on 89bf8d05 in a git worktree outside the repo, and a test compares
+  every one. Rule labels and the hero's bands are made with the layout, so a frame builds
+  neither. User-facing Die 3D strings take the display name (`◆ WAFER WAFFLER`).
+
+### Shared backdrop (Nov 2 2026, branch `backdrop`)
+
+Prompt: "there's a cloud-like background from signals in Training view and Inference view both.
+And now also 3d/waffler view too. I want that to be a shared feature. Not necessarily needing a
+black out bg, can just layer on top transparently too."
+- `src/animation/backdrop.rs` puts the three painters behind one `Backdrop`: scene (the Inference
+  atmosphere), sky (the Training aurora and stars), clouds (the Waffler cloud field, one band per
+  cell). `layer` (lines) and `layer_buffer` (a drawn ratatui buffer) fill blank cells only.
+  `BackdropSignals::gather` reads PCIe, power and the training step time from the world for this
+  TUI's chips, with the backend as the fallback, and marks estimates.
+- Defaults are byte-identical: the snake, the Training view and the Waffler keep their own
+  painters for their own kind and turn them off for another. Pins taken at d6560a27 before any
+  change (`backdrop_pins.rs`, `die3d/backdrop_pins.rs`) hold.
+- Settings: `[backdrop] default` and `[backdrop.views]` in config.toml, `/backdrop`, and `w` in
+  every view (`c` stays the arcade's scene switch; `arcade.cloudfield` is an alias with a note).
+  The Starfield refuses scene and sky (its stars are cores).
+- The sky and the clouds move on the clouds' 4 Hz step clock; the shared sky's aurora is coloured
+  in flat bands, which cut its cost on the arcade at 200x60 from 137 to 18 changed cells a frame.
+- Docs: `docs/backdrop.md`; the bus section is in `docs/bus.md`.
+
+### Backdrop and arcade presets together (Nov 2 2026, branch `preview`)
+
+The two branches above, cherry-picked onto one branch and made one whole, then one fix wave from
+both reviews.
+- A layout's `cloudfield` became `backdrop = "off"|"scene"|"sky"|"clouds"`, applied to the
+  arcade's backdrop setting when the layout is selected; `cloudfield = true` in a layout is an
+  alias of `backdrop = "scene"` with a note. `now-serving` sets `clouds` and is second in the
+  cycle, after `classic` (the user's order "for now"; it lives in `arcade_presets::presets`).
+- `c` turns the arcade's backdrop off, or on as the layout's kind; `w` cycles the kind. Help packs
+  the global keys four to a line to fit both. Status messages from these keys go with their view
+  and after 4 s of animation time.
+- `{` `}` and `/arcade` share `arcade_switch` (mod.rs), which updates the new arcade before it is
+  drawn. The status line is at most 78 characters.
+- The shared scene steps 4 times a second with banded colours (about 74 KB/s on a blank 200x60
+  view while serving, from 1.17 MB/s); the shared clouds use the Waffler's `LoadScale`; a
+  default a view refuses leaves it off with a note; dialogs and the command bar keep the
+  backdrop out.
+- No arcade row ends in a right-side border at any width. The guard (`clear_right_edge`) puts a
+  space for a glyph of `RIGHT_EDGE_GLYPHS` in the last column: every box-drawing piece with a
+  vertical stroke and no stroke to the right (verticals, right corners, right-edge joints),
+  `▐`, `▕` and ASCII `|`. Nothing else changes. The first pass had no corners and no `|`, and the
+  sweep read the same list, so it could not see them (re-review SF1); the guard, the sweeps and
+  a test that the list holds every glyph AGENTS.md names now share a single constant. 418
+  base-grid sizes differ from 0.15.3, only in their last column; one backdrop pin was retaken.
+
+### Arcade layout presets and `{` `}` (Nov 2 2026, branch `arcade-presets`)
+
+Prompt: "can we add a variety of alternative arcade layouts to switch between. with `{` and `}`
+alternating between layouts?" Later: "now serving: top: 3 wide inference server, big bottom:
+left: 3d cube, right: defrag", then "this is not the default" (no starfield) and "clouds should
+go behind the whole arcade".
+- `src/animation/arcade_presets.rs`: eight built-in layouts (`classic` is the default rows and
+  is pinned by the base grid), `LayoutCycle` (config, then `[[arcade.layouts]]` in file order,
+  then the presets; wraps both ways), `/arcade layout next|prev|<name>|list`, the `{` `}` keys.
+- `ArcadeVisualization::relayout` builds the arcade again at a size from new rows and moves over
+  the hero (scaled), the cloudfield setting, the baseline, the duel, the lanes and the bus
+  state. The TUI calls it on the keypress, so the next draw is the new layout. That draw comes
+  before any update, which found a divide by zero in `MemoryFlowVis` drawn before its first
+  update (fixed: no heat map until the grid is known).
+- Config: `[[arcade.layouts]]` (with an `s`: TOML cannot have `[arcade] layout = "name"` and
+  `[[arcade.layout]]` in one file), `[arcade] layout`, `--arcade-layout`. A problem in one
+  layout drops only that layout; the old all-or-nothing rule stays for the rest of `[arcade]`.
+- A layout may carry `cloudfield = true|false`, applied when it is selected (`now-serving`
+  sets it). It is a thin setter over `set_cloudfield`, for the shared backdrop to take over.
+- The arcade's title and Row 1 are cut at the terminal's width (they ran past it below about
+  30 columns), and the hero is not drawn past the right edge (a 0-column arcade).
+
+### Version history: 0.15.1 (Nov 2 2026)
+
+0.15.1 puts arcade (`src/animation/arcade_bus.rs`) and the `~` view (`src/ui/tui/hivemind_bus.rs`) on
+the signal bus, in the two-step shape Die 3D uses (a data-rate reader, then frame-rate arithmetic).
+It also fixes the in-memory window after a late log lock (`crates/tt-toplike-bus/src/log.rs`: the
+window is cleared at the jump and reads behind it are refused). Tests that compare colours read a
+global theme; the arcade ones take `colors::with_theme` under a shared lock, the Die 3D, `i` and `~`
+hash tests do not yet.
+
+### Version history: 0.15.0 (Nov 2 2026)
+
+0.15.0 adds the signal bus (`crates/tt-toplike-bus`, `src/bus/`, `docs/bus.md`). The root package
+goes from 0.14.5 to 0.15.0 (minor: a new subsystem). The bus crate stays at 0.1.0. The lessons
+are in the "Signal bus" section below. CI now runs `cargo test --locked --test tui_panic_hook`,
+because the `--lib` job does not run integration tests.
+
+### Open items closed before the human review (Oct 31 2026, v0.14.5)
+
+Prompt: "hit all these open issues before we ask for a human review" (the PR body's list).
+- Panning: arrow keys in the Die 3D view (`Die3dKey::Pan*`, `die3d_pan_for` in the TUI).
+  `Die3dView::panned` shifts the clipped fit's origin and records how far the window can move
+  (`RenderCache::pan_room`), so a key at an edge is a no-op and the key back moves at once. The
+  origin shift is the only change: the whole scene is still drawn and the buffer is the window.
+  The test compares the window to a crop of the whole picture at the panned offset.
+- Footer: a tier of state words plus action keys sits between the full form and the bare words.
+- The explain text said a process event dissolves; `pick_kind` gives it chaos. Text fixed.
+- `die3d/mod.rs` tests moved to `tests.rs` (a mechanical move; `mod tests;`).
+- CI and release use `macos-15`.
+- Not changed: the process-event trigger reads `Backend::device_processes`, which only the
+  tt-smi 6.0+ JSON backend fills. A `/proc` fallback needs the scan worker to report which
+  device each process holds; the help text names the requirement for now. The 12 Hz wave step
+  still needs a look by eye in Konsole or GNOME Terminal.
+
+### Rotation skips idle workload views (Oct 30 2026, v0.14.2)
+
+Prompt: "is 3d mode setup in the 'rotate' system? (can we take training and llms out of rotation
+unless a model is starting, running, and/or training?)". Die 3D is not in `ROTATION` and is not
+meant to be: a test pins it (`die3d_is_not_in_the_v_rotation`), it is entered with `3`. Asked
+whether to add it; not done without an answer.
+
+- `rotation_visits` / `next_rotation_mode_for`: Training and the Inference Monitor are stops only
+  while `RotationActivity` says something is going. Insights is always a stop, so a lap ends.
+- The old flags (`train_active`, `inference_active`) are only kept while their own view is on
+  screen, and are reset to true on every arrival, so they cannot say whether to go there. The
+  rotation now looks every `ROTATE_PROBE_EVERY` (3 s): inference from the background monitor's
+  snapshot (a cheap read; the remote box's rows under `--remote`; the mock roster under
+  `--mock`), training from `TrainMonitor::poll()` (a rate-limited `/proc` walk), created on first
+  use. Mock training counts as going, so `--mock --rotate` still demos it.
+- A run that ends while its view is on screen still gets `ROTATE_LINGER_IDLE`.
+- "Starting" is covered by the inference side: a loading container is a row in the snapshot.
+
+### Die 3D: commands, theme, reasoned cuts, cell styles (Oct 30 2026, v0.14.0)
+
+Prompt: "we've added too many hotkeys. let's make those slash commands and have help help with
+them. 1) make braille versus blocks a HW-derived selection, not too frequent, and what you start
+with first won't necessarily be the same as the last. are there only block forms we could switch
+between too? 2) /theme could do both greyskull and rainbow for this view too. 3) the cut style
+shouldn't be shuffled so much as reasoned by something happening. the default should be to
+rotate. the other types should happen because something happened on a chip or the memory or the
+board or a related process". Then, answering the questions I asked: "our hot keys should all be
+global ... `[` and `]` ... space ... in this view it would cut ... the slash commands can be local
+to the current view or global". Rotate = the spin (chosen), Die 3D follows /theme (chosen).
+
+Decisions:
+- Keys: `[` `]` (board) and Space (cut) only; `die3d_key_for` still gates them to the view.
+  Every setting is `commands::COMMANDS` (one table: the parser, `/help` and the footer read it;
+  a test runs every entry). `/help` lists them in full inside Die 3D and as one line elsewhere.
+  `execute_command` has no view, so the Enter handler dispatches them (`is_command`).
+- Theme: `Die3dView` carries a `Theme` (default Grayskull so tests and library users are
+  stable); the app sets it from `colors::current_theme()` at creation and each tick, and
+  `set_theme` bumps the revision so the frame cache cannot serve old colours. The palette rides
+  in `DrawCtx`; `RAINBOW` is new. Only the scene changes; footer and flag text stay lavender.
+- Cuts: `Trigger` gained `ThermalRise`, `MemoryHeat`, `EthLink`, `Process`, each with a `Reason`.
+  `observe` (load, PCIe) is unchanged; `observe_extras` and `observe_processes` are new. Rotate
+  maps Chip and Process to chaos, Memory and Board to dissolve, and no reason to a spin (a
+  dissolve if the scene changes). Forced modes override. The mapping of process to chaos is my
+  choice. Idle turn: `IDLE_ROTATE_SECS` 45, `Director::on_idle`, off-switchable for tests.
+- Cell styles: `CellStyle` Braille, Quadrant, HalfBlock. Quadrant uses the braille 2 x 4 pixel
+  buffer and merges row pairs, because a 2 x 2 grid makes pixels twice as tall as wide. So the
+  answer to "only block forms?" is yes: quarter and half blocks, and `/cells blocks` moves between
+  just those. `cellmode.rs` is the pure logic: `hardware_seed` (FNV of every chip's power,
+  temperature, memory heat and links) picks the start; an event cut after `MIN_DWELL_SECS` (120)
+  schedules the next style at the cut's swap. Auto leaves half blocks out under 100 x 30 (their
+  pixels are half as wide). The app makes the full view Auto; the inset stays braille.
+- Pinned frames: the golden hashes now cover the rows above the footer. The same code at the
+  previous commit hashes those rows identically, so the picture did not change.
+- Checked in a truecolor terminal through tmux, asciinema and agg: both palettes, all three
+  styles and the commands.
+- 0.14.1, after trying it ("i never see rotate happen on its own ... i'd like to see the faster
+  version. /cells block or /cells blocks should just map to something easy. /blocks and /braille
+  local to viz would work too"): `IDLE_ROTATE_SECS` 45 -> 15 (above the 8 s cooldown and the 1.6 s
+  spin). Checked on the real box by watching the footer caption: a cut at 18.5 s, then a 1.6 s
+  spin at 33.4 s. An event cut restarts the wait, so on a box that keeps having events the spin
+  is rare; that is by design. `/blocks` and `/braille` are `COMMANDS` entries that call
+  `/cells`; `block` parses as `blocks`.
+- Not done: panning a clipped scene, a `/theme` row in Die 3D's own footer, and process events
+  for the inset's board choice beyond the busiest board.
+
+### Background: transparent tried, black kept (Oct 30 2026, v0.13.25)
+
+Prompt: "take away the dimmed background by default too both in full screen and the home
+screen". There was no screenshot of it, so "dimmed background" was my reading of it. A pty run
+with `COLORTERM=truecolor` (what Konsole sets) showed the app emitting `48;2;0;0;0` (solid
+black) 23,000 times on the home screen and 50,000 to 190,000 times on the full-screen modes. Under
+tmux it emitted none, because `colors::rgb(0, 0, 0)` returns `Color::Reset` when
+`supports_true_color()` is false, and that is false in tmux. I made every screen use the
+terminal's own background (a 0.13.24 build, never installed). The user tried it: "i don't like
+the haze at all. old black back for everything please."
+
+What stayed:
+- `colors::canvas_bg()` is the one place the background is chosen: black through `colors::rgb`
+  by default and `Color::Reset` with `TT_TOPLIKE_TRANSPARENT=1`. (0.14.3 corrects this entry:
+  0.13.25 first wrote a literal `Color::Rgb(0, 0, 0)`, which sent truecolor black to terminals
+  without truecolor. Through `rgb` black is the terminal's own background there, as it always
+  was, because truecolor fills show as grey under tmux and in macOS Terminal.app over SSH.)
+- All 68 literal black fills use it, and `no_view_paints_a_literal_black_background` scans
+  `src/` so a view cannot go back to the literal.
+- The Die 3D view defaulted to a transparent background (`T` flips it), which is the likeliest
+  source of the haze: scene cells showed the terminal's colour. The app now sets it from the
+  canvas setting where it makes the full view and the inset (`new_die3d_view`, `new_inset_view`).
+  The view's own default is still transparent so its pinned test frames do not change; the test
+  `the_die3d_views_the_app_makes_follow_the_canvas_background` fails if a creation site skips
+  the helper (seen red by removing it).
+- The status bar (`10,14,22`) and the overlay panel (`8,14,22`) keep their dark backgrounds.
+  The `DIM` text attribute is untouched.
+- Open: what the user first meant by "dimmed" is not settled. If something still looks dimmed on
+  black, it is the status bar, the `DIM` attribute, or the dim colours in a view.
+
+### Die 3D narrow windows (Oct 30 2026, v0.13.23)
+
+Prompt: a slim Konsole window (about 50 x 54) showed only the text summary where the cube
+should be ("the cube goes blank at 80x40 or 80x25 ... this is slimmer"). Then, after the options
+(smaller tile, a message, or clipping): "1 plus 3, but I think we still can do 'clip' where you
+show the whole display 'virtually' and the smaller window can only reveal what it has room for".
+
+Findings, measured on the real box (two p300c boards) with `tmux capture-pane`: the scene drew
+from 51 columns up and was blank at 50 and below, at every height. It drew at 80 x 25 and 80 x 40
+(also with 3 to 32 mock chips, where it falls back to one board), so those two sizes were not the
+cause. Cause: `fit_pixels` stops at a 4 pixel tile, and a two-die board at that tile is just
+over 100 pixels (50 columns of braille) wide at its widest camera angle.
+
+Decisions:
+- `fit_pixels` keeps its four pixel floor, because the choice between every board and one board
+  rests on it (the existing fallback tests). Only one board's scene goes lower:
+  `fit_last_resort` tries a 2 pixel tile (`SMALL_MIN_TW`), and if that is still too big, draws the
+  whole scene at 2 pixels with a centred origin. `PixelBuf::put` ignores out-of-range pixels, so
+  the crop is only a negative origin and nothing else in the drawing changed.
+  The two-die scene is 50 x 30 pixels at that tile, so it fits whole from 25 x 8 cells.
+- `SceneFit.virtual_px` is `Some` when it is clipped. `Shown::Clipped(board, cols, rows)` carries
+  the size that shows all of it; the footer leads with `clipped, needs 25x8`, and a view with no
+  footer (under 60 x 16) puts the same text over the scene's last row.
+- Insets are never clipped. Flags are off while clipped (clipping only happens below the flags'
+  size anyway). The text summary now starts below `SCENE_MIN_CELLS` (16 x 6).
+- Not built: panning with keys. The crop is always the middle. Keys are routed by character in
+  `ui/tui/mod.rs` (`die3d_key_for`), so pan keys need a binding that does not collide with the
+  global ones.
+- The test that the clipped window is a crop compares it with the whole picture drawn
+  independently (`fit_last_resort` for a buffer of the picture's own size). A first version
+  derived the whole picture by shifting the clipped fit, which passed for any offset; a mutation
+  (dropping the centring) showed that, and the final tests fail under both axes' mutations.
+- The spec's call "shrink to fit, and crop only in step 6" is reversed by this change.
+
+### Die 3D small sizes and the Insights inset (Oct 30 2026, v0.13.22)
+
+Prompts: "what will i expect to see in a smaller terminal? how much extra CPU activity would it
+add to have a smaller version of this on the main info screen?" The user chose mock B (the
+inset beside the process table), then: "yes, and let's make the viz shrinkable so below 100 x 30
+we provide the best version we can, whether that's clipped, or smaller, or without flags, etc".
+
+Decisions:
+- The scene shrinks so the whole board stays visible.
+- The ladder is in `die3d/tiers.rs`: clouds off below 100 x 30 (`CLOUDS_MIN`), footer two rows
+  at 100 x 30 (`FOOTER_TWO`), one row from 60 x 16 (`FOOTER_ONE`), flags from 60 x 16
+  (`FLAGS_MIN`), history panel from 120 x 37. The scene shrinks down to about 40 x 12
+  (superseded in 0.13.23: see "Die 3D narrow windows").
+- The text summary comes last, only where no scene fits. One line per chip.
+- The inset is `Die3dView::inset(cols, rows)`: one caption row, no keys, no clouds, no panel, and
+  its scene never changes on a trigger. When every board does not fit, it draws the busiest
+  board. Busiest is by the mean load of its chips, and a new board must stay busiest for 10 s
+  (`BUSIEST_HOLD_SECS`) before the inset changes to it.
+- The inset appears when the process area is at least 122 x 16 (`TABLE_MIN_W` 70 + `INSET_W` 52, `INSET_MIN_H` 16).
+  The width was chosen so a two-die board draws a scene: it needs at least 51 x 16.
+  It does not appear on the mock at 150 x 42: several rows of chip cards leave the process area
+  too short. This is a limit, listed in the README.
+- `every_size_draws_without_overflow` and `flags_never_cover_a_drawn_cell_at_any_size` sweep
+  sizes around each threshold. The sweep is a coarse grid plus a window around each threshold,
+  kept under 30 s in a debug build.
+- An inset board change redraws at once with no cut transition.
+
+Costs (release build, `inset_render_cost_report`) at the 52 x 16 inset: 0.058 ms a frame for one
+p150 board, 0.058 ms for eight p150 boards (the busiest board's scene), 0.110 ms for one two-die
+board (p300 x 2 in the fake). At 52 x 22: 0.060 ms and 0.061 ms. The spec's budget was 0.3 ms.
+About 27 cells change per frame for a p150 board (1578 in two seconds; the test ceiling is 1973)
+and 53 for a two-die board (3128; ceiling 3910, 1.25 times the measurement). A full Insights
+frame at 200 x 50 went from 0.18 ms to 0.27 ms with the earlier 42-column inset, and from 0.13 ms
+to 0.21 ms at 150 x 42; those were not re-measured at 52 columns.
+The fake's "p300" is one chip, so a p300 board is two of them. A two-die board needs an inset at
+least 51 x 16 (measured with `fit_pixels` over `board_grid(2)`: 50 x 16 and 51 x 15 do not fit),
+so the 52 x 16 inset draws its scene. The 40 x 12 threshold for the text summary in the full
+view is unchanged. The inset first shipped 42 wide, where p300 boards got the text summary; Task 9
+widened it (ledger Ruling 10).
+
+### Die 3D traffic fronts (Oct 30 2026, v0.13.21)
+
+Prompt: "the braille view is almost uninterpretable as it stands right now... What else can we
+try to make it feel as dimensional as the other view?" The user named height and a sense of
+purpose to the movement as what was missing, and chose to tie the movement to the direction of
+traffic. This version does the movement only. The face shading, edge and shadow ideas for
+height are not built. `tile_heat_flow` in `die3d/scene.rs` sends a front from the PCIe edge
+(the highest die row) inward for inbound traffic and the other way for outbound, half a period
+apart when both flow. With no traffic it is the old `tile_heat` sweep. The redraw tests had
+measured the old sweep in a window where it sits at the die's edge and is cheapest, so they now
+hold the sweep fixed (`SidewaysSweep`), and `traffic_fronts_cost_little_more_than_the_sideways_sweep`
+prices the fronts over the whole cycle. Fronts 4 tiles wide each side cost 1.7 times the sweep
+and failed that test; 2 tiles each side costs 1.23 times. Data for real DRAM-to-core paths
+needs the per-tile counters (separate plan).
+
+### Die 3D flags (Oct 30 2026, v0.13.20)
+
+Prompt: "let's avoid overlaying labels directly over the chip displays in the 3d viz. can we
+pin and flag instead?" The label at each die's centre became a flag: a pin on the die's top
+or bottom corner, a one-cell pole, and the text on open space. `die3d/flags.rs` holds the
+placement. The slab fills the whole board grid, so the text is kept outside the convex hull
+of the grid's corner blocks. Per-die outlines were too small and the first test run showed it. A pole may cross a board to reach open
+space. The test `flags_never_cover_a_drawn_cell_but_the_pin` compares a frame with flags on and
+off and fails if any text lands on a drawn cell. The changed-cell budgets rose a little
+(super scene 0.51 of the old count, up from 0.49).
+
+### Die 3D view (Oct 29 2026, v0.13.19)
+
+Prompt: "what could we learn from dtsunami/tt-baremetal's bhtop and apply to our
+tt-toplike?" The answer became a new view on the `3` key: an isometric picture of each
+Blackhole board, drawn with braille or half-block cells. The design is in
+`docs/superpowers/specs/2026-10-29-die-3d-view-design.md`, the plan in
+`docs/superpowers/plans/2026-10-29-die-3d-view.md` (Tasks 1 to 19), and the later per-tile
+counter idea in `docs/superpowers/plans/2026-10-29-die-3d-tier1-counters.md`.
+
+What we learned from bhtop. It was read and not run. Its code showed that the tt-kmd
+`pcie_perf_counters` files are the PCIe tile's NIU counters, and that a counter word is a
+64-byte flit. That led to the v0.13.18 fix: we had counted 4 bytes per word, had the
+directions swapped, and dropped a sample when a 32-bit counter wrapped.
+
+Findings from hardware (Blackhole p300c, leased through gozer):
+- A 62-word burst read of the NIU counter array returns one register's value repeated across
+  chunks, so posted equals non-posted. Single-word reads work. exalens 0.4.2 still has it. By
+  its code, bhtop's poller uses the burst.
+- A second process can read tile counters while a workload runs. Polling 156 tiles x 2 NoCs
+  x 6 counters, at up to 161 sweeps a second, changed nothing in the workload's throughput
+  (one synthetic matmul loop, 60 s). It was not tested against a real model server. This is
+  why tier 1 is a separate, experimental plan and not part of this release.
+- The braille dots are small in a real terminal font. Half-block is crisper. Taylor chose to
+  keep both and switch with `B`.
+- Idle chips already draw 0.30 of the 125 W limit, so a load trigger on power over the limit
+  could never arm. Activity must be relative to each chip's own idle over ten minutes.
+  Measured during token serving (8 clients, 213 tokens a second, 96 requests): the busy chips
+  drew a mean of 54 and 45 W, peak 68 W; PCIe into the chip averaged 23 MB/s (maximum
+  131 MB/s). The PCIe burst threshold is 50 MB/s, re-arm 10 MB/s, where the first guess was
+  2 GB/s.
+
+Recording lessons. Recording the TUI inside tmux made it look cheaper than it is: tmux adds
+its own green status bar and re-encodes colours and cell updates. VHS (browser-based terminal
+capture) gave mostly stale frames at this redraw rate (about 0.5 MB/s of terminal output), so
+its clip was discarded. What worked: a small Python harness that runs the app on its own
+150 x 42 pty and injects keystrokes on a timer, recorded with asciinema (the cast header's
+size patched to 150 x 42), rendered with agg on a black theme, and converted to MP4 and a
+smaller GIF with ffmpeg. Hold each state about 12 seconds so a viewer can take the view in.
+
+Audience. People who will see this use Konsole and GNOME Terminal. Their fonts, and their
+translucent or tinted backgrounds, shaped the palette, the transparent default and the
+half-block option.
+
+Product owner feedback that shaped it, in order: a more Grayskull palette (purples, pinks,
+greys) and a little transparency; both display types, switchable ("we might have a few
+switches for this view"); a black background; shuffled transitions with an attempt at an
+animated rotate; a caption saying which side the camera looks at, and labels, because four
+dies read as one field; a faster view, clouds moving behind it and a small panel of the
+monitored data over time; and traffic sent to the coder model to see whether the camera
+fires (it did not, which found the relative-load problem above). The purple background in
+one shared clip was the terminal colour used in the recording simulation. The app does not
+paint it.
+
+Decisions worth keeping:
+- Every moving thing is real data, a labelled estimate, or named decoration. The per-tile
+  glow carries "per-tile glow: estimate from chip load". The clouds are decoration (drift from
+  PCIe traffic, brightness from chip load). The history panel is measured data.
+- The footer is built from one table of switches. A new switch is one entry and one key.
+- The caption names the nearest corner, because on a square board two edges tie at every
+  quarter turn.
+- The view area minimum is 100 x 30. The TUI's status bar takes a row, so the terminal
+  minimum is 100 x 31. The history panel needs 120 x 37.
+- Speed: at most 20 redraws a second at rest and 30 in a cut; the tile wave steps 12 times a
+  second; changed cells per frame fell by more than half (release benchmark, 150 x 42
+  braille: 347 to 157 for one board, 358 to 174 for four).
+- Not built: the tier 1 per-tile counters, triggers for a reset, a model load and a GDDR ECC
+  event, a close-view preset, and an automatic half-block switch on wide terminals.
+
+Process. Subagent-driven: one implementer per task, a separate review per task, and a ledger
+of decisions, kept outside the repo, for every gap between the plan and the code. Tasks 12 to 19 were added after the plan, one per round of Taylor's feedback. The
+12 Hz wave step has been judged in recordings only; Taylor is to look at it in Konsole.
+
+---
+
+## Signal bus (Nov 1-2 2026, branch `what-if`, 0.15.0)
+
+Prompt (Taylor, in the Die 3D session): "the viz is still too static ... we need to integrate
+the same signals other viz use". The answer was one recorded stream every source writes and
+every view reads. Design: `docs/superpowers/specs/2026-11-01-signal-bus-design.md`. Plan:
+`docs/superpowers/plans/2026-11-01-signal-bus.md`. User and consumer documentation:
+`docs/bus.md`. Built subagent-driven with a ledger outside the repo; each task had a separate
+review, and most tasks needed one to three fix rounds.
+
+### Layout
+
+* `crates/tt-toplike-bus/` (library, 0.2.0): record types (`record.rs`), entity keys,
+  the log and its writer thread (`log.rs`, `segment.rs`), the `World` reducer (`world.rs`),
+  `Replay` and `inspect`, the Unix socket server and client (`socket.rs`, `client.rs`), the
+  serialisable `WorldSummary` (`summary.rs`) and the `WorldRead` trait views use (`read.rs`).
+  It never touches hardware.
+* `src/bus/`: the adapters in the main crate. `source.rs` (`BackendSource`),
+  `workload_sources.rs` (inference, training, hivemind, processes, remote), `gozer.rs`
+  (lease source and `Governor`), `identity.rs` (index-to-key map), `redact.rs`, `host.rs`
+  (`BusHost`: owns the bus and every source, ticks them), `headless.rs`, `tui_bus.rs` (the
+  TUI's host-or-attach logic), `view.rs` (what views read), `compat.rs` (tt-station frames).
+* Signal names are part of the log format. Add names. Never rename one.
+
+### Rules for code that touches the bus
+
+* **Every sample carries provenance** (`Measured`, `Derived`, `Estimated`, `Decoration`).
+  A simulated backend (`--mock`) marks everything `Estimated`
+  (`BusHost::set_synthetic`). A source with nothing to say emits nothing. It never emits
+  zero.
+* **Views do not animate on `ModelLoading` or `ModelReady` events.** The host re-announces
+  every loading or ready model every 5 minutes (`RESEND_EVERY`), so retention cannot delete
+  the only copy. A repeated announcement with an unchanged phase must change nothing on
+  screen. React to a phase change and to progress. Die 3D compares against the phase it saw
+  last (`OverlayState`). A model already `Ready` at first sight gets no settle effect.
+* **Chip identity is the PCI address** (`EntityKey::chip(&device.bus_id)`). Never key
+  per-device data by loop position or by `/dev/tenstorrent/N` index. A source that only knows
+  an index (processes, training, hivemind, a model's chip list) goes through `IdentityMap`,
+  and the host calls `IdentityMap::refresh` BEFORE it feeds any index-only source on a tick.
+  A test that swaps two chips' indexes must use non-contiguous indexes, or it passes under the
+  bug.
+* **Redaction.** Any new free-text field a source writes (a name, label, command line, `who`,
+  service key) goes through `redact_cmdline` and is clipped (`MAX_TEXT` 512). The raw text
+  never reaches a record, a log line or the socket. `redact.rs` lists the known false
+  positives and residual leaks. The hardening pass closed the nested-object leak and salted the key
+  hash (per process, so a log that spans a host restart has two keys for one redacted service).
+  Check `docs/bus.md` section 9 for what is still open.
+* **Governor.** A source that opens a chip on its own account must call
+  `Governor::permit(chip)` first and emit nothing for the tick when it is denied. The existing
+  sources (hwmon, sysfs, `tt-smi -s`, `/proc`, metrics scrapes) open no chip and need no
+  lease. Nothing in the first release opens a chip. The `gozer` source runs only
+  `gozer status --json` and `gozer env <lease> --json`. `TT_VISIBLE_DEVICES` holds PCI
+  addresses (not indexes). The governor's 60 second tolerance is not the sidecar's "exit on
+  the first failed re-check" rule.
+* **The `/telemetry` frame comes from the raw tt-smi record on the bus**
+  (`compat::telemetry_frame`). A `--remote` relay uses `relay_frame` (the origin's bytes) and
+  never adds its own `tt_toplike` extension.
+* **Build the TUI's panic hook before the `BusHost`.** The host installs a quiet reducer-panic
+  hook behind a `Once`. A later `set_hook` replaces it. `tests/tui_panic_hook.rs` guards this,
+  and CI's `--lib` command does not run it. Run `cargo test --test tui_panic_hook`.
+* Hosts tick on the data tick, never per render frame.
+
+### Hardware-testing rules learned (sidecar tests, 2 rounds on a QuietBox 2)
+
+* A live reader on a chip makes `gozer reset` and `gozer release` refuse ("chips still open
+  by [pid]"). Detach the reader first. With `--force` the reset worked.
+* A server restart without a chip reset can fail on an Ethernet core timeout, with or without
+  a reader attached (2 of 2 trials). Reset between restarts.
+* Take a lease before anything that opens `/dev/tenstorrent/*`. Never `tt-smi -r` by hand.
+* The sidecar is not in the release. Its rules and measurements are in `docs/bus.md`
+  section 12.
+
+### Testing lessons from this work
+
+* **A test that cannot fail is a claim.** Several first drafts had tests that passed under the
+  bug: a swap test with contiguous indexes, a `Source::poll` that did nothing while its test
+  checked the arithmetic beneath it, a backend-switch test that survived the gate being
+  removed, a progress test that passed with progress ignored. Reintroduce the bug, watch the
+  test go red, restore.
+* **Apply each mutation alone, in a copy of the tree.** An implementer stacked several
+  mutations in one tree and three of its red results were unreliable (a later mutation made an
+  earlier test fail for the wrong reason). A verification pass in a `git archive` copy, one
+  mutation per run, confirmed them. A leftover mutation in the working tree is also a risk;
+  check the diff before committing.
+* **Assert at the layer that fails.** The per-frame cost of the bus is guarded by a tick
+  counter test. A render-cost timing test cannot catch a tick per frame.
+* **Round-trip floats bit for bit.** `serde_json` needs `float_roundtrip` or a replayed world
+  differs from the recorded one in the last bit. The workspace feature also changes how the
+  main crate parses tt-smi floats.
+* **A fixture of constructed extremes proves little.** The redaction property test runs about
+  25 secret shapes with random quoting, because hand-picked cases missed an unbalanced quote
+  that disabled all redaction after it.
+* A redaction leak class found in a review round is fixed in that round, even when it is
+  outside the review's scope.
+
+## Saga (Nov 2 2026, branch `saga`, 0.16.0)
+
+Prompt (Taylor): a view where the machine's activity becomes a story, "worlds are created and
+destroyed and created again. mazes always coming out new. monsters. NPCs. treasure.
+storytelling! but all kind of derived from tt-toplike's signal set." Spec:
+`docs/superpowers/specs/2026-11-02-saga-design.md`. Plan: `docs/superpowers/plans/2026-11-02-saga.md`.
+User documentation: `docs/saga.md`. Built subagent-driven, one review per task, with a ledger of
+rulings (R1 to R28) that amended the plan, then a final whole-branch review and one fix wave
+(`.superpowers/sdd/2026-11-02-saga/final-review.md` and `final-fix-report.md`).
+
+### What exists (phase 1)
+
+* 0.16.4: Saga is also an arcade panel (`view = "saga"`; `now-serving` shows it). See "Saga as an
+  arcade panel" in the version history above and `docs/saga.md`, "The arcade panel".
+
+* `crates/tt-toplike-saga/` (library, 0.3.0 since crossing, 0.2.0 with the party, 0.1.0 in phase 1): the pure core. `Saga::feed(&Record)` in order,
+  `Saga::state()`, `Saga::drain_events()`, `Saga::digest()`. Modules: `observe` (records to
+  observations, the pacemaker tick), `seed`, `stats`, `topology`, `maze`, `world` (lifecycle),
+  `hero`, `quest`, `chronicle`, `pack` (lexicon, glyphs, palette), `event`, `saga` (front door).
+* `src/saga/`: `config.rs` (`[saga]` to `SagaConfig`), `driver.rs` (the background thread, local
+  or attached), `digest.rs` (`--saga-digest`). `src/ui/tui/saga_view.rs`: the view.
+* Phase 2 (monsters, treasure, combat, death, `saga.*` bus events, the headless host running the
+  core), phase 3 (steering, rotation stop, arcade panel) and phase 4 (packs, narrator) are not
+  built.
+
+### The party and crossing (Nov 3 and 4 2026, branch `saga-party`, 0.17.0 and 0.18.0)
+
+Prompt (Taylor), asked how the hero travels between floors: "i'd prefer a view that mixed the chips
+together for saga. or showed you the sagas happening on each chip at the same time". Offered the
+choice, Taylor picked "both: party plus portal crossing", in two stages (ruling R29). Phase A, the
+party, is 0.17.0. Phase B, crossing through Ethernet portals, is 0.18.0 (saga crate 0.3.0, bus
+crate 0.2.0). Addendum:
+`docs/superpowers/specs/2026-11-03-saga-party-design.md`. Plan:
+`docs/superpowers/plans/2026-11-03-saga-party.md`. Ledger:
+`.superpowers/sdd/2026-11-03-saga-party/progress.md` (rulings R29 to R44, a task report and a
+review per task).
+
+What it does:
+
+* **One member per floor.** `SagaState::party: Vec<Member>` replaced `hero` and `quest`;
+  `lead()` is member 0. Member `i` is born on floor `i` with its own hooks and its own plan
+  generator (`plan_stream(i)`: stream 1 for member 0, `16 + i` for the rest), so one member's
+  draws never change another's walk. The chronicle's generator is shared. Names are unique: up to
+  8 draws, then a Roman numeral.
+* **A model's dungeon spans every kept chip** (at most 32), with its sage only on the floors of the
+  chips it names. `world.sage_chips` lists those floors. Named chip keys that are not kept chips
+  share one set capped at 64 (R31).
+* **The merged chronicle.** Every beat and every `QuestStarted`/`QuestDone` carries its floor.
+  A party's birth writes one `PartyBorn` line. Routine lines share one 10-tick window per floor
+  (`ROUTINE_WINDOW_TICKS`); a member silent for `OVERDUE_TICKS` (300) gets the next open window
+  first (R32); a world's birth opens the window again (Task A.8). A line not written still raises
+  its event, and `Member::unwritten` counts it. On the 32-chip test log every floor is heard within
+  a minute (worst silence 533 ticks, measured again in Task A.8) and the longest stretch with no line is 26 ticks
+  (`the_chronicle_is_never_silent_for_long_with_32_chips`, bound 32). `Quest::target_label` is the
+  name the beat writes, aliased in generated mode; a real name over 32 characters is cut to 32.
+* **Digest version 2 (0.17.0), version 3 (0.18.0).** A version item first, a floor on quest events,
+  beats and lines, and one (floor, x, y) per member in the end item. Version 3 adds the tags
+  `0x07` `HeroCrossed` and `0x08` `CrossingFailed` and verb code 7, and marks a member in transit
+  with bit `0x80` of its floor byte in the end item (R41: no extra byte, so no existing digest
+  moved beyond the version byte and the portal binding; the addendum's 8.6 was amended). `SagaState::chips_seen` (the roster's count) is not in
+  the digest.
+* **Bounds at 32 chips.** At most 32 members, `World::floors` is an `Arc<[Floor]>` (a snapshot
+  shares it), and a record costs under a million work units: the worst on the 32-chip log is a
+  birth at 64,520, the mean per tick 391. A walk step is not a work unit, so the 32 steps a tick
+  are not in those figures. The saga holds at most 256 entity keys (64 kept chips, 64 ready
+  models, 64 named keys that are not kept chips, and from B.3 the link table's own 64 chip
+  keys; a world's chips are kept chips), 288 entities with the 32 heroes, under the spec's 500.
+* **The view** (`src/ui/tui/saga_party.rs`). A world of two or more floors draws a grid of
+  tiles that follow their heroes (`party_grid`; smallest tile 24 x 7), a roster row when the floors need more
+  than one page or chips have no floor (R34), floor tags in eight brand hues, and the focused
+  hero's status row. `[` `]` move the focus and the page follows; `z` zooms to the focused floor.
+  One floor draws exactly as before (the solo frames pinned in Task A.1 never moved). `PartyMemory`
+  keeps one `SagaMemory` per floor. Focus and zoom are view state;
+  `view_state_never_reaches_the_saga_driver` pins by source that they never reach the driver.
+
+What to know before changing it:
+
+* `solo_story_print_is_unchanged` and `solo_frames_are_the_pre_party_frames` pin one chip as it was
+  in 0.16. They must not move.
+* Grid sizes are pinned in `party_grid_gives_the_addendum_table` (the addendum's 5.2 table was
+  corrected to these values in Task A.8): 80 x 23 gives 2 chips 39 x 16 and 4 chips 2 x 2 of
+  39 x 8; 200 x 59 gives 2 chips 54 x 39 and 4 chips 2 x 2 of 54 x 28.
+* Terminal traffic (Task A.9). Measure it with `python3 tools/party_traffic.py <binary> --runs 3
+  -- --mock 32 --mode saga`: a 140 x 40 pty, `TERM=xterm-256color COLORTERM=truecolor`, the bytes
+  the TUI writes from 20 s to 40 s of a 40 s run, runs one after another. Set `XDG_CONFIG_HOME` to
+  an empty directory. The final 0.17.0 binary: `--mock 32` 19.6, 19.1 and 17.4 KB/s (mean 18.7),
+  inside the 20 KB/s budget; `--mock 1` 16.0, 16.8 and 13.8 (mean 15.6). With the ring's portals
+  bound (B.3 to B.5; no hero crossed on a plain `--mock` run until B.7 made the mock flap a link)
+  single `--mock 32` runs reached 22.3 KB/s (B.4: 19.0, 20.9, 19.5; B.5: 16.8, 21.3, 20.5 and
+  19.1, 18.4, 19.3; B.5 with an empty floor keeping its window: 18.6, 17.7, 22.3, 17.5). Task
+  B.5's fix round set `CALM_EVERY` to 5: 17.5, 18.1, 18.7, 17.7 and 19.6 (mean 18.3). The first
+  runs with heroes crossing are B.7's: 15.6, 18.4 and 14.7 (mean 16.3). The A.8 binary, by the
+  same tool on the same box: `--mock 32` 193.2, 192.0 and 168.5 (mean 184.6); `--mock 1` 13.8,
+  19.0 and 16.6 (mean 16.4). One chip's view did not change (its frames are pinned).
+* Where the bytes went, by `print_party_traffic` (an ignored lib test that renders consecutive
+  frames, diffs ratatui buffers and writes each source's changed cells through crossterm; set
+  `SAGA_TRAFFIC_LOG` to a `bus-N.jsonl` from `--record DIR` to run it on a real session). On the
+  32-chip log at 140 x 39 the old code sent 14,110 bytes a frame: tile windows scrolling 9,972,
+  the light's falloff moving 2,188, the glow ring 877, the chronicle 593, the trail 348. On a real
+  `--mock 32` run the chips' heat was a further large share: every small change of a reading
+  recoloured a whole tile (a build that held the heat went from 62.5 to 32.4 KB/s).
+* What fixed it, biggest first: the heat tint holds until a reading moves 3 °C (`tile_heat`); a
+  tile's window moves only when the hero leaves a dead zone (`follow`, `ANCHOR_ZONE_X` (9, 9),
+  `ANCHOR_ZONE_Y` (3, 2), the anchor kept in `SagaMemory`); unfocused tiles are drawn
+  `Motion::Calm` (one colour and one light level, blanks in that colour so a row is one run, no
+  glow, still goal and portals, one-colour half trail) from a picture held for `CALM_EVERY` (3,
+  then 5 from Task B.5's fix round) ticks, staggered by floor; the focused tile is `Motion::Banded` (three shades of light and
+  trail); the chronicle shows beats up to the last multiple of `CHRONICLE_EVERY` (20) ticks. Now
+  1,469 bytes a frame on the 32-chip log (1,603 with `CALM_EVERY` 3), and 1,242 on the same
+  log with a ring of links and a model on every chip (`records_with_ring_model`, from Task
+  B.5's fix round); `the_party_view_stays_inside_its_traffic_budget` bounds both at 1,800 (2,000 a frame at ten frames a second, less the app's status bar and the
+  heat, about 2 KB/s on a real run). Seen red with re-centring restored (4,338), every tile
+  animated (4,278) and no held picture (2,071).
+* What remains: the windows' steps (a tile's map is 6 rows at 140 x 40 with 32 chips, so a hero
+  walking up or down moves the window every 5 rows), the focused tile, the chronicle's batches and
+  the heroes' hops, in that order. The margin is about 1 to 2 KB/s; a story with more walking
+  could pass 20 KB/s. If it must shrink further: a longer `CALM_EVERY` (now 5), a longer
+  `CHRONICLE_EVERY`, or
+  unfocused tiles drawn as a whole-floor minimap that never scrolls.
+* Known look: tiles 26 to 29 columns wide show first names only, so two tiles can share a name.
+  Tiles are one blank column apart, so neighbouring maps can look joined. A hero can stand on its
+  tile's top or bottom row (the dead zone reaches them). Unfocused tiles have no light pool.
+* `.target-*` build directories are not git-ignored: stage explicit paths only.
+
+### Known limits (0.18.0, from the final review)
+
+* A `LinkPeer` that recables a port while a hero is in transit through it is not checked. The hero
+  still arrives at the stored far end, and a later mask change on any chip can break the transit
+  with that chip's mask as the cause. Real backends send no `LinkPeer` and the mock's cables are
+  fixed, so it cannot happen today. A real peer source should break such a transit on the
+  `LinkPeer` itself ("Crossing" in `saga.rs`).
+* `portal_order_matches_die3d_cage_order` (`src/animation/die3d/saga_floor_tests.rs`) copies the
+  Wafer Waffler's (Die 3D's) cage-order rule into the test. A change to the rule in that view alone
+  does not turn it red.
+* The traffic guard (`the_party_view_stays_inside_its_traffic_budget`) has no chip heat in its
+  frames and no world birth in its window. Frames with a birth reach about 1,660 to 1,690 bytes
+  against the 1,800 bound.
+* A party tile's HUD says `no hero here`; the one-floor status row says `no hero on F2`. Both
+  mean the same thing.
+
+### Determinism rules the core keeps
+
+* The same ordered stream of record contents gives the same saga. Only a record's source and
+  payload are read. Sequence numbers and timestamps never reach the core.
+* Records about the host process take no ordinal and give no observation: records from source
+  `saga`, `ViewChanged` events (a TUI publishes them on its first frame and on view keys) and gaps
+  (a replay host adds one at each hole; a bus adds one for a disk outage). Final review C1.
+* Time is counted in pacemaker ticks. Only a chip sweep can be the pacemaker. After three backend
+  updates without it (counted in sweeps of other chips, never in time) the next chip takes over.
+  A season is a number of ticks. Final review I2.
+* The season in ticks is in the bus header tag `saga.season_ticks`, written by the host that opens
+  the bus and copied by a replay host; the local driver, an attached driver (snapshot `tags`) and
+  `--saga-digest` read it. A log without it uses 12,000. Final review I4.
+* The seed ring holds the whole `to_bits` of the last 64 sample values. Final review I1 (it
+  replaced ruling R26).
+* A local driver starts at `Bus::first_seq`, this bus instance's first record. Final review I3.
+* `crates/tt-toplike-saga/clippy.toml` bans `Instant::now`, `SystemTime::now`, `env::var`,
+  `HashMap` and `HashSet` in the library; `tests/fences.rs` checks the fences and the dependency
+  list. Use `BTreeMap`/`BTreeSet`, integer arithmetic, and the crate's `Pcg32`.
+* The digest is an explicit byte encoding through FNV-1a (R19), never a derived `Debug` string.
+
+### Rulings worth keeping
+
+* R1: the pure crate first, then the root-crate tasks on the merged branch.
+* R2: each task adds its own `pub mod` line.
+* R3: `Pcg32` matches reference PCG32; known answers for (42, 54) pin it.
+* R4: `SagaEvent` lives in `event.rs`; phases add variants.
+* R5: a `RealName` is one token: no whitespace, no control characters, no leading `-`, no `=`, at most 32 characters.
+* R6: committed fixtures carry no real process names; `busy.jsonl` comes from a generator.
+* R7: the driver publishes at most 10 snapshots a second; the chronicle shares its lines (`Arc`).
+* R8: `saga_config` is a free function (orphan rule).
+* R9: no production code that exists only for a test.
+* R10: the Blackhole floor constants are cross-checked against Die 3D in the root crate.
+* R11 and R13: no world is born before the seed pool has 64 samples or tick 5; early births wait.
+* R12: each floor's seed mixes in the chip key.
+* R14: `ModelGone` ends only that model's dungeon; a reset ends a world only on its chips (or no chips named).
+* R15: the core pushes `saga.heartbeat_alive` and the temperature baseline; the hero replans on no path.
+* R16: the chronicle has its own generator stream, so `names` cannot change mazes or walks.
+* R17: in generated mode published causes are aliased and do not exist in the log.
+* R18: the mock heartbeat counts up, so mock sagas are not stalled.
+* R19: the digest's byte encoding is explicit.
+* R20 to R22: caps on chips (64), floors (32), trails, ready models, hooks, pending events, and 256 bytes per key or name.
+* R23: Grid, Training and the hivemind still keep their own copy of the away rule.
+* R24: the driver starts at TUI start-up unless `[saga] enabled = false`.
+* R25: the driver publishes `stopped`, runs at lowered priority, and the batch-cost doc states the measurement.
+* R26: the seed pool's low byte is always zero for widened `f32` readings (replaced by I1's full-word ring).
+* R27: `--saga-digest` uses the Replay label, so a live mock saga's own digest differs on the same records.
+* R28: one fix wave takes C1, I1 to I4 and the cheap minors; every golden re-pin is deliberate and listed below.
+* R29 (party): both stages, party then crossing; link peers from mock and recorded logs first; a reset ends the whole world; heroes cross freely; one floor of routine lines per second.
+* R30: a golden the task did not name may be re-pinned in the same commit when the cause is the same as a named one (the 70x16 panel frames show the busy log's chronicle).
+* R31: named chip keys that are not kept chips share one set capped at `MAX_CHIPS`, first seen wins.
+* R32: `OVERDUE_TICKS` (300) keeps every floor heard within a minute on the 32-chip log; a heuristic with a thin margin.
+* R33: the 32-chip cost test bounds the steady cost (worst non-birth record under 33,000, mean per tick under 1,200) and checks a birth's cells equal its floors' areas.
+* R34: the grid rule in the code is right and the addendum's table follows it; the roster also shows on a single page when chips have no floor.
+* R35: A.7's fix round was verified item by item with mutations, without a separate re-review.
+
+What crossing adds (0.18.0, Tasks B.1 to B.5):
+
+* **`LinkPeer`** (bus 0.2.0, an additive event naming both Ethernet port keys). A reader built
+  before it counts the line as a bad line (`tests/unknown_event.rs`). `docs/bus.md` documents it.
+  Only the mock backend writes it today: a ring from each chip's highest live port in the low 12
+  to the next chip's lowest live port (R38; ports inside the low 12 so that Blackhole portals bind).
+  No real backend writes it, so on real hardware portals stay unbound and no hero crosses.
+* **Core.** `links.rs` holds the link table (at most 64 chips by 64 ports, no port keys stored).
+  Each portal of a floor is bound to a live Ethernet port, west to east; a generic floor's portal
+  count follows its known live mask. A `U64` register is read from its exact bits (R39: through
+  an f64 the mock's `0xAAAA...` mask lost its low bits). `Verb::Cross`, `Hook::port`, `Transit`
+  (`TRANSIT_TICKS` 3), `HeroCrossed`, `CrossingFailed` and four crossing beat kinds (notable, so
+  they skip the routine budget). A link that drops while a hero is in transit throws the hero back
+  (`a_link_down_in_transit_throws_the_hero_back`). A crossing line ends in ` ~` when the last
+  live-mask sample of either chip was `Estimated`. `SagaState::portals` lists every portal for the
+  view and is not hashed.
+* **View.** Open portals take the far floor's hue, closed ones are dim, a crossing glows yellow
+  on both ends; a hero in transit is on no tile, both tiles' HUDs say `crossing F2 → F1`, and the
+  roster shows `»`. An empty floor keeps its tile's window (R43). The legend has a portal row.
+* **Traffic** stayed inside 20 KB/s only after `CALM_EVERY` went from 3 to 5 (R44); a calm tile
+  can show a hero that has crossed away for up to 5 ticks.
+* Rulings: R36 the party view's traffic fix (A.9), R37 B.1 and B.2 reviewed together, R38 the
+  mock ring's ports, R39 the exact 64-bit mask, R40 B.3's fix round accepted without re-review,
+  R41 transit in the floor byte, R42 `cross4.jsonl` and its pin unchanged (B.5 builds its failure
+  frames in the test), R43 and R44 B.5's fix round and the numbers measured on the release binary.
+
+### Re-pinning the digest goldens
+
+`crates/tt-toplike-saga/tests/determinism.rs`, `a_snapshot_of_the_digests_matches`, pins one digest
+per fixture (`quiet.jsonl`, `bringup.jsonl`, `busy.jsonl`, `solo.jsonl`, `party4.jsonl`, `cross4.jsonl`) for each
+name mode. A change to the digest encoding, the seed rule, the maze, the walk, quest planning, the
+grammar, the lexicon or the event order changes
+them. Re-pin only on purpose: run `cargo test -p tt-toplike-saga --test determinism`, copy the
+values the failure prints, and name the rule that changed in the commit message. An unexplained
+change means the same log now tells another story, which breaks replay. The view's golden frames
+in `src/ui/tui/saga_view_tests.rs` hash the drawing and follow the same rule. After changing
+`tests/support/busy.rs`, regenerate the fixture with the ignored test `write_busy_fixture`.
+
+Re-pins so far (the final fix wave, Nov 2 2026, then the party tasks). Each was made in the commit of the change that
+moved it, and each diff is explained by that change:
+
+| Commit | Change | Moved |
+|---|---|---|
+| `fix(saga): ViewChanged events and gaps take no ordinal` | C1 | `busy.jsonl` (both modes): it holds one `ViewChanged`, at record 1,506. All 8 view frames: both cut points come after it. `quiet` and `bringup` hold none. |
+| `fix(saga): the seed ring keeps each value's whole 64-bit pattern` | I1 | `quiet.jsonl` and `busy.jsonl` (both modes) and all 8 view frames: every world seed changed. `bringup.jsonl` births no world and did not move. |
+| the I2, I3 and I4 commits | pacemaker, first record, season tag | nothing: the fixtures sweep only chips and never lose the pacemaker, the core tests feed records directly, and the fixtures carry no season tag. |
+| `feat(saga): digest version 2, with a floor on every beat and quest event` (party Task A.2, Nov 3 2026) | the digest encoding: a version item first, a floor on `QuestStarted`, `QuestDone`, `Beat` and each chronicle line, and a member count in the end item | every row, both modes: `quiet`, `bringup`, `busy`, `solo` and `party4`. `bringup` births no world, so only the version item and the end item's count move it. The story print and trace of `solo.jsonl` and all 8 view frames did not move. |
+| `feat(saga): a party, one hero per floor, each with its own hooks and generator` (party Task A.3, Nov 3 2026) | one member per floor, each with its own hooks, plan generator and quests; a model's dungeon spans every chip, with its sage on the model's chips | `quiet` (3 chips), `busy` (2 chips) and `party4` (4 chips), both modes: the extra members' quests, events and end-item triples, and in `busy` `demo-scribe`'s dungeon gained chip B's floor. The 8 busy view frames and the two 70x16 panel frames: chip B's member writes quest beats into the chronicle they show, and shares the chronicle's generator. `bringup` (no world) and `solo` (one chip) did not move; the solo story print, trace and frames and the two 20x6 panel frames did not move. |
+| `feat(saga): a merged chronicle with a shared pace, a party line, and target labels in the core` (party Task A.4, Nov 3 2026) | a party's birth writes one `PartyBorn` line; routine lines share one 10-tick window per floor, with overdue members first; an unwritten quest's reason goes through `clean_cause` in generated mode | `quiet` (3 chips), `busy` (2 chips) and `party4` (4 chips), both modes: new party lines, unwritten member lines, and the chronicle generator's later draws. The 8 busy view frames and the two 70x16 panel frames: the chronicle they show changed. `bringup` and `solo` did not move; the solo story print, trace and frames and the two 20x6 panel frames did not move. |
+| `feat(saga): the party view, a tile per floor with a roster and focus keys` (party Task A.7, Nov 3 2026) | the view draws a world of two or more floors as a grid of tiles, each from its own floor's memory, with floor tags on the chronicle's member lines and the party's keys on the status row | no digest. The 8 busy view frames: the busy worlds have two floors, so each frame is now two tiles side by side (the frames are drawn from a `PartyMemory`, as the TUI draws them). New: the 8 party frames (`party_frames_are_pinned`, `party4.jsonl` and the 32-chip log at 80x23 and 140x39, why off and on). The solo frames, the story print and the four panel frames did not move. |
+| `fix(saga): the party keys show at 80 columns and only the focused tile marks a reached goal` (party Task A.7, fix round 1) | the status row puts the party's keys right after the quest (`[ ] z` when short), then the tick and the mapped share; only the focused tile's HUD shows `✓` | no digest. The 8 busy view frames and the 8 party frames: every status row moved, and the unfocused tiles lost their `✓`. The solo frames, the story print and the four panel frames did not move. |
+| `fix(saga): a world's birth opens the routine window again` (party Task A.8) | a birth clears the pace window's owner | nothing: no digest, story pin, busy, party, solo or panel frame moved. `routine_lines_come_from_one_floor_per_window` now keys windows by world. |
+| `fix(saga): the party view's tiles move less, inside the 20 KB/s budget` (party Task A.9) | calm unfocused tiles from a held picture, banded focused tile, dead-zone windows, held tile heat, chronicle batches of 20 ticks | no digest. The 8 party frames: the tiles and the chronicle's batches (with the batching undone they still differ from the old pins). The 8 busy view frames: the tiles alone (with the batching undone the hashes are the same). The solo frames, the story print and the four panel frames did not move. |
+| `feat(saga): portals know their Ethernet port, and a link table from the bus (digest version 3)` (party Task B.3, Nov 4 2026) | `DIGEST_VERSION` 3 (only the version byte; the items are version 2's); each portal is bound to an Ethernet port; a generic floor's portal count follows its known live mask | every row, both modes, by the version byte alone: with the version set back to 2 on the B.3 code every row matched the version 2 pins, so no fixture's floor changed (the fixtures' chips are Blackhole-shaped or have no mask). No view frame, story print or panel frame moved. New: `a_blackhole_floor_keeps_its_cells`, a hash of 500 Blackhole floors pinned on 0.17.0's code before the change. |
+| `fix(saga): registers reach the floor and the link table with every bit` (party Task B.3, fix round 1) | a sample's `U64` register (live mask, Tensix columns, harvesting) is read from its exact bits; before, it went through an f64 | `quiet.jsonl` (both modes) only: its mock chips' mask 0xAAAA_AAAA_AAAA_AAAA lost its low bits as an f64 (one portal, port 11); exact, each floor has six portals (ports 1 to 11, odd). The other fixtures' registers are below 2^53. No view frame, story print or panel frame moved. |
+| `feat(saga): heroes cross Ethernet portals into the linked chip's floor` (party Task B.4, Nov 4 2026) | the crossing quest: `Verb::Cross` (code 7), `HeroCrossed` (tag 0x07) and `CrossingFailed` (tag 0x08), four crossing beat kinds, and the transit bit 0x80 on a member's floor byte in the end item | nothing moved: the five fixtures hold no `LinkPeer`, so no portal is bound, no hero crosses, and every member's transit bit is 0. New: `cross4.jsonl` 0x2a88827bd487ef7a (real) and 0x34a41fcbacbba99c (generated). No view frame, story print or panel frame moved. |
+| `feat(saga): portals, crossings and travellers drawn on every tile` (party Task B.5, Nov 4 2026) | the view draws crossings: portals in the far floor's hue (open) or dimmed (closed), a glow on both portals in transit, `crossing F2 → F5` HUDs, empty and crowded tiles, the roster's transit glyph; the core lists every portal in `SagaState::portals` (not hashed) | nothing moved: no digest row (the portal list is not in the digest), and no solo, busy, party4 or panel frame (those logs have no peers, and an unbound portal is drawn as before). New: `CROSS_GOLDEN`, ten frames of `cross4.jsonl` at 80x23 and 140x39 (link 1 down at tick 410, a hero in transit, a crossing thrown back and a dark portal, both injected into the log in the test, and the end of the last full world). |
+| `fix(saga): calmer party tiles and steady windows for crossings, inside the traffic budget` (party Task B.5, fix round 1) | an empty floor keeps its tile's window (`anchor` kept); an unfocused tile's held picture every 5 ticks (`CALM_EVERY`, was 3) | view frames only, no digest row: `PARTY_GOLDEN` all 8 and the busy `GOLDEN` frames at half the log (4 of 8) by `CALM_EVERY`; `CROSS_GOLDEN` all 10 (tick 410 and the end by the kept window, transit, thrown back, dark and the end by `CALM_EVERY`). Solo and panel frames did not move: one floor and the panel draw with `Motion::Full`. |
+| `feat(saga): heroes cross Ethernet links between chips (0.18.0)` (party Task B.6, Nov 4 2026) | docs, versions and verification only | nothing: no digest row, story pin, or view frame moved. |
+| final fix wave (Nov 4 2026, folded into 0.18.0) | a `ModelGone` lets the other ready models re-offer their crossings; `split_port` reads plain digits only; a cable between two ports of one chip is ignored; the `!` text, the legend's `~` and the `y` words for a live-mask cause | nothing moved: no fixture has two models on one link, a malformed port key or a one-chip cable, and no view frame, story print or panel frame moved (the full lib suite passed without a re-pin). |
+
+Pinned now (digest version 3, with the party, its merged chronicle, bound portals and crossings):
+`quiet.jsonl` 0xd6e0200609dcd3eb (both modes), `bringup.jsonl` 0xc9142f2256b8175a (both),
+`busy.jsonl` 0x23a8d7bcf22b2d8b (real) and 0xfd4e69d1d98aa692 (generated), `solo.jsonl`
+0xa2eadd2b95cffd79 and 0x3abf9f424e37b575, `party4.jsonl` 0x01b9f4175d5de836 and
+0x0976f42c301be352, `cross4.jsonl` 0x2a88827bd487ef7a and 0x34a41fcbacbba99c.
+
+### Checking the contract with the binary
+
+Record a `--headless --mock` run (without `--mock-workloads`), print `--bus-inspect DIR
+--saga-digest`, replay the recording into a second directory with `--replay`, and print the
+digest of that one. The two digests must match. Then record a second session the same way: its
+digest must differ, or the seed is not taking the readings.
+
+0.18.0 (digest version 3, Task B.6), each a 12-second `--headless --mock N --record DIR`
+recording, replayed with `--headless --replay DIR --speed 50 --bus-dir DIR2`:
+
+| Run | Records | Digest (printed twice, equal) | Replay at `--speed 50` |
+|---|---|---|---|
+| `--mock 4` | 9,048, 1 world, 10 beats | `0xad8cec85d321c8a0` | span 0.234 s against 11.938 s, same digest |
+| `--mock 32` | 70,390, 1 world, 14 beats | `0x7f96a9496a75fea5` | span 0.199 s against 11.930 s, same digest |
+| second `--mock 4` | 9,048, 1 world, 11 beats | `0x6f82483e31a9010c` (differs) | |
+
+In 0.18.0 as first built, a plain `--mock` run showed no crossing: its live masks never changed
+(no `LinkChanged`) and it announces no model, so no crossing hook was offered, although its four
+`LinkPeer` events bound the portals. Task B.7 fixed that. The mock backend (`ring_link_is_dark` in
+`src/backend/mock.rs`) drops each chip's ring port bit from the live mask for 80 to 120 updates
+(8 to 12 s at 10 Hz) on a cycle of 600, 700 or 800 updates, first fall at update 100 plus an
+offset by chip. The peers are taken from the steady mask, so the wiring does not change; the far
+end stays up. The source already sent `LinkChanged` on a mask change, so the rise now offers a
+crossing, and a `--mock N` (N of 2 or more) chronicle gets crossing lines ending in `~`. The flap
+also darkens that port's cage in the Wafer Waffler and other views of the mask for those seconds. Crossings
+also come from logs with a model on two linked chips (`cross4.jsonl`).
+B.7 smoke (release, `--mock 4`, 150 s): 109,532 records, 152 beats, 20 `HeroCrossed`, digest
+`0xb5ecf34f983007b8` three times (twice in place, once after `--replay --speed 50`). Crossing lines
+end in `~`. `tools/party_traffic.py` at `--mock 32`, 3 runs: 15.6, 18.4 and 14.7 KB/s (mean 16.3).
+Final fix wave smoke (release, 12-second `--headless --mock 4 --record`): 9,050 records (four
+`LinkPeer`, one `LinkChanged`), 1 world, 10 beats, digest `0x538c5ea1d851c5be` twice in place and
+again after `--replay --speed 50`; a second recording printed `0x2782e7c24489cccc`. Traffic at
+`--mock 32`, 3 runs: 16.9, 14.5 and 16.6 KB/s (mean 16.0). This is the example in docs/saga.md.
+
+0.17.0 (digest version 2, Task A.8), each a 12-second `--headless --mock N` recording:
+
+| Run | Records | Digest (printed twice, equal) | Replay at `--speed 50` |
+|---|---|---|---|
+| `--mock 4` | 9,044 (480 sweeps), 1 world, 13 beats | `0x7342df1937efd939` | span 0.232 s against 11.948 s, same digest |
+| `--mock 32` | 70,358 (3,776 sweeps), 1 world, 14 beats | `0x571993fc48fe7014` | span 0.194 s against 11.913 s, same digest |
+| second `--mock 4` | 9,044, 1 world, 12 beats | `0xdebf57ae6a5e9aa4` (differs) | |
+
+Before the party (0.16.x, digest version 1), the final fix wave's 12-second `--mock` recording
+printed `0x0b5598cead3a912f`; under version 2 that number no longer applies. Before the fix wave
+two separate recordings both printed `0x1ec90317adb4fa0a` (ruling R26).
+
+---
+
+## Viz plugins (Nov 4 2026, branch `viz-plugins`, 0.19.0)
+
+Prompt (Taylor): make tt-toplike a platform people remix. Someone tells a coding agent "add a viz
+that does X", and the agent adds it in one place; a PR touches only its own folder or file. Spec:
+`docs/superpowers/specs/2026-11-04-viz-plugins-design.md`. Reference: `docs/viz-plugins.md`. Recipe:
+"Add a viz" near the top of this file.
+
+Decisions: the built-in views stay on `DisplayMode` (the user did not want them disturbed), and the
+registry holds plugins only. Two tiers share it: a Rust folder found by `build.rs`, and a YAML or
+JSON file with seven widgets that reloads on save (a 2 second poll, the last good version kept). The
+`v` cycle goes from the Wafer Waffler to each enabled plugin in id order. Both shipped examples are
+hidden by default. A panic guard turns off a plugin that panics. A key method in the first draft of
+the trait was removed before release, because the host never called it. Docs are guarded by `src/viz/docs_tests.rs`: the recipe's commands, the paths
+the docs name and the version pins are checked against the code. The bus (0.2.0) and saga (0.3.0)
+crates did not change; the bus carried no new signal and the party traffic is unchanged (one run: 14.2 KB/s; the 0.18.0
+three-run mean was 16.3 KB/s).

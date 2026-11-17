@@ -1,0 +1,820 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+
+//! What the arcade draws from the signal bus: a bring-up gauge and a model
+//! label per chip, spark and compile particles in the starfield, and a flash
+//! on a chip that was reset. It also counts the requests completed, which
+//! make the duel's snake lunge.
+//!
+//! # Two steps
+//!
+//! The shape is Die 3D's overlay (`die3d::overlay`):
+//!
+//! 1. [`ArcadeFx::from_world`] runs in `ArcadeVisualization::set_bus`, once
+//!    per arcade update. It reads the world through [`WorldRead`], compares
+//!    it with what the arcade saw last ([`ArcadeBusState`]) and returns an
+//!    [`ArcadeFx`]: for each chip, what is on it and since when, plus the
+//!    count of requests completed. All the reading, matching and
+//!    bookkeeping happens here.
+//! 2. [`draw`] runs in `ArcadeVisualization::render` (the frame path). It
+//!    turns the `ArcadeFx` into cells at a bus time with arithmetic only. It
+//!    never reads the world.
+//!
+//! An empty world (no model, no event, no reset) gives an empty `ArcadeFx`,
+//! and [`draw`] does nothing with an empty one, so the arcade draws exactly
+//! what it drew before the bus.
+//!
+//! # Where things go
+//!
+//! Each device gets an equal share of the screen's width, in device order:
+//! its *slot*. The starfield's separator row (the `✧ STARFIELD` rule) is the
+//! gauge row. Within a chip's slot it shows:
+//!
+//! * **The gauge.** A model in `Compiling` or `Loading` colours the rule in
+//!   the load purple from the slot's left edge, as far as the reported
+//!   progress. With no progress figure a purple band sweeps across the slot.
+//!   A change to `Ready` lights the whole slot in the serving teal and fades
+//!   it over [`SETTLE_NS`]; a change to `Down` does the same in grey.
+//! * **The model label**, right-aligned in the slot, in the phase's colour,
+//!   with `~` in front when the model's readings are estimates. When no
+//!   form of the label fits in the slot, an estimated model still gets a
+//!   bare `~` where the label would end, since its gauge still shows.
+//! * **A reset flash**: the slot's cells shown reversed for [`FLASH_NS`]
+//!   after a new `reset_seq` on the chip.
+//!
+//! Spark and compile particles rise in the starfield rows of the chip's
+//! slot. Request hits are not drawn on the arcade (until 0.16.5 they were a
+//! ring of `✦` around the roaming hero, which is gone): they make the duel's
+//! snake lunge, and Memory Castle and Defrag read the per-chip hits.
+//!
+//! # What drives what
+//!
+//! * **Labels and gauges** come from `model_on_chip`. A model with an empty
+//!   chip list is skipped: an attached world can name another machine's
+//!   chips, which `ReadView::only_chips` cuts away.
+//! * **A phase change** is a change against the phase this arcade saw last.
+//!   The first sight of a model is not a change, and a re-announcement with
+//!   the same phase changes nothing.
+//! * **Hits** come from `RequestsCompleted` events seen since the last
+//!   update, for a model on one of this arcade's chips. Their glyph count
+//!   follows the event's `n`, up to [`MAX_HIT_GLYPHS`]. The sum of `n` is
+//!   [`ArcadeFx::new_requests`].
+//! * **Particles** come from `Spark` events naming one of this arcade's
+//!   chips, in `spark_rgb` colours, and from `KernelCompiled` events naming
+//!   one, in the load purple. Events with no chip draw nothing, as in Die 3D.
+//! * **Resets** come from `reset_seq` of each chip.
+//!
+//! Events already in the world at the first read are history and draw
+//! nothing. So do events that arrived while the arcade was away (off screen
+//! or another mode shown): an update more than a pulse lifetime after the
+//! last one, and more than four times the usual gap between updates, records
+//! the newest event and draws nothing for it. The rule and the phase memo
+//! are the shared ones in `bus_intake` (`EventIntake`, `PhaseBook`).
+//!
+//! # Provenance
+//!
+//! The label's numbers are what the source measured. A model whose readings
+//! are `Estimated` (the mock backend) or `Decoration` gets `~` before its
+//! label, through `model_text_is_estimated`, the helper Die 3D's flag and
+//! the `i` view use. The gauge's length is derived from the reported
+//! progress. The following are decoration: the sweep shown with no progress
+//! figure (it says the model is busy and does not say how far), the shape,
+//! growth and fade of the particles, where in the slot a particle starts,
+//! and the length of the settle, fade and flash.
+
+use crate::animation::bus_intake::{EventIntake, PhaseBook};
+use crate::animation::die3d::overlay::{
+    lerp, model_text_is_estimated, phase_rgb, spark_rgb, ModelFlag, BAND_HALF, DOWN_GREY, FLASH_NS,
+    LOAD_PURPLE, MAX_PULSES, MAX_SPARKS, PULSE_NS, SERVE_TEAL, SETTLE_NS, SPARK_NS,
+    SWEEP_PERIOD_NS,
+};
+use crate::ui::colors;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use std::collections::HashMap;
+use std::ops::Range;
+use tt_toplike_bus::{EntityKey, Event, ModelPhase, ModelView, WorldRead};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+const NS_PER_S: u64 = 1_000_000_000;
+/// Glyphs of one hit at most. One request is one glyph.
+pub const MAX_HIT_GLYPHS: u32 = 8;
+/// How fast a particle rises, in rows per second. Decoration.
+const PARTICLE_ROWS_PER_S: f32 = 4.0;
+/// A tokens-per-second reading older than this is ignored (`bus_intake`,
+/// for the starfield and the backdrop).
+pub const TPS_STALE_MS: u64 = 10_000;
+/// The time constant of the tokens-per-second smoothing, in seconds.
+pub const TPS_TAU_S: f64 = 2.0;
+/// Steps per second effects move at, as in Die 3D.
+const FX_STEPS_PER_S: f64 = 12.0;
+
+/// How far a chip's gauge reaches, and why.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Gauge {
+    /// Compiling or loading at this progress (0..1). Derived from the
+    /// reported progress.
+    Progress(f32),
+    /// Compiling or loading with no progress figure: a band sweeping across
+    /// the slot from `since_ns`. Decoration.
+    Sweep { since_ns: u64 },
+    /// The model reached `Ready` at `since_ns`: the slot lights in teal and
+    /// fades over [`SETTLE_NS`].
+    Settle { since_ns: u64 },
+    /// The model went `Down` at `since_ns`: the slot greys and fades over
+    /// [`SETTLE_NS`].
+    Fade { since_ns: u64 },
+}
+
+/// One request hit: requests completed for a model on a chip. Memory
+/// Castle and Defrag draw them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hit {
+    pub start_ns: u64,
+    /// Glyphs: the requests completed, 1 to [`MAX_HIT_GLYPHS`].
+    pub glyphs: u32,
+    /// The event's sequence number (decoration for the views that draw it).
+    pub seq: u64,
+}
+
+/// One spark or compile particle in a chip's slot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Particle {
+    pub start_ns: u64,
+    /// The event's sequence number, which picks where in the slot it starts
+    /// (decoration).
+    pub seq: u64,
+    pub rgb: [u8; 3],
+}
+
+/// An ECC tick on one GDDR channel of a chip.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Crack {
+    pub start_ns: u64,
+    pub channel: u8,
+}
+
+/// Everything the bus puts on one chip's slot.
+///
+/// The arcade draws the flag, label, gauge, particles and flash. Memory
+/// Castle and Defrag read the same world through [`ArcadeFx::from_world`]
+/// and also use `hits` (requests for a model on this chip) and `cracks`
+/// (ECC ticks), which the arcade does not draw.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ChipFx {
+    /// The chip's position among the devices: its slot.
+    pub slot: usize,
+    pub flag: Option<ModelFlag>,
+    /// The flag's text forms (`ModelFlag::texts`), longest first, worked
+    /// out here so the frame path builds no strings for them.
+    pub label_texts: Vec<String>,
+    pub gauge: Option<Gauge>,
+    pub particles: Vec<Particle>,
+    /// When the chip's last reset flash started.
+    pub flash_ns: Option<u64>,
+    /// Request hits for the models on this chip, each alive for
+    /// [`PULSE_NS`]. A hit whose `start_ns` is this update's time is new.
+    pub hits: Vec<Hit>,
+    /// ECC ticks on this chip, each alive for [`SETTLE_NS`].
+    pub cracks: Vec<Crack>,
+}
+
+impl ChipFx {
+    fn is_empty(&self) -> bool {
+        self.flag.is_none()
+            && self.gauge.is_none()
+            && self.particles.is_empty()
+            && self.flash_ns.is_none()
+            && self.hits.is_empty()
+            && self.cracks.is_empty()
+    }
+}
+
+/// What the bus puts on the arcade. See the module doc.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ArcadeFx {
+    /// How many slots the width is cut into: the device count.
+    pub slots: usize,
+    /// One entry per chip that has something, in slot order.
+    pub chips: Vec<ChipFx>,
+    /// Requests completed in the events this update handled, for this
+    /// arcade's chips. The duel's snake lunges when it is above 0.
+    pub new_requests: u32,
+    /// Whether this update handled the events since the last one: false on
+    /// the first update, after the world's head went backwards, and after
+    /// the view was away. A view that acts on a change it sees between two
+    /// updates (Defrag's eviction) acts only when this is true.
+    pub fresh: bool,
+}
+
+/// The phase a view last saw a model in, and when it changed to it
+/// (`None` for the phase the model had when first seen).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct PhaseMemo {
+    pub(crate) phase: ModelPhase,
+    pub(crate) since_ns: Option<u64>,
+}
+
+/// What the arcade remembers between two [`ArcadeFx::from_world`] calls.
+/// Start with the default; set a new default when the arcade stops reading a
+/// world, so the next world is a first sight.
+#[derive(Debug, Clone, Default)]
+pub struct ArcadeBusState {
+    /// Which events are new, and whether this update is live (the shared
+    /// rule). The arcade reads no ECC counters, so its ECC policy is never
+    /// consulted; it keeps the default.
+    intake: EventIntake,
+    /// The phase each model was last seen in.
+    phases: PhaseBook,
+    /// By chip key.
+    particles: HashMap<EntityKey, Vec<Particle>>,
+    /// The last `reset_seq` seen, by chip key.
+    resets: HashMap<EntityKey, Option<u64>>,
+    /// When each chip's reset flash started, by chip key.
+    flashes: HashMap<EntityKey, u64>,
+    /// Request hits by chip key.
+    chip_hits: HashMap<EntityKey, Vec<Hit>>,
+    /// ECC ticks by chip key.
+    cracks: HashMap<EntityKey, Vec<Crack>>,
+}
+
+impl ArcadeFx {
+    /// Whether nothing is drawn from the bus.
+    pub fn is_empty(&self) -> bool {
+        self.chips.is_empty()
+    }
+
+    /// The effects of `chips` (each a device's slot and its chip key,
+    /// `EntityKey::chip(bus_id)`) out of `slots` device slots, from `world`
+    /// at bus time `now_mono_ns`, updating `prev`. See the module doc.
+    pub fn from_world(
+        world: &dyn WorldRead,
+        chips: &[(usize, EntityKey)],
+        slots: usize,
+        now_mono_ns: u64,
+        prev: &mut ArcadeBusState,
+    ) -> ArcadeFx {
+        let now = now_mono_ns;
+        let drawn = |c: &EntityKey| chips.iter().any(|(_, k)| k == c);
+        let ours = |m: &ModelView| m.chips.iter().any(&drawn);
+        let models = world.models();
+
+        // The shared first-sight rule: the first world, a world whose head
+        // went backwards, and an update after the arcade was away hand out
+        // no event (`intake.live` is false).
+        let intake = prev.intake.take(world, now);
+        let mut new_requests = 0u32;
+        for (q, e) in intake.events {
+            match e {
+                Event::RequestsCompleted { model, n } => {
+                    // A count of 0 completed nothing and draws nothing.
+                    if let Some(m) = models.iter().find(|m| m.key == model && ours(m)) {
+                        if n > 0 {
+                            new_requests = new_requests.saturating_add(n);
+                            for c in m.chips.iter().filter(|c| drawn(c)) {
+                                add_hit(prev.chip_hits.entry(c.clone()).or_default(), now, n, q);
+                            }
+                        }
+                    }
+                }
+                Event::EccTick { chip, channel } if drawn(&chip) => {
+                    let list = prev.cracks.entry(chip).or_default();
+                    list.retain(|k| now.saturating_sub(k.start_ns) < SETTLE_NS);
+                    if list.len() >= MAX_SPARKS {
+                        list.remove(0);
+                    }
+                    list.push(Crack {
+                        start_ns: now,
+                        channel,
+                    });
+                }
+                Event::Spark {
+                    chip: Some(c),
+                    kind,
+                } if drawn(&c) => add_particle(prev, c, now, q, spark_rgb(&kind)),
+                Event::KernelCompiled { chip: Some(c), .. } if drawn(&c) => {
+                    add_particle(prev, c, now, q, LOAD_PURPLE)
+                }
+                // Model events are announcements: the phase is read from
+                // the model below. Resets are read from `reset_seq`.
+                _ => {}
+            }
+        }
+
+        // Resets: a `reset_seq` that moved since the last update flashes the
+        // chip. The first sight of a chip, and an update after being away,
+        // only record it.
+        for (_, key) in chips {
+            let latest = world.reset_seq(key);
+            let before = prev.resets.insert(key.clone(), latest);
+            if let Some(before) = before {
+                if latest.is_some() && latest != before && intake.live {
+                    prev.flashes.insert(key.clone(), now);
+                }
+            }
+        }
+        prev.resets.retain(|k, _| drawn(k));
+
+        // Phases: a change against the last phase seen is timed from now.
+        prev.phases.update(&models, now);
+
+        let mut out = ArcadeFx {
+            slots,
+            new_requests,
+            fresh: intake.live,
+            ..ArcadeFx::default()
+        };
+        for (slot, key) in chips {
+            let mut co = ChipFx {
+                slot: *slot,
+                ..ChipFx::default()
+            };
+            if let Some(m) = world.model_on_chip(key).filter(|m| !m.chips.is_empty()) {
+                let flag = ModelFlag {
+                    label: m.label.clone(),
+                    phase: m.phase,
+                    colour: phase_rgb(m.phase),
+                    tokens_per_s: m.tokens_per_s,
+                    waiting: m.waiting,
+                    progress: m.progress,
+                    estimated: model_text_is_estimated(world, &m),
+                };
+                co.label_texts = flag.texts();
+                co.flag = Some(flag);
+                co.gauge = gauge_of(&m, prev.phases.get(&m.key), now);
+            }
+            if let Some(p) = prev.particles.get_mut(key) {
+                p.retain(|p| now.saturating_sub(p.start_ns) < SPARK_NS);
+                co.particles = p.clone();
+            }
+            co.flash_ns = prev
+                .flashes
+                .get(key)
+                .copied()
+                .filter(|t| now.saturating_sub(*t) < FLASH_NS);
+            if let Some(h) = prev.chip_hits.get_mut(key) {
+                h.retain(|h| now.saturating_sub(h.start_ns) < PULSE_NS);
+                co.hits = h.clone();
+            }
+            if let Some(k) = prev.cracks.get_mut(key) {
+                k.retain(|k| now.saturating_sub(k.start_ns) < SETTLE_NS);
+                co.cracks = k.clone();
+            }
+            if !co.is_empty() {
+                out.chips.push(co);
+            }
+        }
+        // Nothing is kept for a chip no longer drawn, or a flash that ended.
+        prev.particles.retain(|k, p| drawn(k) && !p.is_empty());
+        prev.flashes
+            .retain(|k, t| drawn(k) && now.saturating_sub(*t) < FLASH_NS);
+        prev.chip_hits.retain(|k, h| drawn(k) && !h.is_empty());
+        prev.cracks.retain(|k, c| drawn(k) && !c.is_empty());
+        out
+    }
+}
+
+/// Add a hit for `n` requests at `now`, keeping at most [`MAX_PULSES`]: past
+/// that the newest takes this one's glyphs on top of its own (up to
+/// [`MAX_HIT_GLYPHS`]) and starts again, as Die 3D merges pulses.
+fn add_hit(list: &mut Vec<Hit>, now: u64, n: u32, seq: u64) {
+    list.retain(|h| now.saturating_sub(h.start_ns) < PULSE_NS);
+    let glyphs = n.clamp(1, MAX_HIT_GLYPHS);
+    if list.len() < MAX_PULSES {
+        list.push(Hit {
+            start_ns: now,
+            glyphs,
+            seq,
+        });
+    } else if let Some(last) = list.last_mut() {
+        last.glyphs = (last.glyphs + glyphs).min(MAX_HIT_GLYPHS);
+        last.start_ns = now;
+    }
+}
+
+/// Add a particle on `chip` for the event with sequence number `seq`,
+/// keeping at most [`MAX_SPARKS`] per chip.
+fn add_particle(prev: &mut ArcadeBusState, chip: EntityKey, now: u64, seq: u64, rgb: [u8; 3]) {
+    let list = prev.particles.entry(chip).or_default();
+    list.retain(|p| now.saturating_sub(p.start_ns) < SPARK_NS);
+    if list.len() >= MAX_SPARKS {
+        list.remove(0);
+    }
+    list.push(Particle {
+        start_ns: now,
+        seq,
+        rgb,
+    });
+}
+
+/// The gauge of model `m`, whose phase memo is `memo`, at `now`.
+pub(crate) fn gauge_of(m: &ModelView, memo: Option<&PhaseMemo>, now: u64) -> Option<Gauge> {
+    let since = memo.and_then(|p| p.since_ns);
+    let recent = |t: &u64| now.saturating_sub(*t) < SETTLE_NS;
+    match m.phase {
+        ModelPhase::Compiling | ModelPhase::Loading => Some(match m.progress {
+            Some(p) if p.is_finite() => Gauge::Progress(p.clamp(0.0, 1.0)),
+            _ => Gauge::Sweep {
+                since_ns: since.unwrap_or(0),
+            },
+        }),
+        ModelPhase::Ready => since.filter(recent).map(|t| Gauge::Settle { since_ns: t }),
+        ModelPhase::Down => since.filter(recent).map(|t| Gauge::Fade { since_ns: t }),
+        ModelPhase::Alarm => None,
+    }
+}
+
+// ---- The frame path ---------------------------------------------------------
+
+/// Seconds since `start` at `now`, stepped to [`FX_STEPS_PER_S`] (Die 3D's
+/// stepping, so effects move in whole steps).
+pub(crate) fn stepped_secs(start: u64, now: u64) -> f32 {
+    let s = now.saturating_sub(start) as f64 / NS_PER_S as f64;
+    ((s * FX_STEPS_PER_S).floor() / FX_STEPS_PER_S) as f32
+}
+
+/// What is left (1 down to 0) of an effect of `dur_ns` that started at
+/// `start`, on the stepped clock; 0 once `dur_ns` has passed.
+pub(crate) fn left(start: u64, now: u64, dur_ns: u64) -> f32 {
+    if now.saturating_sub(start) >= dur_ns {
+        return 0.0;
+    }
+    (1.0 - stepped_secs(start, now) / (dur_ns as f32 / NS_PER_S as f32)).max(0.0)
+}
+
+/// Where on the arcade's lines the bus effects go. The arcade fills it from
+/// its layout (`ArcadeVisualization::draw_bus`): see "The arcade with a
+/// configured layout" in `docs/bus.md`.
+#[derive(Debug, Clone)]
+pub struct Stage {
+    pub width: usize,
+    /// The gauge row: the rule above the gauge panel (the starfield's in the
+    /// default layout). `None` when no panel is shown: then no gauge, label
+    /// or flash is drawn.
+    pub gauge_row: Option<usize>,
+    /// The gauge panel's columns, cut into the chips' slots.
+    pub gauge_cols: Range<usize>,
+    /// Columns at the start of the gauge row that hold its label; the model
+    /// label never covers them.
+    pub label_cols: usize,
+    /// The starfield rows below the lanes, where particles rise. Empty when
+    /// the layout has no starfield: then particles are not drawn.
+    pub sky: Range<usize>,
+    /// The starfield panel's columns, cut into the chips' slots.
+    pub sky_cols: Range<usize>,
+}
+
+/// The columns of slot `slot` of `slots` across `width`.
+pub(crate) fn slot_cols(slot: usize, slots: usize, width: usize) -> Range<usize> {
+    let n = slots.max(1);
+    (slot * width / n)..((slot + 1) * width / n)
+}
+
+/// The columns of slot `slot` of `slots` across the columns `cols`.
+fn slot_in(cols: &Range<usize>, slot: usize, slots: usize) -> Range<usize> {
+    let r = slot_cols(slot, slots, cols.len());
+    (cols.start + r.start)..(cols.start + r.end)
+}
+
+/// Draw `fx` at bus time `now` onto `lines`. Arithmetic on `fx` only. An
+/// empty `fx` changes nothing.
+pub fn draw(fx: &ArcadeFx, now: u64, stage: &Stage, lines: &mut [Line<'static>]) {
+    if fx.chips.is_empty() {
+        return;
+    }
+    for co in &fx.chips {
+        let cols = slot_in(&stage.gauge_cols, co.slot, fx.slots);
+        if let (Some(row), false) = (stage.gauge_row, cols.is_empty()) {
+            draw_gauge(co, now, cols.clone(), row, lines);
+            if co.flash_ns.is_some_and(|t| left(t, now, FLASH_NS) > 0.0) {
+                restyle(lines, row, cols.clone(), |s| {
+                    s.add_modifier(Modifier::REVERSED)
+                });
+            }
+            if let Some(flag) = &co.flag {
+                draw_label(flag, &co.label_texts, cols.clone(), row, stage, lines);
+            }
+        }
+        // Particles need the starfield; an empty sky draws none.
+        let sky_cols = slot_in(&stage.sky_cols, co.slot, fx.slots);
+        for p in &co.particles {
+            draw_particle(p, now, sky_cols.clone(), &stage.sky, lines);
+        }
+    }
+}
+
+/// The gauge of `co` on row `row` across `cols`.
+fn draw_gauge(co: &ChipFx, now: u64, cols: Range<usize>, row: usize, lines: &mut [Line<'static>]) {
+    let Some(gauge) = co.gauge else {
+        return;
+    };
+    let len = cols.len() as f32;
+    let a = cols.start;
+    match gauge {
+        Gauge::Progress(p) => {
+            let end = a + (p * len).round() as usize;
+            tint(lines, row, a..end.min(cols.end), LOAD_PURPLE, 1.0);
+        }
+        Gauge::Sweep { since_ns } => {
+            // Decoration: the band says the model is busy and does not say how far.
+            let period = SWEEP_PERIOD_NS as f32 / NS_PER_S as f32;
+            let phase = (stepped_secs(since_ns, now) / period).fract();
+            let centre = phase * (1.0 + 2.0 * BAND_HALF) - BAND_HALF;
+            let lo = ((centre - BAND_HALF).max(0.0) * len).floor() as usize;
+            let hi = ((centre + BAND_HALF).clamp(0.0, 1.0) * len).ceil() as usize;
+            if hi > lo {
+                tint(
+                    lines,
+                    row,
+                    (a + lo)..(a + hi).min(cols.end),
+                    LOAD_PURPLE,
+                    0.8,
+                );
+            }
+        }
+        Gauge::Settle { since_ns } => {
+            let w = left(since_ns, now, SETTLE_NS);
+            if w > 0.0 {
+                tint(lines, row, cols, SERVE_TEAL, w);
+            }
+        }
+        Gauge::Fade { since_ns } => {
+            let w = left(since_ns, now, SETTLE_NS);
+            if w > 0.0 {
+                tint(lines, row, cols, DOWN_GREY, w);
+            }
+        }
+    }
+}
+
+/// The model's label, right-aligned in the slot with one column to spare,
+/// clear of the gauge row's own label and of the `▓▒░` that ends the rule.
+/// The longest of `texts` (the flag's text forms) that fits; none when none
+/// fits.
+fn draw_label(
+    flag: &ModelFlag,
+    texts: &[String],
+    cols: Range<usize>,
+    row: usize,
+    stage: &Stage,
+    lines: &mut [Line<'static>],
+) {
+    let start_min = cols.start.max(stage.label_cols + 1);
+    let end = cols
+        .end
+        .min(stage.width.saturating_sub(3))
+        .saturating_sub(1);
+    let style = Style::default()
+        .fg(colors::rgb(flag.colour[0], flag.colour[1], flag.colour[2]))
+        .add_modifier(Modifier::BOLD);
+    let Some(text) = texts.iter().find(|t| {
+        let w = UnicodeWidthStr::width(t.as_str());
+        end >= w && end - w >= start_min
+    }) else {
+        // No form fits. The gauge still draws from this model, so an
+        // estimate keeps its `~`, alone at the label's right
+        // end, when that one column is free.
+        if flag.estimated && end > start_min {
+            crate::animation::ArcadeVisualization::splice_char(lines, row, end - 1, '~', style);
+        }
+        return;
+    };
+    // One span for the whole label: the row is rebuilt once per frame.
+    let col = end - UnicodeWidthStr::width(text.as_str());
+    splice_str(lines, row, col, text, style);
+}
+
+/// Write `text` in `style` over row `row` from display column `col`, as one
+/// span, keeping every other cell and its style. The row is rebuilt once,
+/// whatever the text's length. A wide character that `text` covers only in
+/// part leaves a space for its other half, so later columns do not move. A
+/// row shorter than `col` is padded with spaces; a row that does not exist
+/// is left alone.
+pub(crate) fn splice_str(
+    lines: &mut [Line<'static>],
+    row: usize,
+    col: usize,
+    text: &str,
+    style: Style,
+) {
+    let Some(line) = lines.get_mut(row) else {
+        return;
+    };
+    let end = col + UnicodeWidthStr::width(text);
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 3);
+    let mut at = 0usize;
+    let mut placed = false;
+    for span in std::mem::take(&mut line.spans) {
+        let w = UnicodeWidthStr::width(span.content.as_ref());
+        if at + w <= col || at >= end {
+            // Wholly before or after the text.
+            if at >= end && !placed {
+                out.push(Span::styled(text.to_string(), style));
+                placed = true;
+            }
+            at += w;
+            out.push(span);
+            continue;
+        }
+        // The span meets the text: keep what lies before and after it.
+        let mut before = String::new();
+        let mut after = String::new();
+        for ch in span.content.chars() {
+            let cw = ch.width().unwrap_or(1);
+            let (lo, hi) = (at, at + cw);
+            if hi <= col {
+                before.push(ch);
+            } else if lo >= end {
+                after.push(ch);
+            } else {
+                // Covered, or cut by an edge: the uncovered columns of a
+                // cut wide character become spaces.
+                for c in lo..hi {
+                    if c < col {
+                        before.push(' ');
+                    } else if c >= end {
+                        after.push(' ');
+                    }
+                }
+            }
+            at = hi;
+        }
+        if !before.is_empty() {
+            out.push(Span::styled(before, span.style));
+        }
+        if !placed {
+            out.push(Span::styled(text.to_string(), style));
+            placed = true;
+        }
+        if !after.is_empty() {
+            out.push(Span::styled(after, span.style));
+        }
+    }
+    if !placed {
+        if at < col {
+            out.push(Span::raw(" ".repeat(col - at)));
+        }
+        out.push(Span::styled(text.to_string(), style));
+    }
+    line.spans = out;
+}
+
+/// A particle rising in the sky rows of the slot `cols`.
+fn draw_particle(
+    p: &Particle,
+    now: u64,
+    cols: Range<usize>,
+    sky: &Range<usize>,
+    lines: &mut [Line<'static>],
+) {
+    let w = left(p.start_ns, now, SPARK_NS);
+    if w <= 0.0 || sky.is_empty() || cols.is_empty() {
+        return;
+    }
+    // Decoration: where in the slot it starts, and how it rises.
+    let col = cols.start + (p.seq.wrapping_mul(7919) % cols.len() as u64) as usize;
+    let base = sky.start + (p.seq.wrapping_mul(31) % sky.len() as u64) as usize;
+    let rise = (stepped_secs(p.start_ns, now) * PARTICLE_ROWS_PER_S) as usize;
+    let row = base.saturating_sub(rise).max(sky.start);
+    let glyph = if w > 0.5 { '*' } else { '·' };
+    let style = Style::default()
+        .fg(colors::rgb(p.rgb[0], p.rgb[1], p.rgb[2]))
+        .add_modifier(Modifier::BOLD);
+    crate::animation::ArcadeVisualization::splice_char(lines, row, col, glyph, style);
+}
+
+/// Blend the foreground of the cells `cols` of `row` toward `rgb` by
+/// `weight`, keeping the characters.
+pub(crate) fn tint(
+    lines: &mut [Line<'static>],
+    row: usize,
+    cols: Range<usize>,
+    rgb: [u8; 3],
+    weight: f32,
+) {
+    restyle(lines, row, cols, |s| {
+        let base = match s.fg {
+            Some(Color::Rgb(r, g, b)) => [r, g, b],
+            _ => rgb,
+        };
+        let c = lerp(base, rgb, weight.clamp(0.0, 1.0));
+        s.fg(colors::rgb(c[0], c[1], c[2]))
+    });
+}
+
+/// Apply `f` to the style of each cell in `cols` of `row`, keeping the
+/// characters and the other cells' styles.
+pub(crate) fn restyle(
+    lines: &mut [Line<'static>],
+    row: usize,
+    cols: Range<usize>,
+    f: impl Fn(Style) -> Style,
+) {
+    let Some(line) = lines.get_mut(row) else {
+        return;
+    };
+    if cols.is_empty() {
+        return;
+    }
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(line.spans.len() + 2);
+    let mut col = 0usize;
+    for span in std::mem::take(&mut line.spans) {
+        let w = UnicodeWidthStr::width(span.content.as_ref());
+        if col + w <= cols.start || col >= cols.end {
+            col += w;
+            out.push(span);
+            continue;
+        }
+        // The span crosses the range: split it into runs inside and outside.
+        let mut run = String::new();
+        let mut run_in = false;
+        for ch in span.content.chars() {
+            let inside = cols.contains(&col);
+            if inside != run_in && !run.is_empty() {
+                let style = if run_in { f(span.style) } else { span.style };
+                out.push(Span::styled(std::mem::take(&mut run), style));
+            }
+            run_in = inside;
+            run.push(ch);
+            col += ch.width().unwrap_or(1);
+        }
+        if !run.is_empty() {
+            let style = if run_in { f(span.style) } else { span.style };
+            out.push(Span::styled(run, style));
+        }
+    }
+    line.spans = out;
+}
+
+// ---- Legend and explain text --------------------------------------------------
+
+/// The arcade legend's section on what the bus draws.
+pub const LEGEND_TEXT: &[&str] = &[
+    "Each chip has an equal share of the width, chip 0 left:",
+    "  gauge   the ✧ STARFIELD rule fills purple to a model's",
+    "          compile or load progress (no figure: a band",
+    "          sweeps, decoration); teal at ready, grey when down",
+    "  label   model, phase and tokens/s right of the rule;",
+    "          '~' marks an estimate",
+    "  * rise  a hivemind spark or kernel compile (decoration)",
+    "  flash   the chip's share of the rule after a reset",
+    "  lunge   the duel's snake, on each request completed",
+];
+
+/// The arcade explain text's paragraph on what the bus draws.
+pub const EXPLAIN_TEXT: &[&str] = &[
+    "",
+    "Signal bus: each chip owns an equal share of the width,",
+    "chip 0 on the left. The STARFIELD rule is a gauge that",
+    "fills purple as a model compiles or loads, as far as its",
+    "progress (with no figure a band sweeps: decoration). It",
+    "goes teal at ready and grey when down. Model, phase and",
+    "tokens/s sit at its right ('~' marks an estimate).",
+    "Sparks and compiles rise as *, a reset flashes the rule,",
+    "and each request completed makes the duel's snake lunge.",
+];
+
+/// The legend lines for [`LEGEND_TEXT`], with the overlay's left bar.
+pub fn legend_lines(bar: Color, bg: Color, dim: Color) -> Vec<Line<'static>> {
+    LEGEND_TEXT
+        .iter()
+        .map(|s| {
+            Line::from(vec![
+                Span::styled("║ ", Style::default().fg(bar).bg(bg)),
+                Span::styled(*s, Style::default().fg(dim)),
+            ])
+        })
+        .collect()
+}
+
+/// The duel's serving stats. `local` is the local monitor's choice;
+/// `attached_rows` are the rows built from an attached host's world
+/// (`inference_bus::attached_rows`), `None` when the TUI hosts its own bus.
+pub fn duel_serving(
+    local: Option<crate::workload::inference_server::ServingStats>,
+    attached_rows: Option<&[crate::workload::inference_server::ServiceState]>,
+) -> Option<crate::workload::inference_server::ServingStats> {
+    match attached_rows {
+        Some(rows) => attached_serving(rows),
+        None => local,
+    }
+}
+
+/// The duel's serving stats when the TUI is attached to a host, from
+/// the rows built from the host's world. The local monitor's stats belong
+/// to this machine and say nothing about the host.
+///
+/// The first ready row on one of this TUI's chips, so the duel shows the
+/// model whose requests make the snake lunge (the lunge counts only models
+/// on this TUI's chips). With none, the first ready row. An attached row's
+/// `chips` hold only this TUI's device indexes: a chip it lacks has none.
+pub fn attached_serving(
+    rows: &[crate::workload::inference_server::ServiceState],
+) -> Option<crate::workload::inference_server::ServingStats> {
+    use crate::workload::inference_server::Phase;
+    let ready = || rows.iter().filter(|s| s.phase == Phase::Ready);
+    ready()
+        .find(|s| !s.chips.is_empty())
+        .or_else(|| ready().next())
+        .and_then(|s| s.serving)
+}

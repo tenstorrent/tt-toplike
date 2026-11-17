@@ -1,1 +1,16 @@
 vendor/** linguist-generated=true
+
+# Source, docs, goldens and config check out with LF on every platform. Several
+# tests read these files and compare them with "\n" strings or stored frames; a
+# Windows checkout that converted them to CRLF made those tests fail.
+*.rs text eol=lf
+*.toml text eol=lf
+*.lock text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.json text eol=lf
+*.html text eol=lf
+*.py text eol=lf
+*.sh text eol=lf

@@ -110,6 +110,10 @@ pub struct Snake {
     /// The backdrop behind whichever renderer is active; see
     /// [`crate::animation::atmosphere`].
     atmosphere: crate::animation::atmosphere::Atmosphere,
+    /// Whether the atmosphere is drawn: the view's backdrop is the scene
+    /// (the default). With another backdrop chosen, the shared backdrop
+    /// draws that one (`animation::backdrop`).
+    show_atmosphere: bool,
 }
 
 /// How long the loading snake sticks after the last featured-loading tick. The
@@ -137,7 +141,14 @@ impl Snake {
             last_loading: None,
             last_featured: None,
             atmosphere: crate::animation::atmosphere::Atmosphere::new(),
+            show_atmosphere: true,
         }
+    }
+
+    /// Draw the atmosphere behind the snake, or not. It keeps observing
+    /// either way, so turning it back on shows it where it would be.
+    pub fn set_atmosphere(&mut self, on: bool) {
+        self.show_atmosphere = on;
     }
 
     /// The behavior resolved by the most recent [`update`](Self::update).
@@ -234,7 +245,7 @@ impl Snake {
     /// always win. With nothing featured this is exactly the foreground.
     pub fn render(&self, width: usize, height: usize) -> Vec<Line<'static>> {
         let foreground = self.render_foreground(width, height);
-        if !self.atmosphere.active() {
+        if !self.show_atmosphere || !self.atmosphere.active() {
             return foreground;
         }
         let backdrop = self.atmosphere.render_backdrop(width, height);

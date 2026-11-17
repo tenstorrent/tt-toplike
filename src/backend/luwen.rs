@@ -436,6 +436,9 @@ fn map_smbus(luwen_telem: &luwen_api::chip::Telemetry) -> SmbusTelemetry {
         // luwen's Telemetry has no gddr_telemetry-equivalent tag today —
         // absent on both BH and WH until upstream adds one.
         gddr_telemetry: None,
+        // luwen's Telemetry carries no per-link peer data, so there is
+        // nothing to publish here. Only the mock backend reports peers.
+        eth_peers: None,
         // No `..Default::default()`: every SmbusTelemetry
         // field is now mapped explicitly, so adding one
         // upstream fails the build here instead of silently

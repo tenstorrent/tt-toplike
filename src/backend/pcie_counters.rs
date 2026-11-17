@@ -4,35 +4,101 @@
 //! PCIe data-word counters from tt-kmd's sysfs class attributes.
 //!
 //! tt-kmd exposes `/sys/class/tenstorrent/tenstorrent!N/pcie_perf_counters/`
-//! — 12 world-readable, monotonically increasing counters of 32-bit data
-//! words crossing the PCIe link, split by direction and initiator:
+//! — 12 world-readable, monotonically increasing 32-bit counters. They are the
+//! NoC interface unit (NIU) counters of the chip's PCIe tile, the same
+//! registers `NIU_*` in tt-isa-documentation's `BlackholeA0/NoC/Counters.md`.
 //!
-//! * `mst_*` — the DEVICE is the PCIe master (device-initiated DMA):
-//!   `mst_rd_data_word_received*` = device reading host memory (→ into chip),
-//!   `mst_{posted,nonposted}_wr_data_word_sent*` = device writing host memory
-//!   (→ out of chip).
-//! * `slv_*` — the device is the PCIe target (host-initiated MMIO/DMA):
-//!   `slv_{posted,nonposted}_wr_data_word_received*` = host writing to the
-//!   device (→ into chip), `slv_rd_data_word_sent*` = host reading from the
-//!   device (→ out of chip).
+//! **Unit.** One counter "word" is one NoC data flit: 512 bits, **64 bytes**.
+//! It is not a 4-byte PCIe word. Measured on a Blackhole p300c (2026-10-29): a
+//! 268,378,112-byte host→device copy moved `slv_rd_data_word_sent0` by
+//! 4,193,421 words. 268,378,112 / 64 is 4,193,408, so the measured count is
+//! within 0.01% of 1/64 word per byte.
 //!
-//! Each name has a `0` and `1` suffix (two PCIe controllers); both are summed.
-//! Reading these files is passive — no device open, no ARC message.
+//! **Direction.** The names are from the NoC side of the PCIe tile, so
+//! "slave" means a NoC request was aimed at the PCIe tile (the chip reaching
+//! out to host memory), and "master" means the PCIe tile issued a NoC request
+//! (the host reaching into the chip).
+//!
+//! * `slv_rd_data_word_sent*` — the chip read host memory: data **into** the
+//!   chip. (Measured: this is what a ttnn host→device copy moves.)
+//! * `slv_{posted,nonposted}_wr_data_word_received*` — the chip wrote host
+//!   memory: data **out of** the chip. (Measured: this is what a device→host
+//!   read-back moves.)
+//! * `mst_{posted,nonposted}_wr_data_word_sent*` — the host wrote into the
+//!   chip through a BAR/TLB window: data **into** the chip. *Inferred, not
+//!   measured.* ttnn's bulk path never used it, so these counters stayed near
+//!   zero in the calibration.
+//! * `mst_rd_data_word_received*` — the host read from the chip through a
+//!   window: data **out of** the chip. *Inferred, not measured.*
+//!
+//! Each name has a `0` and `1` suffix (the counter for NoC0 and NoC1); both are
+//! summed. Reading these files is passive — no device open, no ARC message.
+//!
+//! **Wrap.** The counters are 32 bits, which is about 275 GB of traffic. The
+//! difference is taken per counter with wrapping arithmetic, so a wrap between
+//! two samples is a forward step. A backwards step (device reset zeroes the
+//! counters) looks like a nearly full-range forward step, so any step over half
+//! the range is treated as a reset and reported as zero. At one sample per
+//! second a real step is far smaller than that. More than one wrap between two
+//! samples cannot be detected.
+//!
+//! **Unreadable counters.** Each counter in a snapshot is `None` when its file
+//! could not be read. A counter that is `None` on either side of a step adds
+//! nothing for that step, and the next step starts from its first reading
+//! again. Reading a missing file as 0 made its return a step of its whole
+//! value, up to 2^31 words (137 GB) in one sample.
 
 use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
-/// Bytes per 32-bit PCIe data word.
-const BYTES_PER_WORD: u64 = 4;
+/// Bytes per counter word: one 512-bit NoC data flit.
+const BYTES_PER_WORD: u64 = 64;
 
-/// Raw cumulative word counts, folded down to the two directions we render.
+/// Counter files whose sum is "data into the chip".
+const IN_COUNTERS: [&str; 6] = [
+    "slv_rd_data_word_sent0",
+    "slv_rd_data_word_sent1",
+    "mst_posted_wr_data_word_sent0",
+    "mst_posted_wr_data_word_sent1",
+    "mst_nonposted_wr_data_word_sent0",
+    "mst_nonposted_wr_data_word_sent1",
+];
+
+/// Counter files whose sum is "data out of the chip".
+const OUT_COUNTERS: [&str; 6] = [
+    "slv_posted_wr_data_word_received0",
+    "slv_posted_wr_data_word_received1",
+    "slv_nonposted_wr_data_word_received0",
+    "slv_nonposted_wr_data_word_received1",
+    "mst_rd_data_word_received0",
+    "mst_rd_data_word_received1",
+];
+
+/// Raw cumulative counter values, one slot per file in [`IN_COUNTERS`] and
+/// [`OUT_COUNTERS`], `None` where the file could not be read. They stay
+/// separate because the 32-bit wrap has to be handled per counter; a sum of
+/// wrapped counters can go down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PcieCounterSnapshot {
-    /// Words that entered the chip (host writes + device reads of host memory).
-    pub words_in: u64,
-    /// Words that left the chip (host reads + device writes to host memory).
-    pub words_out: u64,
+    /// Counters for data that entered the chip, in [`IN_COUNTERS`] order.
+    in_words: [Option<u32>; 6],
+    /// Counters for data that left the chip, in [`OUT_COUNTERS`] order.
+    out_words: [Option<u32>; 6],
+}
+
+impl PcieCounterSnapshot {
+    /// Words that entered the chip, summed over the readable counters (not
+    /// wrap-aware).
+    pub fn words_in(&self) -> u64 {
+        self.in_words.iter().flatten().map(|&w| u64::from(w)).sum()
+    }
+
+    /// Words that left the chip, summed over the readable counters (not
+    /// wrap-aware).
+    pub fn words_out(&self) -> u64 {
+        self.out_words.iter().flatten().map(|&w| u64::from(w)).sum()
+    }
 }
 
 /// Derived link bandwidth between two snapshots.
@@ -44,60 +110,38 @@ pub struct PcieBandwidth {
     pub tx_bytes_per_sec: f64,
 }
 
-/// Counter files whose sum is "data into the chip".
-const IN_COUNTERS: [&str; 6] = [
-    "slv_posted_wr_data_word_received0",
-    "slv_posted_wr_data_word_received1",
-    "slv_nonposted_wr_data_word_received0",
-    "slv_nonposted_wr_data_word_received1",
-    "mst_rd_data_word_received0",
-    "mst_rd_data_word_received1",
-];
-
-/// Counter files whose sum is "data out of the chip".
-const OUT_COUNTERS: [&str; 6] = [
-    "slv_rd_data_word_sent0",
-    "slv_rd_data_word_sent1",
-    "mst_posted_wr_data_word_sent0",
-    "mst_posted_wr_data_word_sent1",
-    "mst_nonposted_wr_data_word_sent0",
-    "mst_nonposted_wr_data_word_sent1",
-];
-
-/// Sum the readable counters in `names`, reporting how many actually parsed.
+/// Read each named counter, reporting how many actually parsed. A missing or
+/// unparsable file is `None`.
 ///
-/// `saturating_add` rather than `Iterator::sum`: these are firmware-owned u64
-/// registers, and a corrupted read summing past `u64::MAX` would panic in a
-/// debug build rather than render a wrong number.
-fn sum_counters(dir: &Path, names: &[&str]) -> (u64, usize) {
-    let mut total = 0u64;
-    let mut parsed = 0usize;
-    for name in names {
-        if let Some(v) = fs::read_to_string(dir.join(name))
+/// Parsed as `u32`: the driver prints these with `%u`, so a larger value is a
+/// corrupted read and counts as unreadable. Truncating it would make up a
+/// value.
+fn read_each(dir: &Path, names: &[&str; 6]) -> ([Option<u32>; 6], usize) {
+    let mut values = [None; 6];
+    for (slot, name) in values.iter_mut().zip(names) {
+        *slot = fs::read_to_string(dir.join(name))
             .ok()
-            .and_then(|s| s.trim().parse::<u64>().ok())
-        {
-            total = total.saturating_add(v);
-            parsed += 1;
-        }
+            .and_then(|s| s.trim().parse::<u32>().ok());
     }
-    (total, parsed)
+    let parsed = values.iter().flatten().count();
+    (values, parsed)
 }
 
-/// Read and fold the counter directory.
+/// Read the counter directory.
 ///
 /// `None` when the directory is absent (tt-kmd < 2.7, no attribute group) **or
 /// when not a single counter file in it could be read** — an unreadable set is
 /// "not measured", and reporting it as a snapshot made the UI render a confident
 /// `▼0 B/s ▲0 B/s` for a link nobody had actually sampled. Individual missing
-/// files still count as 0, so a partial set (a kernel that grew a counter, a
-/// permissions oddity on one file) reports the partial sum rather than nothing.
+/// files are `None` in the snapshot, so a partial set (a kernel that grew a
+/// counter, a permissions oddity on one file) still reports the counters it
+/// could read.
 pub fn read_counters(dir: &Path) -> Option<PcieCounterSnapshot> {
     if !dir.is_dir() {
         return None;
     }
-    let (words_in, in_parsed) = sum_counters(dir, &IN_COUNTERS);
-    let (words_out, out_parsed) = sum_counters(dir, &OUT_COUNTERS);
+    let (in_words, in_parsed) = read_each(dir, &IN_COUNTERS);
+    let (out_words, out_parsed) = read_each(dir, &OUT_COUNTERS);
     if in_parsed + out_parsed == 0 {
         log::debug!(
             "pcie_perf_counters at {} exists but no counter file was readable",
@@ -106,14 +150,44 @@ pub fn read_counters(dir: &Path) -> Option<PcieCounterSnapshot> {
         return None;
     }
     Some(PcieCounterSnapshot {
-        words_in,
-        words_out,
+        in_words,
+        out_words,
     })
 }
 
+/// Forward step of one 32-bit counter between two reads.
+///
+/// Wrapping subtraction turns a wrap into the right forward step. A step over
+/// half the range is a counter that went backwards (device reset), not 2 GWords
+/// of traffic in one sample, so it counts as 0.
+fn forward_delta(now: u32, prev: u32) -> u64 {
+    let d = now.wrapping_sub(prev);
+    if d > u32::MAX / 2 {
+        0
+    } else {
+        u64::from(d)
+    }
+}
+
+/// Sum of the counters' forward steps. A counter unreadable on either side
+/// adds nothing: with no value to step from (or to), its step is unknown.
+/// Since the tracker keeps the newer snapshot, a counter that comes back is
+/// primed by its first reading and counts again from the step after.
+fn total_delta(now: &[Option<u32>; 6], prev: &[Option<u32>; 6]) -> u64 {
+    now.iter()
+        .zip(prev)
+        .map(|(n, p)| match (n, p) {
+            (Some(n), Some(p)) => forward_delta(*n, *p),
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Turns successive snapshots into bytes/sec. The first sample primes the
-/// tracker and yields `None`; a counter that goes backwards (device reset)
-/// clamps its delta to 0 rather than underflowing.
+/// tracker and yields `None`. Each counter's step is wrap-aware and a counter
+/// that went backwards (device reset) contributes 0; see [`forward_delta`].
+/// A counter unreadable on either side of a step contributes 0; see
+/// [`total_delta`].
 #[derive(Debug, Default)]
 pub struct PcieRateTracker {
     prev: Option<(PcieCounterSnapshot, Instant)>,
@@ -130,8 +204,8 @@ impl PcieRateTracker {
             if dt <= 0.0 {
                 return None;
             }
-            let d_in = snap.words_in.saturating_sub(prev.words_in);
-            let d_out = snap.words_out.saturating_sub(prev.words_out);
+            let d_in = total_delta(&snap.in_words, &prev.in_words);
+            let d_out = total_delta(&snap.out_words, &prev.out_words);
             Some(PcieBandwidth {
                 rx_bytes_per_sec: (d_in * BYTES_PER_WORD) as f64 / dt,
                 tx_bytes_per_sec: (d_out * BYTES_PER_WORD) as f64 / dt,
@@ -269,12 +343,12 @@ mod tests {
         let td = tempfile::tempdir().unwrap();
         fake_counters(td.path(), 1000);
         let snap = read_counters(td.path()).unwrap();
-        // in  = slv posted+nonposted wr received + mst rd received
-        //     = (1400+7) + 1500 + 1300 = 4207
-        assert_eq!(snap.words_in, 4207);
-        // out = slv rd sent + mst posted+nonposted wr sent
-        //     = (1600+3) + 1200 + 1100 = 3903
-        assert_eq!(snap.words_out, 3903);
+        // in  = slv rd sent (1600+3) + mst posted/nonposted wr sent (1200 + 1100)
+        //     = 3903
+        assert_eq!(snap.words_in(), 3903);
+        // out = slv posted/nonposted wr received (1500 + 1400+7) + mst rd received 1300
+        //     = 4207
+        assert_eq!(snap.words_out(), 4207);
     }
 
     #[test]
@@ -310,61 +384,228 @@ mod tests {
         fs::write(td.path().join("slv_rd_data_word_sent1"), "34").unwrap();
 
         let snap = read_counters(td.path()).expect("one readable counter is enough");
-        assert_eq!(snap.words_in, 1200);
-        assert_eq!(snap.words_out, 34);
+        // mst rd received is data out of the chip; slv rd sent is data in.
+        assert_eq!(snap.words_out(), 1200);
+        assert_eq!(snap.words_in(), 34);
     }
 
-    #[test]
-    fn rate_tracker_computes_bytes_per_sec() {
+    /// All twelve tt-kmd files, zero unless `set` overrides them.
+    fn write_files(dir: &std::path::Path, set: &[(&str, u64)]) {
+        for base in [
+            "mst_nonposted_wr_data_word_sent",
+            "mst_posted_wr_data_word_sent",
+            "mst_rd_data_word_received",
+            "slv_nonposted_wr_data_word_received",
+            "slv_posted_wr_data_word_received",
+            "slv_rd_data_word_sent",
+        ] {
+            for ctrl in ["0", "1"] {
+                fs::write(dir.join(format!("{base}{ctrl}")), "0").unwrap();
+            }
+        }
+        for (f, v) in set {
+            fs::write(dir.join(f), v.to_string()).unwrap();
+        }
+    }
+
+    /// Bandwidth measured the way the sysfs backend does it: read the files,
+    /// feed both snapshots to the tracker, one second apart.
+    fn bandwidth_between(before: &[(&str, u64)], after: &[(&str, u64)]) -> PcieBandwidth {
+        let td = tempfile::tempdir().unwrap();
         let mut tracker = PcieRateTracker::new();
         let t0 = Instant::now();
-        // First sample only primes the tracker.
+        write_files(td.path(), before);
         assert!(tracker
-            .sample(
-                PcieCounterSnapshot {
-                    words_in: 1000,
-                    words_out: 500
-                },
-                t0
-            )
+            .sample(read_counters(td.path()).unwrap(), t0)
             .is_none());
-        // 2 s later: +2000 words in, +1000 words out → ×4 bytes / 2 s.
-        let bw = tracker
+        write_files(td.path(), after);
+        tracker
             .sample(
-                PcieCounterSnapshot {
-                    words_in: 3000,
-                    words_out: 1500,
-                },
-                t0 + Duration::from_secs(2),
+                read_counters(td.path()).unwrap(),
+                t0 + Duration::from_secs(1),
             )
-            .unwrap();
-        assert!((bw.rx_bytes_per_sec - 4000.0).abs() < 1e-6);
-        assert!((bw.tx_bytes_per_sec - 2000.0).abs() < 1e-6);
+            .unwrap()
     }
 
+    /// Calibrated on real hardware (2026-10-29, Blackhole p300c, tt-kmd 2.9):
+    /// a 268,378,112-byte host→device copy through ttnn moved
+    /// `slv_rd_data_word_sent0` by 4,193,421. That is 1/64 word per byte, so a
+    /// counter word is one 64-byte NoC flit, not a 4-byte PCIe word.
     #[test]
-    fn rate_tracker_counter_reset_yields_zero_not_negative() {
+    fn counter_word_is_one_64_byte_flit() {
+        let bw = bandwidth_between(
+            &[("slv_rd_data_word_sent0", 1_000)],
+            &[("slv_rd_data_word_sent0", 1_000 + 4_193_421)],
+        );
+        let payload = 268_378_112.0;
+        assert!(
+            (bw.rx_bytes_per_sec - payload).abs() / payload < 0.001,
+            "4,193,421 words must read as ~268 MB, got {} B",
+            bw.rx_bytes_per_sec
+        );
+    }
+
+    /// Same calibration run: the chip pulling host memory raises
+    /// `slv_rd_data_word_sent`, and that is data going INTO the chip. The
+    /// `slv_*` names are NoC-side: "slave" means a NoC request targeted the
+    /// PCIe tile.
+    #[test]
+    fn host_data_pulled_by_the_chip_is_into_the_chip() {
+        let bw = bandwidth_between(&[], &[("slv_rd_data_word_sent0", 1_000)]);
+        assert_eq!(bw.rx_bytes_per_sec, 64_000.0);
+        assert_eq!(bw.tx_bytes_per_sec, 0.0);
+    }
+
+    /// Calibration, device→host: a 256 MiB read-back moved
+    /// `slv_nonposted_wr_data_word_received0`. Chip writes to host memory are
+    /// data going OUT of the chip.
+    #[test]
+    fn chip_writes_to_host_memory_are_out_of_the_chip() {
+        for file in [
+            "slv_nonposted_wr_data_word_received0",
+            "slv_posted_wr_data_word_received1",
+        ] {
+            let bw = bandwidth_between(&[], &[(file, 1_000)]);
+            assert_eq!(bw.tx_bytes_per_sec, 64_000.0, "{file}");
+            assert_eq!(bw.rx_bytes_per_sec, 0.0, "{file}");
+        }
+    }
+
+    /// NOT measured: ttnn never took the host-initiated (BAR/MMIO) path, so the
+    /// `mst_*` counters stayed near zero in the calibration. Their direction
+    /// follows from the NoC-side naming (the PCIe tile is the NoC master for
+    /// host-initiated accesses): host writes → `mst_*_wr_sent` → into the chip,
+    /// host reads → `mst_rd_received` → out of the chip. If a later calibration
+    /// through an MMIO path disagrees, this test is the one to change.
+    #[test]
+    fn host_initiated_access_direction_is_inferred_from_noc_side_naming() {
+        let w = bandwidth_between(&[], &[("mst_posted_wr_data_word_sent0", 1_000)]);
+        assert_eq!(w.rx_bytes_per_sec, 64_000.0);
+        let w = bandwidth_between(&[], &[("mst_nonposted_wr_data_word_sent0", 1_000)]);
+        assert_eq!(w.rx_bytes_per_sec, 64_000.0);
+        let r = bandwidth_between(&[], &[("mst_rd_data_word_received0", 1_000)]);
+        assert_eq!(r.tx_bytes_per_sec, 64_000.0);
+    }
+
+    /// The counters are 32-bit and wrap (about 275 GB of traffic at 64 B/word).
+    /// A wrap between two samples is a forward step of the remaining words.
+    ///
+    /// Regression: files were parsed as u64 and summed, so one counter wrapping
+    /// made the sum fall and the tracker clamped that sample to zero.
+    #[test]
+    fn a_counter_wrapping_between_samples_is_a_forward_step() {
+        let bw = bandwidth_between(
+            &[("slv_rd_data_word_sent0", 0xFFFF_FFF0)],
+            &[("slv_rd_data_word_sent0", 0x10)],
+        );
+        // 0x10 words to reach the wrap + 0x10 after it = 32 words.
+        assert_eq!(bw.rx_bytes_per_sec, 32.0 * 64.0);
+    }
+
+    /// The wrap must be handled per counter. Summing first hides it: here one
+    /// counter wraps while another grows, and the sum goes down.
+    #[test]
+    fn wrap_is_per_counter_not_per_sum() {
+        let bw = bandwidth_between(
+            &[
+                ("slv_rd_data_word_sent0", 0xFFFF_FF00),
+                ("mst_posted_wr_data_word_sent0", 100),
+            ],
+            &[
+                ("slv_rd_data_word_sent0", 0x100),
+                ("mst_posted_wr_data_word_sent0", 150),
+            ],
+        );
+        // 0x200 words on the wrapping counter + 50 on the other.
+        assert_eq!(bw.rx_bytes_per_sec, (0x200 + 50) as f64 * 64.0);
+    }
+
+    /// A reset goes backwards by a small amount, which is also what a wrap of
+    /// almost the full range looks like. The two are told apart by size: a
+    /// real forward step in one sample is never more than half the counter
+    /// range (2^31 words is 137 GB), so a bigger apparent step is a reset.
+    #[test]
+    fn a_reset_is_not_mistaken_for_a_wrap() {
+        let bw = bandwidth_between(
+            &[("slv_rd_data_word_sent0", 5_000)],
+            &[("slv_rd_data_word_sent0", 10)],
+        );
+        assert_eq!(bw.rx_bytes_per_sec, 0.0);
+        assert_eq!(bw.tx_bytes_per_sec, 0.0);
+    }
+
+    /// A counter file that cannot be read for a sample, then comes back.
+    ///
+    /// Regression: a missing file read as 0, so the step out of the gap was
+    /// the counter's whole value. Below 2^31 words that passes the reset
+    /// check, so a counter at a billion words came back as a 64 GB step in
+    /// one second, spiking every PCIe display, the Die 3D clouds and its
+    /// burst trigger.
+    #[test]
+    fn a_counter_file_that_drops_out_and_returns_adds_no_spike() {
+        let td = tempfile::tempdir().unwrap();
         let mut tracker = PcieRateTracker::new();
         let t0 = Instant::now();
-        tracker.sample(
-            PcieCounterSnapshot {
-                words_in: 5000,
-                words_out: 5000,
-            },
-            t0,
-        );
-        // Counters went backwards (device reset) → clamp to 0, don't underflow.
+        let at = |k: u64| t0 + Duration::from_secs(k);
+        // slv_rd_data_word_sent0 sits at a billion words; sent1 moves 10
+        // words a second throughout and must be reported every time.
+        let rates: Vec<Option<PcieBandwidth>> = [
+            Some(1_000_000_000u64),
+            None,
+            Some(1_000_000_000 + 1_000),
+            Some(1_000_000_000 + 3_000),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(k, sent0)| {
+            let mut set = vec![("slv_rd_data_word_sent1", 10 * k as u64)];
+            if let Some(v) = sent0 {
+                set.push(("slv_rd_data_word_sent0", v));
+            }
+            write_files(td.path(), &set);
+            if sent0.is_none() {
+                fs::remove_file(td.path().join("slv_rd_data_word_sent0")).unwrap();
+            }
+            tracker.sample(read_counters(td.path()).unwrap(), at(k as u64))
+        })
+        .collect();
+        assert!(rates[0].is_none(), "the first sample primes");
+        // The gap and the sample after it: only sent1's 10 words a second.
+        for k in [1, 2] {
+            assert_eq!(rates[k].unwrap().rx_bytes_per_sec, 640.0, "sample {k}");
+        }
+        // Re-primed: sent0's 2000 words count again, with sent1's 10.
+        assert_eq!(rates[3].unwrap().rx_bytes_per_sec, 2_010.0 * 64.0);
+    }
+
+    /// A set of which only some counters can be read reports those, and a
+    /// counter that becomes readable later starts from its first reading,
+    /// not from 0.
+    #[test]
+    fn a_partial_set_still_reports_the_readable_counters() {
+        let td = tempfile::tempdir().unwrap();
+        let mut tracker = PcieRateTracker::new();
+        let t0 = Instant::now();
+        fs::write(td.path().join("slv_rd_data_word_sent0"), "5000").unwrap();
+        let first = read_counters(td.path()).unwrap();
+        assert_eq!(first.words_in(), 5000);
+        assert!(tracker.sample(first, t0).is_none());
+        // One second on: sent0 moved 100 words, and an out counter that was
+        // missing now reads 1,500,000,000.
+        fs::write(td.path().join("slv_rd_data_word_sent0"), "5100").unwrap();
+        fs::write(
+            td.path().join("slv_posted_wr_data_word_received0"),
+            "1500000000",
+        )
+        .unwrap();
         let bw = tracker
             .sample(
-                PcieCounterSnapshot {
-                    words_in: 10,
-                    words_out: 10,
-                },
+                read_counters(td.path()).unwrap(),
                 t0 + Duration::from_secs(1),
             )
             .unwrap();
-        assert_eq!(bw.rx_bytes_per_sec, 0.0);
-        assert_eq!(bw.tx_bytes_per_sec, 0.0);
+        assert_eq!(bw.rx_bytes_per_sec, 6_400.0);
+        assert_eq!(bw.tx_bytes_per_sec, 0.0, "a new counter is primed: no step");
     }
 
     #[test]

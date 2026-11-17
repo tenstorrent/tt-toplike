@@ -184,6 +184,26 @@ pub fn may_read(pid: i32) -> bool {
     owned_by_us(pid) && !denied_recently(pid)
 }
 
+/// [`may_read`] for a `/proc` mounted at `root`. With `root` = `/proc` it is
+/// exactly [`may_read`]; any other root (a test's fake `/proc`) is checked
+/// by the owner of `root/<pid>`.
+#[cfg(target_os = "linux")]
+pub fn may_read_in(root: &std::path::Path, pid: i32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    if root == std::path::Path::new("/proc") {
+        return may_read(pid);
+    }
+    let Some(me) = our_uid() else {
+        return false;
+    };
+    let owned = me == 0
+        || std::fs::metadata(root.join(pid.to_string()))
+            .map(|m| m.uid() == me)
+            .unwrap_or(false);
+    owned && !denied_recently(pid)
+}
+
 /// Whether a denial is currently remembered for `pid`. Exists so tests can
 /// observe the wiring: a guarded caller never attempts a foreign pid, so never
 /// records a denial for it.

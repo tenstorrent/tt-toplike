@@ -11,7 +11,7 @@ Every visualization works identically:
 | **Starfield** | Tensix cores as stars; power drives brightness; temperature drives color | CPU logical cores as stars; same mapping |
 | **Memory Castle** | DDR→L2→L1→Tensix particle hierarchy | Particle density from RAM usage; temperature drives color |
 | **Memory Flow** | DRAM channel particles + DDR channel bars | Per-socket RAM fill in channel bars; temperature drives color sweep |
-| **Arcade** | `@` hero driven by current/power; chip topology header | `@` hero driven by CPU load/power; single "socket" topology |
+| **Arcade** | The views above as panels; chip topology header | The same panels from host readings; single "socket" topology |
 | **Defrag** | GDDR block map, DMA fill, EVICT animation | RAM usage fill; blocks proportional to used/total |
 
 ## How fields are mapped

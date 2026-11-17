@@ -432,6 +432,12 @@ impl Atmosphere {
         self.built
     }
 
+    /// The frame counter: one per `observe`. The shared backdrop keys its
+    /// cached canvas on it.
+    pub fn frame(&self) -> u64 {
+        self.frame
+    }
+
     /// True when a service is featured, so the backdrop should be drawn.
     pub fn active(&self) -> bool {
         self.scene != Scene::None

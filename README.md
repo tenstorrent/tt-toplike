@@ -14,7 +14,7 @@ The Insights screen works on any machine — it shows each processor (CPU/GPU/AN
 
 ## How visualizations are grounded in hardware activity
 
-The visualizations aren't decorative. Every particle, star, color shift, and brightness change maps to a real signal coming off the hardware. Here's what you're actually looking at.
+Nearly every particle, star, colour shift and brightness change maps to a real signal off the hardware. The few that do not are named as decoration in the legend (`l`) of the views that have any, and an estimate carries a `~`. Here's what you're actually looking at.
 
 ### The signals
 
@@ -24,16 +24,24 @@ tt-toplike reads a small set of telemetry values from the chip — through the t
 - **Temperature (°C)** — die temperature from the ASIC thermal sensor
 - **Current (A)** — current draw; a fast-moving proxy for compute intensity
 - **Clock frequencies** — AICLK, AXICLK and ARCCLK, straight from the driver
-- **Firmware limits** — the board's real TDP / TDC / thermal ceilings (a p300c reports 125 W, 500 A, 90 °C), so "how hot is hot" is calibrated to *your* card instead of a generic reference number
+- **Firmware limits** — the board's own TDP / TDC / thermal limits (a p300c reports 125 W, 500 A, 90 °C), so "how hot is hot" is calibrated to *your* card
 - **DDR training status** — per-channel bitmask from SMBUS: whether each DDR channel is idle, training, trained, or faulted
-- **GDDR ECC counters** — correctable and uncorrectable memory errors; the uncorrectable count is the one that means data corruption, so it's called out in red when it moves
-- **Thermal-trip count** — how many times the card has hit hardware thermal shutdown in its lifetime. Non-zero is a story
+- **GDDR ECC counters** — correctable and uncorrectable memory errors. The row shows amber for corrected errors and red once any is uncorrectable, which means corrupted data
+- **Thermal-trip count** — how many times the card has hit hardware thermal shutdown in its lifetime. Any count above zero deserves a look
 - **PCIe link traffic** — the driver keeps data-word counters for both directions of the PCIe link; differentiating them between ~1 Hz samples gives live bytes/sec into and out of the chip, next to the link's generation and width
-- **ARC heartbeat** — the RISC-V management firmware pulses this counter to signal it's alive. A frozen heartbeat is how the tool tells "busy" from "wedged"
+- **ARC heartbeat** — the RISC-V management firmware pulses this counter to signal it's alive. A frozen heartbeat is how the tool tells "busy" from "wedged". A heartbeat of 0 shows as a red `ARC!` after the chip's readings in the status bar.
 
 Most of that arrives without shelling out to anything. The safe default backend reads the driver's sysfs attributes directly, so clocks, the ARC heartbeat, the board SKU, firmware version and PCIe counters all come for free — `tt-smi` is only needed for the deeper SMBUS block (DDR training detail, per-component firmware versions, GDDR sensors). Older drivers simply expose fewer attributes, and the corresponding readouts drop out rather than breaking anything; see [`docs/SYSFS_BACKEND.md`](docs/SYSFS_BACKEND.md) for exactly which fields come from where.
 
 There's also an **adaptive baseline**: for the first ~20 samples the tool learns your chip's idle state. After that, everything is shown as *relative change* from baseline rather than absolute values. A chip drawing 20W shows the same visual intensity as a chip drawing 80W at the same fraction above its idle state. This makes the tool work equally well across hardware generations.
+
+### Background
+
+Every screen has a solid black background. That includes the Wafer Waffler view and its inset on the
+Insights screen. In a terminal without truecolor (tmux, macOS Terminal.app over SSH) black is the
+terminal's own default background, which those terminals need. Set `TT_TOPLIKE_TRANSPARENT=1` to
+draw on your terminal's own background in a truecolor terminal too; `/bg` in the Wafer Waffler view
+flips it for that view. The status bar has its own dark navy background either way.
 
 ### How colors are chosen
 
@@ -63,7 +71,7 @@ Temperature lags power by several seconds (thermal mass of the package), so the 
 
 Video diffusion is a different animal. Each denoising step is a full forward pass of a large model — not a quick autoregressive decode but a sustained, high-memory-bandwidth computation that runs for hundreds of milliseconds. Steps happen sequentially through the diffusion schedule.
 
-The result is **sustained high power with structured plateaus**: you'll see the visualization stay dense and bright for the full duration of a step, then briefly relax between steps as the scheduler loads the next noise level. The Memory Castle particles stop thinning out between bursts — the dungeon stays full. In Arcade mode, the `@` hero sits high and right (high power, high current) and barely moves, which is its own kind of signal. In the Defrag panel (standalone or embedded in Arcade), the block fill stays dense and near-full for the whole diffusion step — the palette shifts steadily warmer as GDDR temperature climbs over minutes of sustained compute, and scatter bursts fire on each step's power ramp-up, making the denoising schedule visible as a sequence of flashes.
+The result is **sustained high power with structured plateaus**: you'll see the visualization stay dense and bright for the full duration of a step, then briefly relax between steps as the scheduler loads the next noise level. The Memory Castle particles stop thinning out between bursts — the dungeon stays full. In the Defrag panel (standalone or embedded in Arcade), the block fill stays dense and near-full for the whole diffusion step — the palette shifts steadily warmer as GDDR temperature climbs over minutes of sustained compute, and scatter bursts fire on each step's power ramp-up, making the denoising schedule visible as a sequence of flashes.
 
 Temperature climbs higher and holds there. The color of everything — stars, particles, backgrounds — shifts warmer because `temp_to_hue()` biases toward red as the die heats up.
 
@@ -76,7 +84,7 @@ A "quiet" Blackhole is never actually quiet. Several things generate continuous 
 - **SRAM retention** — L1 and L2 SRAM need continuous power to hold state. The tensix grid never fully powers down.
 - **PLL lock** — the clock network (AICLK, AXICLK, ARCCLK) runs continuously.
 
-The adaptive baseline captures all of this and treats it as zero-point. What you see in the visualization at idle is the true floor: particles spawning slowly and evenly, stars dim but present, the `@` hero drifting in the lower-left of the Arcade canvas, and the Defrag block map sitting full but cool — no scatter bursts, palette at its coolest hue (no thermal shift), brightness at segment floor. That floor has meaning — it's the hardware telling you it's alive and maintained.
+The adaptive baseline captures all of this and treats it as zero-point. What you see in the visualization at idle is the true floor: particles spawning slowly and evenly, stars dim but present, and the Defrag block map sitting full but cool — no scatter bursts, palette at its coolest hue (no thermal shift), brightness at segment floor. That floor has meaning — it's the hardware telling you it's alive and maintained.
 
 ### Running `tt-smi -r` while watching
 
@@ -105,7 +113,7 @@ Every running `tt-smi -r` is tracked. While more than one runs, the status segme
 
 While a training run, a model load or a model serving is active, the top rows of Arcade's starfield become a lane: the model name, the port and chips it holds, what it is doing, and the key that opens its full view (`[i]` for inference, `[t]` for training). The stars take a tint for the kind of work and flare once per finished request. With nothing running, Arcade looks as it always did.
 
-<img src="assets/tt-toplike-arcade-lanes.gif" alt="Arcade mode on a 4-chip Blackhole box with a lane under the starfield title reading SERVE MiniMax-Music3, port 20000, chips 0,1, 1 in flight, 9 done, and [i] to open the Inference view" width="100%" />
+<img src="assets/tt-toplike-arcade-lanes.gif" alt="Arcade mode on four simulated boards with two lanes under the starfield title: TRAIN nano_gpt at step 96 of 24,000 and SERVE Llama-3.3-70B on port 8000, chips 0,1, 3 running, with [t] and [i] to open the Training and Inference views" width="100%" />
 
 ---
 
@@ -227,6 +235,75 @@ Default bind `0.0.0.0:8770`; plaintext and unauthed, same trusted-LAN posture as
 contract and the `tt-station-agentd` coordination notes.
 
 ---
+
+## Signal bus: record, replay and share what tt-toplike sees
+
+Every source (chip telemetry, inference servers, training, hivemind, processes, gozer
+leases) writes to one ordered stream, the signal bus. Every view reads it, other programs can
+read it over a Unix socket, and it is recorded to disk so a run can be inspected and
+replayed later. Every sample says whether it is `measured`, `derived`, `estimated` or
+`decoration`. Full details: [docs/bus.md](docs/bus.md).
+
+```
+tt-toplike-tui --headless                        # no screen: record to ~/.local/state/tt-toplike/bus and serve the socket
+tt-toplike-tui --record /var/tmp/run1            # normal TUI that also records the bus to a directory
+tt-toplike-tui --bus-inspect /var/tmp/run1       # summary of a recording; add --entity KEY / --signal NAME
+tt-toplike-tui --bus-inspect /var/tmp/run1 --saga-digest   # the Saga digest of a recording (docs/saga.md)
+tt-toplike-tui --headless --replay /var/tmp/run1 --speed 4 --bus-socket /tmp/tt-toplike-$UID/replay.sock
+tt-toplike-tui --bus-attach /tmp/tt-toplike-$UID/replay.sock    # a TUI that reads that host's bus
+```
+
+* A TUI without `--record` keeps its bus in memory. A `--headless` host keeps 24 hours or
+  5 GB of log (`--bus-retain HOURS[,GB]`) in a directory only you can read (mode 0700).
+* A TUI looks for a `--headless` host at start-up and attaches to it when the host is on the
+  same machine, live, and has the same chips. `--no-bus-attach` turns the probe off.
+* `--headless` is meant for systemd (`Restart=on-failure`, no root). `docs/bus.md` has an
+  example unit file.
+* Command lines in the log have common secret shapes (tokens, keys, passwords) replaced with
+  `<redacted>`. The matcher has known gaps, listed in `docs/bus.md`.
+* Limits of this release: no hardware run yet, the Wafer Waffler tile glow is still an estimate, the
+  per-tile counter sidecar is not included (a live reader on a chip blocks gozer reset and
+  release), and the order of DRAM rows within a side is not documented. An attached TUI's `i`
+  view still has gaps: models show dashes for the TTFT breakdowns and prefix hit rate, and the rotation keeps dwelling on a lost host's last
+  rows. The list is in `docs/bus.md` section 13.
+
+## Saga: a quest drawn from the machine's signals (`S`)
+
+Press `S` in any view, or start with `tt-toplike --mode saga`. A party of heroes quests through
+a dungeon built from this box's own signals: each chip is a floor with its own hero, a Blackhole
+floor follows the chip's tile grid, and the seed comes from the readings themselves. With more
+than one chip, the view shows every floor at once as a grid of tiles, each following its hero;
+`[` and `]` move the focus from floor to floor, and `z` shows the focused floor alone. Boxes with
+more than 32 chips get floors for the first 32. A hero can step through an Ethernet portal
+into the floor of the chip at the other end of the link: the portal takes the far floor's colour,
+both tiles show the crossing, and the chronicle tells it. The far end of a link comes from the
+bus event `LinkPeer`, which only `--mock` and recorded logs carry today, so on real hardware the
+portals stay scenery until a real source exists. A model becoming ready, a reset, a model going away, a training
+run or a quiet season ends a world, and the next one has a new maze. One chronicle tells what
+happens on every floor, each line tagged with its floor, and `y` says in a sentence what set each
+line off. One chip looks as it did before the party.
+
+<img src="assets/tt-toplike-saga.gif" alt="Saga on four simulated chips: four floors drawn side by side, each with its own hero walking a dungeon, heroes crossing between floors through Ethernet portals, and one chronicle on the right telling what happens on every floor" width="100%" />
+
+<img src="assets/tt-toplike-saga.png" alt="A still from Saga: floors F1 to F4 with a hero each, and the chronicle listing a world taking shape, heroes mapping rooms and two heroes setting out to cross floors through a portal" width="100%" />
+
+The same recorded log always tells the same saga. `tt-toplike-tui --bus-inspect DIR
+--saga-digest` prints a digest you can compare between a recording and a replay of it. This is
+phase 1: monsters, treasure and fights come later. Full details, the `[saga]` config and the
+limits: [docs/saga.md](docs/saga.md).
+
+---
+
+## Add your own view (viz plugins)
+
+You can add a full-screen view without touching the rest of the program. Write one YAML file
+(gauges, tables, sparklines and more, reloaded when you save it) with `tt-toplike viz new <name>
+--yaml`, or a Rust folder with `tt-toplike viz new <name>`. `tt-toplike viz list` shows every view,
+and `tt-toplike --viz <id>` starts on one. Three examples ship, hidden until you ask for them: `example-pulse` and `game-of-life` (Conway's Game of Life, one band per chip, fed by the chip's power) are in the binary, and `thermal-board` is found when tt-toplike runs inside a checkout. The
+reference, written so that a coding agent can follow it, is
+[docs/viz-plugins.md](docs/viz-plugins.md).
+
+<img src="assets/tt-toplike-viz-plugins.gif" alt="Three plugin views on simulated telemetry: thermal-board (one YAML file), example-pulse (a Rust folder) and game-of-life, where each chip feeds a band of Conway's Game of Life and a rise in power sends a glider" width="100%" />
 
 ## Installation
 
@@ -370,6 +447,8 @@ tt-toplike --mode castle      # Memory Castle — roguelike dungeon particles
 tt-toplike --mode starfield   # Starfield — Tensix cores as stars
 tt-toplike --mode flow        # Memory Flow — NoC DDR channel streams
 tt-toplike --mode hivemind    # HivemindSweeper — read-only activity sniffer (or press ~)
+tt-toplike --mode waffler     # Wafer Waffler — isometric Blackhole boards (or press 3)
+tt-toplike --mode saga        # Saga — a party of heroes, one per chip, questing through the machine's signals (or press S)
 tt-toplike                    # then press d  — Defrag (no --mode flag; use keypress)
 
 # Filter to specific devices
@@ -384,18 +463,41 @@ tt-toplike --devices 0,2
 | `r` | Force refresh |
 | `v` | Cycle visualization mode: Insights → Flow → Starfield → Castle → Arcade → Defrag → Inference → Insights |
 | `a` | Jump directly to Arcade |
+| `{` `}` | In Arcade: the previous and next layout (eight built-in ones, plus any in the config). Also `/arcade layout next\|prev\|<name>\|list` and `--arcade-layout NAME`. See [docs/arcade-layout.md](docs/arcade-layout.md). |
+| `w` | In the Inference, Training and Wafer Waffler views: cycle the view's backdrop, off, scene, sky, clouds. A backdrop fills only the cells the view leaves blank. Also `/backdrop off\|scene\|sky\|clouds`, and `/backdrop` alone shows the setting. Other views carry no backdrop and say so. See [docs/backdrop.md](docs/backdrop.md). |
 | `d` | Jump directly to Defrag |
 | `g` | Jump directly to Grid (Insights table) |
 | `i` | Open the Inference Server Monitor from **any** view; `i` while in it jumps to Insights (a quick back-and-forth), `Esc` backs out to where you came from. Also sits at the tail of the `v` cycle. |
 | `t` | Open the Training view from **any** view — auto-attaches to a running tt-train process with no further input; `Esc` backs out to where you came from. Deliberately excluded from the `v` cycle, like `i`. Scriptable as `--mode training`. |
-| `R` | Toggle the unattended rotation — cycles **every** view, including the key-only ones (`i`, `~`, `t`) that `v` skips. 30s each, 45s on arcade, and 10s on training / the inference monitor when there's no run or server to show. Also `--rotate` at launch. |
+| `3` | Open the Wafer Waffler from **any** view: an isometric picture of each Blackhole board. `3` or `Esc` leaves. Also the last stop of the `v` cycle. Also `--mode waffler`, `/mode waffler` or `/waffler` (`die3d` works in each). Inside it: `[` `]` previous/next board and Space cuts the camera. Every other setting is a slash command: `/board`, `/scene`, `/cut`, `/autocut`, `/transition`, `/cells` (with `/blocks` and `/braille` as shortcuts), `/bg`, `/labels`, `/clouds`, `/history`. `/theme` sets the colours. `/help` lists them. |
+| `S` | Open Saga from **any** view: a party of heroes, one per chip's floor, questing through a dungeon built from the machine's signals, with one chronicle. `S` or `Esc` leaves. `y` says what set each chronicle line off. With more than one chip, `[` `]` move the focus from floor to floor and `z` shows the focused floor alone. Not in the `v` cycle or the rotation. Also `--mode saga`, `/mode saga` or `/saga`. See [docs/saga.md](docs/saga.md). |
+| `R` | Toggle the unattended rotation. It cycles every view except Grid (the same chip portraits as Insights in another layout), including the key-only ones (`i`, `~`, `t`, `3`) that `v` skips. 30s each, 45s on arcade. Training and the inference monitor are visited only while a training run exists or a model server is starting or running. The Wafer Waffler is visited only on a box with a Blackhole chip. Also `--rotate` at launch. |
 | `b` | Cycle backend (live switching): Hybrid → Sysfs → JSON → Mock → Host → Hybrid. Luwen and Remote are launch-only — the cycle never steps onto them. |
 | `/` | Command bar — type `/mode defrag`, `/fps 30`, `/theme grayskull`, `/quit`, etc. |
 | `l` | Toggle legend overlay (what each signal means in the current mode) |
 | `?` | Toggle help overlay (full key reference) |
 | `!` | Toggle explain overlay (how visualizations map to hardware signals) |
 
-Command bar verbs (type `/` then the verb): `/fps <1–120>`, `/datafps <1–30>`, `/mode <insights\|grid\|starfield\|castle\|flow\|arcade\|defrag>`, `/theme <grayskull\|default>` (bare `/theme` toggles), `/legend` (`l`), `/explain`, `/throttle`, `/idle-on-blur`, `/help` (`?`), `/quit` (`q`).
+Arcade's rows and panels (starfield, castle, flow, defrag, Wafer Waffler, training, inference, saga, each double or triple wide if you like) are set in the `[arcade]` section of `~/.config/tt-toplike/config.toml`, the only config file tt-toplike reads. The arcade also has eight built-in layouts (`classic`, `now-serving`, `defrag-wide`, `waffler`, `workload`, `deck`, `skyline`, `memory-lane`); `now-serving` puts the inference server over the Wafer Waffler and Saga. `}` and `{` step through them and your own `[[arcade.layouts]]`. See [docs/arcade-layout.md](docs/arcade-layout.md). `tt-toplike --check-config` lists every problem in that file with its line, and every layout.
+
+<img src="assets/tt-toplike-arcade-layouts.gif" alt="The arcade stepping through five built-in layouts with the } key, from the classic rows to now-serving, which puts the inference server over the Wafer Waffler and Saga" width="100%" />
+
+Start on a layout from the command line with `tt-toplike --mode arcade --arcade-layout NAME`.
+
+The Inference view, the Training view and the Wafer Waffler each carry a backdrop behind what they show: the scene (forge, storm, aurora), the sky, and the clouds, each following real signals. Each draws its own by default and can be switched to another of the three or off, in the `[backdrop]` section of the same file or with `w` and `/backdrop` at run time. Other views, the arcade among them, carry no backdrop. See [docs/backdrop.md](docs/backdrop.md).
+
+Saga, the quest view, tells a story from the signal bus: a world per stretch of activity, a dungeon floor per chip, a hero on each floor whose health follows its chip. The TUI runs its story on a small background thread from start-up, whether or not the view is on screen, so the story has no gaps. The `[saga]` section of the same file sets it:
+
+```toml
+[saga]
+enabled = true          # false starts no saga thread at all
+names = "real"          # or "generated": lexicon names in place of model and process names
+season_minutes = 20     # quiet minutes that end a world, 1 to 1440
+```
+
+The minutes become backend ticks at the TUI's update interval (`--interval`, 100 ms by default). A TUI attached to a `--headless` host counts 10 ticks a second, because the host's snapshot does not say its interval. `--check-config` prints the saga's settings and reports each bad value with its line; a bad value keeps that key's default.
+
+Command bar verbs (type `/` then the verb): `/fps <1–120>`, `/datafps <1–30>`, `/mode <insights\|grid\|starfield\|castle\|flow\|arcade\|defrag>`, `/theme <grayskull\|default>` (bare `/theme` toggles), `/legend` (`l`), `/explain`, `/throttle`, `/idle-on-blur`, `/backdrop [off\|scene\|sky\|clouds]` (`w`, in the Inference, Training and Waffler views), `/arcade layout next\|prev\|<name>\|list` (`{` `}` in Arcade), `/help` (`?`), `/quit` (`q`).
 
 **Insights mode only:**
 
@@ -414,7 +516,7 @@ Command bar verbs (type `/` then the verb): `/fps <1–120>`, `/datafps <1–30>
 - **Memory Castle** — roguelike dungeon with 600 particles per chip representing the DDR→L2→L1→Tensix memory hierarchy. Four particle types (Read/Write/CacheHit/CacheMiss) with trails; density and speed driven by live power. Colors rotate through the spectrum each inference burst.
 - **Memory Flow** — NoC particle streams flowing left-to-right across GDDR channel bars. One row per DDR channel (up to 12 on Blackhole); bar fill = trained/active state; particle speed and density = bandwidth.
 - **Defrag** — Norton SpeedDisk-style block map: one row per GDDR channel, blocks fill left→right as weights DMA in. During inference, blocks glow reactively — brightness rises with inference power, saturation increases with GDDR temperature, and the palette shifts warmer under sustained thermal load (per-channel hue drifts up to +40° with channel temp; global palette shifts up to +25° warmer as the chip heats). Scatter bursts flash 5–12 random cells per channel on power spikes, giving each inference token a visible beat. `EVICT` animation plays when power returns to idle baseline (model unloaded) — blocks dissolve right→left at prime-staggered rates per channel, then DMA rebuild restarts from scratch.
-- **Arcade** — unified split-screen combining Starfield (top 40%), Memory Castle + Defrag block map side-by-side (middle 30%), and Memory Flow (bottom 30%); a `@` hero character roams the canvas driven by real telemetry: X = current draw, Y = power consumption, color = ASIC temperature; hero speed and trail length reflect aiclk and live ETH link count. When a model is **serving locally**, a hero `⚔` snake duel lights up: a telemetry-true tug-of-war strip where the `⚔` marker slides toward whichever side dominates (chip power/util vs the snake's tokens/s + queue depth), the hero lunges on real power spikes and the snake lunges on completed requests. Per-device power/temp appears exactly once as one shared strip, and every section wears BBS/demoscene ANSI chrome (`╔══[ SECTION ]══▓▒░`, left-side bars only). The duel is suppressed under `--remote` (local serving vs remote silicon would be incoherent).
+- **Arcade** — unified split-screen combining Starfield (top 40%), Memory Castle + Defrag block map side-by-side (middle 30%), and Memory Flow (bottom 30%). When a model is **serving locally**, a hero `⚔` snake duel lights up on the top row: a telemetry-true tug-of-war strip where the `⚔` marker slides toward whichever side dominates (chip power/util vs the snake's tokens/s + queue depth), the hero lunges on real power spikes and the snake lunges on completed requests. Per-device power/temp appears exactly once as one shared strip, and every section wears BBS/demoscene ANSI chrome (`╔══[ SECTION ]══▓▒░`, left-side bars only). The duel is suppressed under `--remote` (local serving vs remote silicon would be incoherent).
 - **tt-toplike-app** — native desktop window hosting the full TUI in a PTY (GPU-accelerated via eframe; Wayland/X11).
 
 ### Inference Server Monitor (`[i]`)
@@ -472,6 +574,26 @@ Press `t` for the **Training view** — no flags, no config, no target to name. 
 The top-left band shows how each step went and what the hardware did about it. A starfield draws one braille star per step, two steps per column, higher for a slower step, with a purple `◆` where the program cache grew, an amber `✺` at a checkpoint and a dotted line at the median; the newest three stars swell once per measured step. Below it, rows on the same time axis show the power of each of up to three chips, the busiest chip's aiclk, PCIe throughput and the trainer's host CPU, each ending in its current value. A one-line diagnosis and a strip of loss slope, noise and schedule position close the band. A trainer that reports progress only through a tqdm bar gets its step times by watching the bar advance one step between polls, and the band's title is then `STEP ANATOMY (from bar)`. Beneath it, a loss "mountain range" descends as the model converges, colored magenta (high loss) through teal (low loss), with each column keeping its own loss's hue so the range doubles as a run-history timeline. The mountains sit under a twinkling aurora-and-starfield nightscape that opens up on the right as the loss drops — the negative space is itself a progress signal — and a comet streaks across the sky on every checkpoint save.
 
 **Honest about what it can't see.** tt-train only prints step number, loss, step time, and cache-entry count to stdout — no gradient norms, no MFU, no throughput counter live (those exist only in a run-end JSON summary). The view derives tokens/sec and ETA from what it can actually read, and shows nothing it can't source. If the trainer's stdout wasn't redirected to a file at launch (i.e. it's a pipe or a tty), the per-step stream is genuinely unreadable after the fact — that's an OS property, not a gap — and the view says so plainly instead of drawing a fake curve; relaunching with `> train.log` fixes it. Checkpoint saves are detected by mtime on the run's rolling checkpoint file, not by parsing a save-confirmation line (tt-train doesn't print one).
+
+### Wafer Waffler — the board and its dies (`3`)
+
+Press `3` for the **Wafer Waffler**. Each die is a slice of silicon wafer, its tiles make a waffle grid, and the camera waffles between them. It draws each Blackhole board in isometric perspective, one block per die with the Tensix, GDDR, Ethernet and management tiles in place, in cells of one of three styles: braille dots (2 x 4 per cell, the finest), quarter blocks (the same picture, chunkier) or half blocks. `/cells` sets one. The default, `auto`, starts in a style picked from what the hardware reports when the view opens, and changes style when something happens on the hardware, at a camera cut, and never within two minutes of the last change. In a view under 100 x 30 it leaves half blocks out. `/blocks` (or `/cells blocks`) changes between the two block styles only. `/braille`, `/cells quarter` and `/cells half` hold one. The colours follow `/theme`: grayskull is greys with one hot pink, and the default theme is full colour (heat from blue through amber to red-pink, green memory, orange Ethernet).
+
+<img src="assets/tt-toplike-wafer-waffler.gif" alt="The Wafer Waffler on a simulated Blackhole board: one isometric board drawn in half-block cells, per-tile glow, a die flag reading BH2 with its power, and the camera cutting between corners as events happen" width="100%" />
+
+<img src="assets/tt-toplike-wafer-waffler.png" alt="A still from the Wafer Waffler: a p150 board in isometric view with a history panel at the top left and the command footer along the bottom" width="100%" />
+
+**What is real and what is estimated.** The per-tile glow is an estimate from chip activity, and the footer says so: `per-tile glow: estimate from chip load`. The view does not read per-tile NoC counters; that is a separate, later and experimental plan (`docs/superpowers/plans/2026-10-29-die-3d-tier1-counters.md`). Activity is each chip's power measured against that chip's own idle over the last day, up to its highest draw in the last ten minutes. A view opened while a job is already running has no idle to measure against, so a chip at a steady draw shows no activity until its power changes. These are real readings: chip power, temperature, GDDR temperature and PCIe traffic in and out (from the tt-kmd counters), plus Ethernet and harvest data when the backend provides them. The clouds behind the dies are decoration. Their drift follows PCIe traffic and their brightness follows chip load. The history panel (`/history`, top left) plots the last 60 seconds of each chip's power and the box's PCIe traffic as sparklines, and shows each chip's latest temperature. Those are measured values, one sample a second. Each sparkline cell is the mean of two or three samples. A power line is scaled to at least 5 W and a PCIe line to at least 10 MB/s, so a small wobble stays near the bottom of its line.
+
+**The camera.** It has six presets: the four corners at isometric pitch, top-down and low. Left alone, it turns to a new angle by itself (a spin) after 15 seconds with no cut. When something happens it cuts, and the cut says what happened. Chaos (a scramble) is for the chip: its activity rises, PCIe traffic passes 50 MB/s (it re-arms at 10 MB/s), or its temperature rises 4 degrees above its own level of the last minute; and for a process that opens or closes one of its devices (that needs tt-smi 6.0 or later, which lists the processes). A dissolve is for memory (the GDDR passes 65 C) and for the board (an Ethernet link comes up or goes down). Space cuts by hand, and a cut with no reason is a spin, which is the default `rotate`. `/transition chaos`, `dissolve` or `spin` pins one kind for every cut. The spin is an attempt: tiles keep their isometric shape while their positions rotate, so gaps can show mid-spin. With every board in view, an event on one chip (other than a PCIe burst alone) also opens that chip's board. On a board the view opened, an event on another board goes back to every board, and so do 20 seconds with no event on the board shown. A board you choose with `/board`, `/scene`, `[` or `]` stays until you change it.
+
+**The footer.** Its first row names the scene, the estimate label and the camera caption: the board corner nearest you (`view: front-right`, front being the PCIe edge), and `view: a -> b` during a cut. The second row lists each command with its state: `/cells`, `/bg` (black, or transparent so the terminal's own background shows through), `/autocut`, `/transition`, `/scene`, `/labels`, `/clouds`, `/history`. Each die has a flag: a pin on its rim, a pole, and a label such as `BH0 44W` on open space outside the board, never over the picture. When the terminal is narrower than about 175 columns the keys (`[ ] board · space cut · 3 leave`) drop from the footer and the legend (`l`) lists them. `!` explains the view and `?` lists every key.
+
+**Size.** The view draws at any size and gives up detail as the area shrinks. At 100 x 30 it draws the full layout; 150 x 42 or larger looks best. The history panel needs 120 x 37. Below that, in this order: the clouds and the history panel go first, then the footer drops to one row, then the flags go, and the scene shrinks. It shrinks to a four pixel tile (about 40 x 12 for one p150 board; a two-die board needs 51 columns), then to a two pixel tile, which a two-die board fits whole in 25 x 8 cells. A window smaller than that shows the middle of the whole scene, and the last row (or the footer, when there is one) says `clipped, needs 25x8`, the size that shows all of it. Below 16 x 6 the view shows a text summary, one line per chip with its power and PCIe traffic. The arrow keys move the window over a clipped scene (four cells a key, stopping at the scene's edge), and the footer says `arrows pan`. The status bar takes a row of the terminal, so the view area is one row shorter than the terminal.
+
+**The Insights inset.** On the Insights screen, a small Wafer Waffler scene appears at the right of the process table when the process area is at least 122 wide and 16 tall (the inset is 52 columns wide). It shows one board's scene, or every board when they fit in it. When they do not fit, it shows the busiest board (by the mean load of its chips) and changes boards only after another board has been the busiest for 10 seconds. `3` opens the full view. Limits: on a terminal where several rows of chip cards fill the screen, the process area is too short and the inset does not appear (four chips at 150 x 42 is an example). The inset's board change redraws at once, with no cut transition. A two-die board (p300) needs an inset at least 51 wide and 16 tall for its scene, so the 52 x 16 inset draws it. The text summary (one line per chip) appears in the full view below 16 x 6.
+
+**Limits.** It is an isometric illusion; there is no 3D scene behind it. Only Blackhole chips are drawn; other chips are named in the footer. The view redraws at most 20 times a second at rest and 30 during a cut, and the tile wave steps 12 times a second. With PCIe counters the wave follows the traffic: inbound data sends fronts from the connector edge toward the back of the die, outbound data sends them toward the connector, and a chip with no traffic keeps a sideways sweep.
 
 ### Gallery — recorded sessions
 

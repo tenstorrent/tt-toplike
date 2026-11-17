@@ -147,7 +147,9 @@ impl ModelStarfield {
         let mut lines: Vec<Line<'static>> = Vec::new();
 
         if self.width > 0 && self.height > 0 {
-            // Blank canvas; each cell is (char, color). Black background floor.
+            // Blank canvas; each cell is (char, foreground colour). A blank cell is a
+            // space, so its colour is never seen: the background is the frame's
+            // (`colors::canvas_bg`), which this view does not paint.
             let bg = colors::rgb(0, 0, 0);
             let mut canvas: Vec<Vec<(char, Color)>> =
                 vec![vec![(' ', bg); self.width]; self.height];

@@ -15,12 +15,15 @@
 //! Inspired by roguelike dungeons (NetHack, DCSS), where every character and color
 //! has meaning, and the dungeon is alive with activity.
 
+use crate::animation::arcade_bus::{ArcadeBusState, ArcadeFx, ChipFx};
+use crate::animation::castle_bus;
 use crate::animation::topology::BoardTopology;
 use crate::animation::{hsv_to_rgb, rgb_to_hsv, temp_to_hue, AdaptiveBaseline};
 use crate::backend::TelemetryBackend;
 use crate::ui::colors;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use tt_toplike_bus::{EntityKey, WorldRead};
 
 /// Particle type distinguishes different memory operations
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -227,6 +230,15 @@ pub struct MemoryCastle {
     /// Arcade sets this `false` so the composite view owns a single shared
     /// telemetry strip instead of each embedded section printing its own W/°C.
     chrome: bool,
+    // ── Signal bus (see `castle_bus`) ─────────────────────────────────────
+    /// What the bus puts on each chip's tower, from the last `set_bus`.
+    /// Empty until a world is given, and always empty when the castle is
+    /// embedded in the arcade (which reads the bus itself).
+    bus_fx: ArcadeFx,
+    /// What the bus reading remembers between updates.
+    bus_state: ArcadeBusState,
+    /// The bus time of the last `set_bus`, which the frame path draws at.
+    bus_now: u64,
 }
 
 /// Per-device column budget for the full castle rendering (existing look).
@@ -309,7 +321,41 @@ impl MemoryCastle {
             environment,
             board_topology: None,
             chrome: true,
+            bus_fx: ArcadeFx::default(),
+            bus_state: ArcadeBusState::default(),
+            bus_now: 0,
         }
+    }
+
+    /// Read the signal bus for this update (see `castle_bus`). `None` drops
+    /// what was read, and the next world is a first sight. Each device is
+    /// keyed by its PCI address and drawn in its position's tower.
+    pub fn set_bus(&mut self, world: Option<&dyn WorldRead>, backend: &dyn TelemetryBackend) {
+        match world {
+            Some(w) => {
+                let devices = backend.devices();
+                // The bus names a chip by its PCI address, never by position.
+                let chips: Vec<(usize, EntityKey)> = devices
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, d)| !d.bus_id.is_empty())
+                    .map(|(slot, d)| (slot, EntityKey::chip(&d.bus_id)))
+                    .collect();
+                let now = w.now_mono_ns();
+                self.bus_fx =
+                    ArcadeFx::from_world(w, &chips, devices.len(), now, &mut self.bus_state);
+                self.bus_now = now;
+            }
+            None => {
+                self.bus_fx = ArcadeFx::default();
+                self.bus_state = ArcadeBusState::default();
+            }
+        }
+    }
+
+    /// What the bus puts on the tower in position `slot`, if anything.
+    fn bus_chip(&self, slot: usize) -> Option<&ChipFx> {
+        self.bus_fx.chips.iter().find(|c| c.slot == slot)
     }
 
     /// Toggle per-device power/temp telemetry in the headers.  `true` = the
@@ -517,14 +563,14 @@ impl MemoryCastle {
                     spans.push(Span::styled(
                         p.get_char().to_string(),
                         Style::default()
-                            .bg(colors::rgb(0, 0, 0))
+                            .bg(colors::canvas_bg())
                             .fg(p.get_color())
                             .add_modifier(Modifier::BOLD),
                     ));
                 } else if let Some((trail_char, trail_color)) = trail_here {
                     spans.push(Span::styled(
                         trail_char.to_string(),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(trail_color),
+                        Style::default().bg(colors::canvas_bg()).fg(trail_color),
                     ));
                 } else if let Some((_, _, ch, hue)) = glyph_here {
                     // Glyphs were near-invisible (sat 0.4, val 0.3). Raise both and
@@ -533,7 +579,7 @@ impl MemoryCastle {
                         hsv_to_rgb((*hue + self.frame as f32 * 1.8) % 360.0, 0.9, 0.62);
                     spans.push(Span::styled(
                         ch.to_string(),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(glyph_color),
+                        Style::default().bg(colors::canvas_bg()).fg(glyph_color),
                     ));
                 } else {
                     // Background based on layer
@@ -546,6 +592,18 @@ impl MemoryCastle {
                         temp,
                     ));
                 }
+            }
+            // The bus on the single tower (the cells after the left padding).
+            if let Some(co) = self.bus_chip(0) {
+                castle_bus::draw_row(
+                    co,
+                    self.bus_now,
+                    row,
+                    canvas_width,
+                    canvas_height,
+                    &mut spans,
+                    1,
+                );
             }
 
             lines.push(Line::from(spans));
@@ -586,7 +644,7 @@ impl MemoryCastle {
             Span::styled(
                 "─".repeat(self.width.saturating_sub(2)),
                 Style::default()
-                    .bg(colors::rgb(0, 0, 0))
+                    .bg(colors::canvas_bg())
                     .fg(colors::rgb(100, 100, 120)),
             ),
         ]));
@@ -615,7 +673,7 @@ impl MemoryCastle {
                     let padding = board_col_w.saturating_sub(label.len());
                     board_label_spans.push(Span::styled(
                         format!("{}{}", label, " ".repeat(padding)),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(board_color),
+                        Style::default().bg(colors::canvas_bg()).fg(board_color),
                     ));
                 }
                 lines.push(Line::from(board_label_spans));
@@ -663,7 +721,7 @@ impl MemoryCastle {
                     Span::styled(
                         device_info,
                         Style::default()
-                            .bg(colors::rgb(0, 0, 0))
+                            .bg(colors::canvas_bg())
                             .fg(color)
                             .add_modifier(Modifier::BOLD),
                     ),
@@ -679,7 +737,7 @@ impl MemoryCastle {
             Span::styled(
                 "─".repeat(self.width.saturating_sub(2)),
                 Style::default()
-                    .bg(colors::rgb(0, 0, 0))
+                    .bg(colors::canvas_bg())
                     .fg(colors::rgb(100, 100, 120)),
             ),
         ]));
@@ -704,6 +762,7 @@ impl MemoryCastle {
                 let current_change = self.baseline.current_change(device.index, current);
 
                 // Render this device's column
+                let tower_start = spans.len();
                 for col in 0..col_width {
                     let global_col = x_offset + col;
 
@@ -739,7 +798,7 @@ impl MemoryCastle {
                             spans.push(Span::styled(
                                 particle_char.to_string(),
                                 Style::default()
-                                    .bg(colors::rgb(0, 0, 0))
+                                    .bg(colors::canvas_bg())
                                     .fg(particle_color)
                                     .add_modifier(Modifier::BOLD),
                             ));
@@ -767,7 +826,7 @@ impl MemoryCastle {
                                     );
                                     spans.push(Span::styled(
                                         "·",
-                                        Style::default().bg(colors::rgb(0, 0, 0)).fg(trail_color),
+                                        Style::default().bg(colors::canvas_bg()).fg(trail_color),
                                     ));
                                     found_particle = true;
                                     break;
@@ -802,7 +861,7 @@ impl MemoryCastle {
                                 let shifted_color = hsv_to_rgb(new_hue, hsv.1, hsv.2);
                                 spans.push(Span::styled(
                                     bg_span.content,
-                                    Style::default().bg(colors::rgb(0, 0, 0)).fg(shifted_color),
+                                    Style::default().bg(colors::canvas_bg()).fg(shifted_color),
                                 ));
                             } else {
                                 spans.push(bg_span);
@@ -811,6 +870,19 @@ impl MemoryCastle {
                             spans.push(bg_span);
                         }
                     }
+                }
+
+                // The bus on this device's tower.
+                if let Some(co) = self.bus_chip(dev_idx) {
+                    castle_bus::draw_row(
+                        co,
+                        self.bus_now,
+                        row,
+                        col_width,
+                        canvas_height,
+                        &mut spans,
+                        tower_start,
+                    );
                 }
 
                 // Column separator between adjacent chip columns.
@@ -834,7 +906,7 @@ impl MemoryCastle {
                         spans.push(Span::styled(
                             "║",
                             Style::default()
-                                .bg(colors::rgb(0, 0, 0))
+                                .bg(colors::canvas_bg())
                                 .fg(colors::rgb(200, 160, 60)),
                         ));
                     } else {
@@ -842,7 +914,7 @@ impl MemoryCastle {
                         spans.push(Span::styled(
                             "│",
                             Style::default()
-                                .bg(colors::rgb(0, 0, 0))
+                                .bg(colors::canvas_bg())
                                 .fg(colors::rgb(80, 80, 100)),
                         ));
                     }
@@ -861,7 +933,7 @@ impl MemoryCastle {
                 Span::styled(
                     "─".repeat(self.width.saturating_sub(2)),
                     Style::default()
-                        .bg(colors::rgb(0, 0, 0))
+                        .bg(colors::canvas_bg())
                         .fg(colors::rgb(100, 100, 120)),
                 ),
             ]));
@@ -874,7 +946,7 @@ impl MemoryCastle {
                 Span::styled(
                     footer_text,
                     Style::default()
-                        .bg(colors::rgb(0, 0, 0))
+                        .bg(colors::canvas_bg())
                         .fg(colors::rgb(160, 160, 160)),
                 ),
             ]));
@@ -917,7 +989,7 @@ impl MemoryCastle {
             Span::styled(
                 "─".repeat(self.width.saturating_sub(2)),
                 Style::default()
-                    .bg(colors::rgb(0, 0, 0))
+                    .bg(colors::canvas_bg())
                     .fg(colors::rgb(100, 100, 120)),
             ),
         ]));
@@ -943,7 +1015,7 @@ impl MemoryCastle {
                     let padding = board_col_w.saturating_sub(label.len());
                     board_label_spans.push(Span::styled(
                         format!("{}{}", label, " ".repeat(padding)),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(board_color),
+                        Style::default().bg(colors::canvas_bg()).fg(board_color),
                     ));
                 }
                 lines.push(Line::from(board_label_spans));
@@ -989,7 +1061,7 @@ impl MemoryCastle {
                     Span::styled(
                         device_info,
                         Style::default()
-                            .bg(colors::rgb(0, 0, 0))
+                            .bg(colors::canvas_bg())
                             .fg(color)
                             .add_modifier(Modifier::BOLD),
                     ),
@@ -1005,7 +1077,7 @@ impl MemoryCastle {
             Span::styled(
                 "─".repeat(self.width.saturating_sub(2)),
                 Style::default()
-                    .bg(colors::rgb(0, 0, 0))
+                    .bg(colors::canvas_bg())
                     .fg(colors::rgb(100, 100, 120)),
             ),
         ]));
@@ -1049,7 +1121,7 @@ impl MemoryCastle {
                             };
                             Span::styled(
                                 ch.to_string(),
-                                Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                                Style::default().bg(colors::canvas_bg()).fg(color),
                             )
                         })
                         .collect()
@@ -1061,7 +1133,7 @@ impl MemoryCastle {
                     let color = hsv_to_rgb(hue, 0.85, glow);
                     vec![Span::styled(
                         "▪".repeat(gates),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                        Style::default().bg(colors::canvas_bg()).fg(color),
                     )]
                 };
 
@@ -1109,6 +1181,7 @@ impl MemoryCastle {
                 let current_change = self.baseline.current_change(device.index, current);
 
                 // Render this device's column
+                let tower_start = spans.len();
                 for col in 0..col_width {
                     let global_col = x_offset + col;
 
@@ -1149,7 +1222,7 @@ impl MemoryCastle {
                             spans.push(Span::styled(
                                 particle_char.to_string(),
                                 Style::default()
-                                    .bg(colors::rgb(0, 0, 0))
+                                    .bg(colors::canvas_bg())
                                     .fg(particle_color)
                                     .add_modifier(Modifier::BOLD),
                             ));
@@ -1180,7 +1253,7 @@ impl MemoryCastle {
                                     );
                                     spans.push(Span::styled(
                                         "·",
-                                        Style::default().bg(colors::rgb(0, 0, 0)).fg(trail_color),
+                                        Style::default().bg(colors::canvas_bg()).fg(trail_color),
                                     ));
                                     found_particle = true;
                                     break;
@@ -1215,7 +1288,7 @@ impl MemoryCastle {
                                 let shifted_color = hsv_to_rgb(new_hue, hsv.1, hsv.2);
                                 spans.push(Span::styled(
                                     bg_span.content,
-                                    Style::default().bg(colors::rgb(0, 0, 0)).fg(shifted_color),
+                                    Style::default().bg(colors::canvas_bg()).fg(shifted_color),
                                 ));
                             } else {
                                 spans.push(bg_span);
@@ -1224,6 +1297,19 @@ impl MemoryCastle {
                             spans.push(bg_span);
                         }
                     }
+                }
+
+                // The bus on this device's tower.
+                if let Some(co) = self.bus_chip(dev_idx) {
+                    castle_bus::draw_row(
+                        co,
+                        self.bus_now,
+                        row,
+                        col_width,
+                        canvas_height,
+                        &mut spans,
+                        tower_start,
+                    );
                 }
 
                 // Column separator between adjacent chip towers — single
@@ -1246,14 +1332,14 @@ impl MemoryCastle {
                         spans.push(Span::styled(
                             "║",
                             Style::default()
-                                .bg(colors::rgb(0, 0, 0))
+                                .bg(colors::canvas_bg())
                                 .fg(colors::rgb(200, 160, 60)),
                         ));
                     } else {
                         spans.push(Span::styled(
                             "│",
                             Style::default()
-                                .bg(colors::rgb(0, 0, 0))
+                                .bg(colors::canvas_bg())
                                 .fg(colors::rgb(80, 80, 100)),
                         ));
                     }
@@ -1271,7 +1357,7 @@ impl MemoryCastle {
                 Span::styled(
                     "─".repeat(self.width.saturating_sub(2)),
                     Style::default()
-                        .bg(colors::rgb(0, 0, 0))
+                        .bg(colors::canvas_bg())
                         .fg(colors::rgb(100, 100, 120)),
                 ),
             ]));
@@ -1284,7 +1370,7 @@ impl MemoryCastle {
                 Span::styled(
                     footer_text,
                     Style::default()
-                        .bg(colors::rgb(0, 0, 0))
+                        .bg(colors::canvas_bg())
                         .fg(colors::rgb(160, 160, 160)),
                 ),
             ]));
@@ -1338,16 +1424,16 @@ impl MemoryCastle {
         };
 
         let sep_style = Style::default()
-            .bg(colors::rgb(0, 0, 0))
+            .bg(colors::canvas_bg())
             .fg(colors::rgb(100, 100, 120));
         let hdr_style = Style::default()
-            .bg(colors::rgb(0, 0, 0))
+            .bg(colors::canvas_bg())
             .fg(colors::rgb(220, 240, 255))
             .add_modifier(Modifier::BOLD);
         let col_sep = Span::styled(
             " │ ",
             Style::default()
-                .bg(colors::rgb(0, 0, 0))
+                .bg(colors::canvas_bg())
                 .fg(colors::rgb(80, 80, 100)),
         );
 
@@ -1398,14 +1484,15 @@ impl MemoryCastle {
                 // "BH0  ████████░░░░ 16.1W 43.2°C" — fixed-width so the bar
                 // that follows lines up down the column regardless of index
                 // digit count.
+                let cell_start = spans.len();
                 spans.push(Span::styled(
                     format!("{:<5}", device.short_label()),
-                    Style::default().bg(colors::rgb(0, 0, 0)).fg(idx_color),
+                    Style::default().bg(colors::canvas_bg()).fg(idx_color),
                 ));
                 spans.push(Span::styled(
                     bar,
                     Style::default()
-                        .bg(colors::rgb(0, 0, 0))
+                        .bg(colors::canvas_bg())
                         .fg(bar_color)
                         .add_modifier(Modifier::BOLD),
                 ));
@@ -1417,9 +1504,16 @@ impl MemoryCastle {
                     spans.push(Span::styled(
                         format!(" {:5.1}W {:5.1}°C", power, temp),
                         Style::default()
-                            .bg(colors::rgb(0, 0, 0))
+                            .bg(colors::canvas_bg())
                             .fg(colors::rgb(180, 180, 180)),
                     ));
+                }
+                // The bus on this chip's cell: the 12-column bar follows the
+                // label (5 columns, or the label's width when longer).
+                if let Some(co) = self.bus_chip(chip_idx) {
+                    let label_w = spans[cell_start].width();
+                    let bar_cols = label_w..label_w + 12;
+                    castle_bus::draw_cell(co, self.bus_now, bar_cols, &mut spans, cell_start);
                 }
 
                 // Column separator (not after the last column in a row)
@@ -1440,7 +1534,7 @@ impl MemoryCastle {
             Span::styled(
                 format!("{} chips total │ switch to normal view with 'v'", n),
                 Style::default()
-                    .bg(colors::rgb(0, 0, 0))
+                    .bg(colors::canvas_bg())
                     .fg(colors::rgb(140, 140, 140)),
             ),
         ]));
@@ -1474,14 +1568,14 @@ impl MemoryCastle {
                     let color = hsv_to_rgb(hue, 0.9, 0.45 + activity * 0.45);
                     Span::styled(
                         "║".to_string(),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                        Style::default().bg(colors::canvas_bg()).fg(color),
                     )
                 } else if row % 3 == 0 {
                     let hue = (200.0 + f * 0.7) % 360.0;
                     let color = hsv_to_rgb(hue, 0.75, 0.38);
                     Span::styled(
                         "═".to_string(),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                        Style::default().bg(colors::canvas_bg()).fg(color),
                     )
                 } else {
                     Span::raw(" ")
@@ -1496,14 +1590,14 @@ impl MemoryCastle {
                     let color = hsv_to_rgb(hue, 0.9, 0.5 + activity * 0.42);
                     Span::styled(
                         "│".to_string(),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                        Style::default().bg(colors::canvas_bg()).fg(color),
                     )
                 } else if row % 4 == 0 && col % 15 < 14 {
                     let hue = (f * 0.6 + 30.0) % 360.0;
                     let color = hsv_to_rgb(hue, 0.8, 0.38);
                     Span::styled(
                         "─".to_string(),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                        Style::default().bg(colors::canvas_bg()).fg(color),
                     )
                 } else {
                     Span::raw(" ")
@@ -1519,14 +1613,14 @@ impl MemoryCastle {
                     let color = hsv_to_rgb(hue, 0.9, 0.5 + activity * 0.42);
                     Span::styled(
                         "◇".to_string(),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                        Style::default().bg(colors::canvas_bg()).fg(color),
                     )
                 } else if col % 10 == 0 {
                     let hue = (130.0 + f * 0.7 + 15.0) % 360.0;
                     let color = hsv_to_rgb(hue, 0.75, 0.38);
                     Span::styled(
                         "│".to_string(),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                        Style::default().bg(colors::canvas_bg()).fg(color),
                     )
                 } else {
                     Span::raw(" ")
@@ -1553,7 +1647,7 @@ impl MemoryCastle {
                     };
                     Span::styled(
                         ch.to_string(),
-                        Style::default().bg(colors::rgb(0, 0, 0)).fg(color),
+                        Style::default().bg(colors::canvas_bg()).fg(color),
                     )
                 } else {
                     Span::raw(" ")
@@ -1588,7 +1682,7 @@ impl MemoryCastle {
         spans.push(Span::styled(
             format!("{} ", device.short_label()),
             Style::default()
-                .bg(colors::rgb(0, 0, 0))
+                .bg(colors::canvas_bg())
                 .fg(colors::rgb(180, 200, 255)),
         ));
 
@@ -1609,7 +1703,7 @@ impl MemoryCastle {
                 };
                 spans.push(Span::styled(
                     format!("🌡 {:5.1}°C ", temp),
-                    Style::default().bg(colors::rgb(0, 0, 0)).fg(temp_color),
+                    Style::default().bg(colors::canvas_bg()).fg(temp_color),
                 ));
 
                 spans.push(Span::raw("│ "));
@@ -1618,7 +1712,7 @@ impl MemoryCastle {
                 spans.push(Span::styled(
                     format!("⚡ {:5.1}W ", t.power_w()),
                     Style::default()
-                        .bg(colors::rgb(0, 0, 0))
+                        .bg(colors::canvas_bg())
                         .fg(colors::rgb(255, 220, 100)),
                 ));
 
@@ -1629,7 +1723,7 @@ impl MemoryCastle {
             spans.push(Span::styled(
                 format!("⚙ {:5.1}A ", t.current_a()),
                 Style::default()
-                    .bg(colors::rgb(0, 0, 0))
+                    .bg(colors::canvas_bg())
                     .fg(colors::rgb(100, 180, 255)),
             ));
         }
@@ -1645,7 +1739,7 @@ impl MemoryCastle {
             spans.push(Span::raw("│ ARC: "));
             spans.push(Span::styled(
                 if healthy { "●" } else { "○" },
-                Style::default().bg(colors::rgb(0, 0, 0)).fg(arc_color),
+                Style::default().bg(colors::canvas_bg()).fg(arc_color),
             ));
         }
 
@@ -1665,7 +1759,7 @@ impl MemoryCastle {
             Span::styled(
                 "─".repeat(100), // Simple, looks good at any width
                 Style::default()
-                    .bg(colors::rgb(0, 0, 0))
+                    .bg(colors::canvas_bg())
                     .fg(colors::rgb(80, 80, 100)),
             ),
         ])
@@ -1678,48 +1772,48 @@ impl MemoryCastle {
             Span::styled(
                 "Particles: ",
                 Style::default()
-                    .bg(colors::rgb(0, 0, 0))
+                    .bg(colors::canvas_bg())
                     .fg(colors::rgb(150, 150, 150)),
             ),
             Span::styled(
                 "○◉ ",
                 Style::default()
-                    .bg(colors::rgb(0, 0, 0))
+                    .bg(colors::canvas_bg())
                     .fg(colors::rgb(100, 200, 255)),
             ),
             Span::raw("Read │ "),
             Span::styled(
                 "□■ ",
                 Style::default()
-                    .bg(colors::rgb(0, 0, 0))
+                    .bg(colors::canvas_bg())
                     .fg(colors::rgb(255, 180, 100)),
             ),
             Span::raw("Write │ "),
             Span::styled(
                 "◇◆ ",
                 Style::default()
-                    .bg(colors::rgb(0, 0, 0))
+                    .bg(colors::canvas_bg())
                     .fg(colors::rgb(100, 255, 200)),
             ),
             Span::raw("CacheHit │ "),
             Span::styled(
                 "●⬤ ",
                 Style::default()
-                    .bg(colors::rgb(0, 0, 0))
+                    .bg(colors::canvas_bg())
                     .fg(colors::rgb(255, 100, 100)),
             ),
             Span::raw("Miss │ "),
             Span::styled(
                 "·•▪ ",
                 Style::default()
-                    .bg(colors::rgb(0, 0, 0))
+                    .bg(colors::canvas_bg())
                     .fg(colors::rgb(120, 120, 120)),
             ),
             Span::raw("Trails │ "),
             Span::styled(
                 "⚡※☼♦◊ ",
                 Style::default()
-                    .bg(colors::rgb(0, 0, 0))
+                    .bg(colors::canvas_bg())
                     .fg(colors::rgb(180, 150, 200)),
             ),
             Span::raw("Glyphs"),
@@ -2161,3 +2255,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "castle_bus_tests.rs"]
+mod bus_tests;

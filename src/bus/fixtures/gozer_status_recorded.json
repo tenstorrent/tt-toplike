@@ -1,0 +1,78 @@
+{
+  "chips": [
+    {
+      "bdf": "0000:01:00.0",
+      "board": "BOARD-SERIAL-1",
+      "card": "p300c",
+      "dev_index": 0,
+      "holder_containers": {
+        "1021747": "CONTAINER-PLACEHOLDER"
+      },
+      "overstayed": false,
+      "owner_dead": false,
+      "pid": 1017106,
+      "pids_holding": [
+        1021747
+      ],
+      "reason": "REASON-PLACEHOLDER",
+      "state": "HELD-FOREIGN",
+      "who": "WHO-PLACEHOLDER"
+    },
+    {
+      "bdf": "0000:02:00.0",
+      "board": "BOARD-SERIAL-1",
+      "card": "p300c",
+      "dev_index": 1,
+      "holder_containers": {
+        "1021747": "CONTAINER-PLACEHOLDER"
+      },
+      "overstayed": false,
+      "owner_dead": false,
+      "pid": 1017106,
+      "pids_holding": [
+        1021747
+      ],
+      "reason": "REASON-PLACEHOLDER",
+      "state": "HELD-FOREIGN",
+      "who": "WHO-PLACEHOLDER"
+    },
+    {
+      "bdf": "0000:03:00.0",
+      "board": "BOARD-SERIAL-2",
+      "card": "p300c",
+      "dev_index": 2,
+      "holder_containers": {
+        "1021747": "CONTAINER-PLACEHOLDER"
+      },
+      "overstayed": false,
+      "owner_dead": false,
+      "pid": 1017106,
+      "pids_holding": [
+        1021747
+      ],
+      "reason": "REASON-PLACEHOLDER",
+      "state": "HELD-FOREIGN",
+      "who": "WHO-PLACEHOLDER"
+    },
+    {
+      "bdf": "0000:04:00.0",
+      "board": "BOARD-SERIAL-2",
+      "card": "p300c",
+      "dev_index": 3,
+      "holder_containers": {
+        "1021747": "CONTAINER-PLACEHOLDER"
+      },
+      "overstayed": false,
+      "owner_dead": false,
+      "pid": 1017106,
+      "pids_holding": [
+        1021747
+      ],
+      "reason": "REASON-PLACEHOLDER",
+      "state": "HELD-FOREIGN",
+      "who": "WHO-PLACEHOLDER"
+    }
+  ],
+  "grain": "board",
+  "queue": []
+}

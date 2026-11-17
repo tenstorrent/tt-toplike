@@ -17,6 +17,385 @@ git tag                        # released versions
 Releases 0.11.1 through 0.13.9 are recorded only in `debian/changelog`; this
 list is a summary and is not kept for every release.
 
+### 0.19.0
+- Viz plugins. A full-screen view can now be added without touching the rest of the program, in
+  two ways. A Rust plugin is a folder under `src/viz/plugins/` that the build finds by itself. A
+  YAML (or JSON) plugin is one file in `viz/` or in `~/.config/tt-toplike/viz/`. The YAML tier has
+  seven widgets (gauge, sparkline, table, log, grid, heat strip and text), thresholds that recolour
+  them, and a JSON Schema for editors (`viz/schema/viz-v1.schema.json`).
+- The program checks the YAML folders every 2 seconds, so a saved edit shows up without a restart.
+  An edit that does not load keeps the last good version drawing, and `tt-toplike viz list` and the
+  log say why.
+- `--viz <id>` starts on a plugin view and switches it on for that run. `[viz] enable = ["id"]` in
+  `config.toml` adds views to the `v` cycle, and a `[viz.<id>]` table is handed to that plugin. The
+  cycle goes from the Wafer Waffler to each enabled plugin in id order, then to Insights. `/mode
+  <id>` and `/viz <id>` also switch. A plugin has its own legend (`l`), explanation (`!`) and help
+  (`?`) panels. A panic in a plugin turns that plugin off and the program goes on.
+- `tt-toplike viz new <name>` makes a Rust plugin from the example (in a checkout), `tt-toplike viz
+  new <name> --yaml` makes a YAML plugin, and `tt-toplike viz list` shows every view with its
+  source and status (`ok`, `hidden` or `failed`).
+- Three examples ship, all hidden until you ask for them: `example-pulse` and `game-of-life` (both
+  Rust, in the binary) and `thermal-board` (YAML, found when tt-toplike runs inside a checkout; an installed binary can make a
+  copy with `tt-toplike viz new <name> --yaml`). Ask with `--viz` or `[viz] enable`.
+- Limits: a plugin draws a full-screen view only. It cannot take keys of its own, add a panel to
+  the arcade layout, or add a signal, and YAML has no custom drawing. `AGENTS.md` has an "Add a viz"
+  recipe and `docs/viz-plugins.md` is the reference.
+- Nothing on the signal bus changed. The bus crate stays at 0.2.0 and the saga crate at 0.3.0.
+
+### 0.18.0
+- Saga heroes cross Ethernet links. Each portal on a floor's north edge is bound to its Ethernet
+  port, and a new bus event, `LinkPeer`, names the port at the other end of a link. A hero whose
+  model spans two chips, or whose link has just come up, walks to the portal and steps through it
+  into the floor of the chip at the other end. The crossing takes 3 ticks, and both tiles show it.
+  If the link drops on the way, the hero is thrown back out of the portal it left from.
+- Portals take the far floor's colour when the link is open, go dim when it is closed, and glow
+  while a hero crosses. A tile with no hero says so and keeps its map, and a tile can hold several
+  heroes. The chronicle tells each crossing on both floors, and a line built from estimated
+  readings (every `--mock` reading) ends in `~`. A tile that is not focused shows a held picture,
+  so a hero who has crossed away can show on it for up to 5 ticks.
+- On real hardware no backend writes `LinkPeer` yet, so the far side of a link is unknown and no
+  hero crosses. Only `--mock` (a ring of its own chips) and recorded logs carry it.
+- `--mock` with two or more chips now flaps one ring port per chip from time to time (dark for 8 to
+  12 seconds every 60 to 80 seconds, each chip at its own time), so a mock saga shows crossings.
+  The port's cage in the Wafer Waffler goes dark for those seconds.
+- When a model goes away, another ready model on the same link offers its crossing again. A
+  `LinkPeer` whose port number is not plain digits (`/+5`, `/05`), or that cables two ports of one
+  chip, is ignored. The `!` text and the `l` legend explain crossing and the `~` mark, and `y` on a
+  line caused by a live-mask reading says the chip changed which of its links are live.
+- The saga digest's encoding is now version 3, so `--saga-digest` prints a different number than
+  0.17 did for the same log. The bus crate is 0.2.0 and the saga crate is 0.3.0.
+
+### 0.17.0
+- Saga has a party: every chip's floor has its own hero, born with the world, and all of them quest
+  at the same time. With more than one chip the view shows every floor at once as a grid of tiles,
+  each following its hero, with a one-row HUD (floor tag, name, vitality, quest). `[` and `]` move
+  the focus from floor to floor, pages follow the focus, and `z` shows the focused floor alone. A
+  roster row lists every hero and says how many chips have no floor (a box with more than 32 chips
+  gets floors for the first 32).
+- The focused tile is drawn with its light, glow and trail; the other tiles are drawn calmer (one
+  colour, a still goal, a hero that hops a few cells at a time), each tile's window moves in steps,
+  and the chronicle's new lines arrive every two seconds. So 32 chips at 140x40 send the terminal
+  about 19 KB/s, inside the view's 20 KB/s budget.
+- One chronicle holds every floor's lines, each tagged with its floor (`F3`) in the floor's colour.
+  To keep it readable, one floor's quest lines are written per second; a hero not heard for 300
+  ticks goes first. A party's birth writes one line for the whole party.
+- A model's dungeon now spans every chip, with the model's sage on the floors of the chips it names.
+- A hero stays on its floor in 0.17.0; crossing came in 0.18.0.
+- One chip draws the same view and tells the same story as before. The saga digest's encoding is
+  now version 2 (floors and every hero's position), so `--saga-digest` prints a different number
+  than 0.16 did for the same log. The saga crate is 0.2.0.
+
+### 0.16.7
+- Fixes the wrong background colours in macOS Terminal.app over SSH (a Wafer Waffler of a different
+  colour from the rest of the screen, and other views). 0.16.2 let `COLORTERM=truecolor` turn on 24-bit
+  colour inside tmux. A tmux server keeps the `COLORTERM` of the session that first started it, so a
+  pane could claim truecolor in a terminal that cannot draw it. tmux is back to 256 colours, as before
+  0.16.2. New: `TT_TOPLIKE_COLOR=truecolor` or `256` settles it by hand and beats every guess, tmux
+  included.
+
+### 0.16.6
+- The status bar flags a stalled ARC. A chip whose firmware heartbeat reads 0 shows a red `ARC!` after
+  its readings (`BH0  66°  990M  80W ARC!`). With more than four chips the averaged column ends with
+  `ARC!×N`, N being how many chips stalled. A chip that reports no heartbeat is not flagged. The
+  arcade's roaming hero used to show this and was removed in 0.16.5.
+
+### 0.16.5
+- Arcade mode no longer has the `@` hero that moved over the whole screen, or its trail. It
+  distracted from the panels. The duel on the top row (the chip's `@` against the inference
+  snake, while a model serves) is unchanged.
+- The ring of `✦` round the hero for each request completed, and the hero's heartbeat from
+  tokens per second, went with it. A request completed still makes the duel's snake lunge.
+- The arcade no longer shows a faults register, an ARC heartbeat of 0 (the hero's `?`), an
+  undervolt (`%`, a busy Blackhole under 0.65 V) or a harvesting state (`( )`); it showed them
+  only through the hero's glyph. Throttling still desaturates the starfield, and harvested
+  Tensix columns and GDDR temperatures still show in Insights.
+
+### 0.16.4
+- Saga is an arcade panel. The `now-serving` layout shows it in place of defrag: the inference
+  server over the Wafer Waffler and Saga. The panel draws the Saga view's map with the same fog,
+  glow, trail and colours, under a one-row HUD (hero, vitality, quest), and adds a chronicle strip
+  from 60x12. Any `[[arcade.layouts]]` table can use it as `view = "saga"`; it needs 20x6. Before
+  the first world, or with `[saga] enabled = false`, it says so on one line. The `deck` layout's
+  description now says "every view but saga".
+
+### 0.16.3
+- Saga's `y` ("why") line is now a sentence. It used to print the raw cause
+  (`model:mock-llama · ModelReady · #379`); it now reads `why: this goes back to the model
+  mock-llama coming online (record 379)`, and says plainly when nothing set the hero's move off.
+
+### 0.16.2
+- tmux no longer forces 256 colours. `COLORTERM=truecolor` (or `24bit`) now turns on full colour
+  inside tmux too, as it does outside it. Without that variable every terminal, tmux included, still
+  gets 256 colours, so macOS Terminal.app over SSH keeps its safe behaviour. For full colour in tmux,
+  add `set -as terminal-features ',*:RGB'` to `~/.tmux.conf`.
+
+### 0.16.1
+- Saga has a new look. Walls are drawn as lines: thin inside a floor, double on its outer shell, with
+  solid rock left blank, so rooms and corridors stand out. The hero carries a light: the map shows what
+  it can see, keeps what it has seen at a low brightness, and leaves the rest dark until it is explored.
+  The memory starts over on a new world or floor. The hero glows and leaves a fading trail, the quest's
+  goal pulses and shows through the dark, and a sage pulses while the hero visits it. New glyphs: sage
+  `Ψ`, goal `◈`, vault `▣`, gate `⌂`, portal `◎`, door `▯`, exit `▼`, floor `·`, ruin `░`. Each biome
+  has its own colours from the brand palette, and a hot chip warms its floor's colour. The chronicle marks
+  each line's tone (`·` calm, `▲` tense, `★` triumphant), fades older lines and puts names in bold. The
+  status row has a `▰▱` vitality bar, how much of the floor is mapped, and the tick. The story is
+  unchanged: the saga digests are the same as in 0.16.0.
+
+### 0.16.0
+- The `v` cycle now ends at the Wafer Waffler (Die 3D) before it wraps to Insights; `3` still opens it directly.
+- Saga, phase 1: a view where a hero quests through a dungeon built from the machine's own signals.
+  Press `S` in any view, or start with `--mode saga`; `S` or `Esc` leaves. Each chip is a floor, and a
+  Blackhole floor follows the chip's tile grid. A model becoming ready, a reset, a model going away, a
+  training run or a quiet season ends a world, and the next one has a new maze. The chronicle tells what
+  happens, and `y` shows each line's cause. See `docs/saga.md`.
+- The same recorded log always tells the same saga. `--bus-inspect DIR --saga-digest` prints its digest,
+  so a recording and a replay of it can be compared. A live run, a replay of its recording in another TUI
+  (whatever keys that TUI's user presses) and the digest agree: the saga skips the `ViewChanged` records a
+  TUI publishes about itself and the gaps a replay host adds, and the season length is recorded in the
+  log header (`saga.season_ticks`) so every reader uses the recording host's season.
+- Each run starts with its own world: the seed takes every bit of the last 64 readings.
+- The saga's clock is a chip. If that chip stops sweeping for three backend updates (it went away, or `b`
+  switched the backend), the next chip to sweep takes over.
+- A TUI that reuses a `--bus-dir` or `--record` directory starts its saga at its own first record; the
+  earlier sessions in the directory are not replayed into the story.
+- `[saga]` in `config.toml`: `enabled`, `names = "real" | "generated"` and `season_minutes`. An unknown
+  `names` value is reported and hides names.
+- The bus snapshot reply carries every header tag in a new `tags` object (`docs/bus.md`).
+- The three saga digest goldens and the saga view's golden frames were re-pinned in the final fix wave:
+  `busy.jsonl` holds a `ViewChanged`, and every world seed changed with the new seed rule (`AGENTS.md`).
+- Monsters, treasure, fights and the `saga.*` bus events come in phase 2. Saga has not been run on real
+  hardware by a person yet.
+
+### 0.15.5
+- The backdrop applies only to the views that carry one of their own: the Inference view (scene), the
+  Training view (sky) and the Wafer Waffler (clouds). Each still takes any of the three kinds or off. Every
+  other view, the arcade among them, carries no backdrop: `w` and `/backdrop` there say "no backdrop on
+  this view" and change nothing.
+- The arcade draws nothing behind its panels, and its `c` key is gone. `now-serving` no longer turns on
+  clouds; its Wafer Waffler panel draws its own clouds as before.
+- `[arcade] cloudfield`, a layout's `backdrop` or `cloudfield`, `/arcade cloudfield`, a `[backdrop.views]`
+  entry for a view that takes none, and a `[backdrop] default` other than off are read and ignored, with a
+  note on the status line and in `--check-config`. None of them is an error.
+- `--check-config` prints `arcade starts with NAME: N rows`.
+
+### 0.15.4
+- Shared backdrop: any view can draw a signal-driven background (`scene`, `sky` or `clouds`) behind its
+  content. `w` cycles the current view's backdrop, `/backdrop` sets it, `[backdrop]` in `config.toml` sets
+  a default and a choice per view. The Inference view, the Training view and the Wafer Waffler keep their
+  own. See `docs/backdrop.md`.
+- Arcade layouts: `{` and `}` step through eight built-in layouts and your own `[[arcade.layouts]]`;
+  `--arcade-layout NAME`, `/arcade layout ...`. A layout can set the arcade's backdrop. See
+  `docs/arcade-layout.md`.
+- No arcade row ends in a right-side border character at any width. A vertical (`│ ┃ ║` and their dashed
+  and half forms), a right corner (`┐ ┘ ╗ ╝ ╮ ╯` and their heavy and mixed forms), a right-edge joint
+  (`┤ ┫ ╣` and the like), `▐`, `▕` or ASCII `|` in the last column is drawn as a space; nothing else
+  changes. 418 sizes of the default layout differ from 0.15.3, only in their last column.
+- Messages from the layout, backdrop and arcade keys go away when you leave the view.
+- Fix: switching layouts no longer flashes "no Tenstorrent device found" for one frame.
+- The backdrop's terminal traffic fell from 1.17 MB/s to 74 KB/s while a model serves (blank 200x60 view).
+- Limits: not run on real hardware, in a live terminal, or attached to a headless host.
+
+### 0.15.3
+- Die 3D is the Wafer Waffler (`/waffler`, `--mode waffler`; `/die3d` and `--mode die3d` still work).
+- Every explain, legend and help overlay is shorter and fits 80 columns without scrolling (help in 24
+  rows, legend and explain in 30). The Insights ECC paragraph shows on a 24-row terminal.
+- Arcade layout from the config file: `[[arcade.row]]` tables choose the panels (`starfield`, `castle`,
+  `flow`, `defrag`, `die3d`, `training`, `inference`) and their width weights (`width = 3` is triple
+  wide). A bad file keeps the default layout and the status line says why; `--check-config` lists every
+  problem. The default layout is unchanged at every size. `c` and `/arcade cloudfield on|off` switch on a
+  backdrop that shows while an inference service loads or serves. See `docs/arcade-layout.md`.
+- The config file is read only when it is a regular file of at most 256 KiB, and a read problem is reported.
+- Limits: not run on real hardware, in a live terminal, or attached to a headless host. The shared
+  backdrop and switching between arcade layouts are not in this release.
+
+### 0.15.2
+- Starfield, Memory Flow, Memory Castle, Defrag, Grid, the Insights chip panels and Training read the
+  signal bus, each in its own style: model bring-up that follows load progress, a hit or comet for each
+  completed request, tokens per second, ECC and reset flashes, and the `~` mark on estimated values. With
+  an empty world each draws what it drew before. Training can show a run seen on a headless host and a
+  model serving on the same chips. Defrag clears a chip's blocks when its model goes down.
+- `--rotate` and `R` visit Die 3D when the box has a Blackhole chip. The `v` cycle does not.
+- The arcade hero's `%` mark needs a Blackhole core voltage under 0.65 V and a clock above the 800 MHz
+  idle clock. The old 0.75 V floor is Blackhole's nominal voltage, so every idle chip showed `%`. Other
+  architectures keep the 0.75 V floor.
+- Tests that waited on the wall clock or raced a thread now use a fixed clock or no time bound.
+- Limits: not run on real hardware, in a live terminal, or attached to a headless host. The intake rules
+  exist in three copies (arcade, Die 3D, `bus_intake`). Explain text for Insights is cut off at 44 rows.
+
+### 0.15.1
+- Arcade reads the signal bus: a bring-up gauge that follows load progress, a hit for each completed
+  request, a hero pace that follows tokens per second, particles for sparks and kernel compiles, a
+  flash on a chip reset, and the duel using an attached host's serving stats. The mock backend's
+  values carry the `~` mark. With no bus signal the arcade draws what it drew before.
+- The `~` hivemind view reads the signal bus: a strip with a model flag and bring-up bar per local
+  chip, bus events in the feed (history dimmed), and a scanner that surges on each completed request
+  and follows tokens per second. On a bus this TUI hosts, it hides only the sparks and compiles the
+  sweeper itself published. The collectors still run only while `~` is open.
+- Cut rows in the `~` feed are one column shorter, so they no longer run a column past the pane.
+- Fix: after a late log lock moved the head forward, a socket subscriber could stall or skip
+  records. The in-memory window is cleared at the jump and a read behind it gets a Dropped error.
+- Limits: arcade and `~` have not run on real hardware or against an attached headless host. The
+  Die 3D, `i` and `~` frame-hash tests still read the global colour theme without the shared lock.
+
+### 0.15.0
+- The signal bus. Every source writes to one ordered log and every view reads it. The log keeps
+  samples, events, gaps and the provenance of each value (measured, derived, estimated or
+  decoration). A `--headless` host keeps 24 hours or 5 GB of log (`--bus-retain HOURS[,GB]`) in a
+  directory only the owner can read. A TUI keeps its bus in memory unless `--record DIR` or
+  `--bus-dir DIR` is given.
+- Replay and inspect: `--bus-inspect DIR` summarises a recording, and `--replay DIR --speed N`
+  plays it back through a headless host. Missing or unreadable segments show up as gaps.
+- The socket: a host serves its bus on a Unix socket (`--bus-socket PATH`) for snapshots, live
+  following and replay. A TUI on the same machine attaches to a live host with the same chips.
+  `--bus-attach SOCKET` attaches on request and `--no-bus-attach` turns the start-up probe off.
+- `--headless` runs the host with no screen, for systemd. It locks the log directory and the
+  socket, so two hosts cannot write one log. `--bus-dir DIR` sets the directory.
+  `--mock-workloads` makes a `--headless --mock` host also scan this box's real processes and
+  model servers and record them against the mock chips, so its log holds the names of the
+  processes that hold a Tenstorrent device or are inference servers, and the model names.
+- Sources: the chip backend, the inference monitor, training runs, hivemind, the process scan,
+  `--remote` scrapes and gozer leases. The gozer governor permits only what the lease list shows.
+  It can be up to 60 seconds stale after a failed refresh.
+- Secrets in command lines (tokens, keys, passwords, URL credentials) are replaced with
+  `<redacted>` before they reach the log. The matcher has known gaps, listed in `docs/bus.md`.
+- tt-station frames are built from the bus. The bytes are unchanged on the test fixture.
+- The no-TTY `--serve` loop now runs on the headless host. SIGTERM and SIGINT flush the bus and
+  exit 0; before, they killed the process. A `--remote` relay re-broadcasts the origin's frame
+  byte for byte. Nothing is sent until the first raw `tt-smi` frame exists.
+- Die 3D reads the bus: model flags, a bring-up fill that grows with load progress, pulses,
+  sparks and per-channel DRAM rows. The legend and explain text name them, and `~` marks
+  estimated values.
+- The `i` view reads an attached host's world, and marks a host that has disconnected.
+- Limits: not yet run on real hardware with the bus. Log volume is estimated from the code at roughly
+  1.7 to 3 GB a day on a 4-chip box (`docs/bus.md` section 4 has the numbers). The tile glow is still an estimate. The
+  per-tile counter sidecar is not included, because a live reader on a chip blocks gozer reset
+  and release. The order of DRAM rows within a side is not documented. Deferred review findings
+  are in `docs/bus.md` section 13.
+- A socket replay at speed 1 shortens pauses longer than 1 second to 1 second.
+- The new crate `tt-toplike-bus` is at 0.1.0. CI now runs its tests and clippy, and the
+  `tui_panic_hook` integration test.
+
+### 0.14.5
+- Die 3D: the arrow keys move the window over a clipped scene, stop at its edge, and do nothing
+  when the whole scene fits. The footer says "arrows pan" beside the clipped note.
+- Die 3D footer: the action keys stay with the state words down to about 107 columns. They used
+  to drop together with the `/command` names, at 172 columns.
+- The explain text said a process opening or closing a device dissolves; it cuts with chaos. It
+  now names the tt-smi 6.0 or later that supplies the processes.
+- `die3d/mod.rs` keeps its code (1,770 lines); its tests are in `die3d/tests.rs`.
+- CI and the release build use the `macos-15` runner (`macos-14` retires on 2 November 2026).
+
+### 0.14.4
+- Review fixes. The rotation does not count a `Down` service as running, and learns about a
+  training run from the background scan instead of walking `/proc` on the render thread.
+- A cut that starts while another is running starts from the camera on screen.
+- A chip's idle is the 10th percentile of each minute, and a reading of a watt or less is ignored,
+  so one glitch no longer sets the idle for a day.
+- Docs: the rotation text names Grid and Die 3D as left out, and the history panel text and the
+  spec status are current.
+
+### 0.14.3
+- Fix the Windows build (the rotation's inference peek used values that only exist on Linux).
+- The black background goes through the colour-support check again: a terminal without truecolor
+  (tmux, macOS Terminal.app over SSH) gets its own default background, not a truecolor fill.
+  0.13.25 to 0.14.2 sent a literal truecolor black everywhere.
+- One test pinned hashes taken in a truecolor terminal and failed without `COLORTERM`.
+
+### 0.14.2
+- The unattended rotation (`--rotate`, `R`) skips Training and the Inference Monitor unless
+  something is going: a training run, or a model server that is starting or running. It used to
+  visit them for 10 s each even when empty. Die 3D is not in the rotation.
+
+### 0.14.1
+- The Die 3D camera turns by itself after 15 s with no cut. It was 45 s, too long to ever see.
+- `/blocks` and `/braille` are shortcuts for `/cells blocks` and `/cells braille`; `/cells block`
+  works as well as `/cells blocks`.
+
+### 0.14.0
+- Die 3D settings are slash commands. `[` and `]` change board and Space cuts the camera; the
+  letter keys `m c C B T X L W H` are `/scene /cut /autocut /cells /bg /transition /labels /clouds
+  /history`, plus `/board`. `/help` lists them, in full inside the view.
+- `/theme` works in Die 3D: grayskull keeps the greys, the default theme is a new full-colour
+  palette.
+- Cuts are reasoned by what happened. The default, rotate, spins when nothing happened (Space, or
+  45 s with no cut). Chaos is for the chip (activity, PCIe burst, temperature rising 4 C above its
+  own level) and for a process opening or closing a device; a dissolve is for memory (GDDR at 65 C)
+  and the board (an Ethernet link changing). Shuffle is gone.
+- The cell style follows the hardware. `/cells auto` (the default) starts in braille, quarter
+  blocks or half blocks picked from what the hardware reports, and changes at a camera cut after
+  something happens, never within two minutes of the last change. `/cells blocks` changes between
+  the block forms only. Quarter blocks are new.
+
+### 0.13.25
+- Every screen has a solid black background by default, including the Die 3D view and its inset
+  on the Insights screen. The Die 3D view used to default to a transparent background, which
+  showed the terminal's own colour behind the scene. `TT_TOPLIKE_TRANSPARENT=1` draws on the
+  terminal's own background instead, and the `T` key in the Die 3D view still flips it. The
+  background is chosen in one place, and a test fails if a view paints a literal black.
+
+### 0.13.23
+- The Die 3D view keeps drawing the scene in a narrow window. Where the four pixel tile does not
+  fit (a two-die board needs 51 columns), the scene shrinks to a two pixel tile; a two-die board
+  fits whole in 25 x 8 cells. A smaller window shows the middle of the whole scene, and the last
+  row or the footer says `clipped, needs 25x8`. The text summary now starts below 16 x 6. The
+  Insights inset and the choice between every board and one board are unchanged.
+
+### 0.13.22
+- The Die 3D view draws below 100 x 30. The clouds and the history panel go first, then the
+  footer drops to one row, then the flags go, and the scene shrinks down to about 40 x 12. Below
+  that the view shows a text summary with one line per chip.
+- The Insights screen shows a small Die 3D inset beside the process table when the process
+  area is at least 122 wide and 16 tall. The inset is 52 columns wide. It shows one board's scene, or all boards when they
+  fit, or the busiest board (by the mean load of its chips, held for 10 s) otherwise. The inset redraws
+  at once on a board change, with no cut. `3` opens the full view. Measured in a release build at 52 x 16: 0.058 ms a frame for one p150 board and 0.058 ms
+  for eight p150 boards, and 0.110 ms for one two-die board (p300); the budget is 0.3 ms. About
+  27 cells change per frame for a p150 board and 53 for a two-die board. A two-die board needs an
+  inset at least 51 x 16 for its scene, so the 52 x 16 inset draws it. A full Insights frame at
+  200 x 50 went from 0.18 ms to 0.27 ms with the earlier 42-column inset; it was not re-measured.
+
+### 0.13.21
+- The tile wave in the Die 3D view follows the direction of PCIe traffic. The connector is on
+  the front edge of the die. Inbound data sends fronts from that edge toward the back, and
+  outbound data sends them from the back toward the connector. With both, the two fronts run
+  half a period apart. A heavier rate lights its front brighter. A chip with no traffic keeps
+  the old sideways sweep. Over a whole wave cycle the fronts repaint about 1.23 times the
+  cells the sweep did.
+
+### 0.13.20
+- Chip labels in the Die 3D view are now flags. Each die gets a pin on its rim, a one-cell
+  pole, and the name and power (`BH0 44W`) at the far end, on open space outside the board.
+  Text no longer lies over the picture. In a crowded scene a pole may cross a board to
+  reach open space. `L` turns the flags on and off.
+
+### 0.13.19
+- **New**: the Die 3D view (key `3`). Each Blackhole board is drawn in isometric
+  perspective with braille characters (`B` for half-block), in a Grayskull-style
+  palette. One board or all boards (`m`), `[` `]` to choose. Not part of the `v`
+  rotation; `3` or `Esc` leaves.
+- The per-tile glow is an estimate from chip load, and the footer says so. Per-tile NoC
+  counters are not read; they are a separate, experimental plan.
+- The camera cuts on a chip's activity rise (relative to its own idle over the last day)
+  or a PCIe burst (50 MB/s, re-arm at 10 MB/s). Cuts shuffle chaos, dissolve and spin
+  (`X`). The footer names the corner nearest the viewer.
+- Clouds (`W`) drift with PCIe traffic and brighten with chip load. They are decoration.
+  The history panel (`H`) plots the last 60 s of each chip's power and the PCIe traffic,
+  and shows each chip's latest temperature.
+- Switches: `B` braille or half-block, `T` transparent or black, `C` auto-cuts, `X`
+  transition, `m` scene, `L` labels, `W` clouds, `H` history. `c` cuts by hand.
+- At most 20 redraws a second at rest, 30 in a cut; changed cells per frame cut by more
+  than half.
+- Needs a 100 x 31 terminal (100 x 30 view area); the history panel needs 120 x 37.
+- **Fix**: a PCIe counter file that could not be read for one sample made the rate spike
+  when it came back (its whole value counted as one step). It now adds nothing until it
+  has been read twice in a row.
+
+### 0.13.18
+- **Fix**: PCIe bandwidth was 16x too low. A counter word is a 64-byte NoC flit, not
+  4 bytes (measured with a 256 MiB and a 1 GiB transfer on a Blackhole p300c).
+- **Fix**: the into-chip and out-of-chip directions were swapped. The counters sit on
+  the NoC side of the PCIe tile. The `mst_*` directions are inferred, not measured.
+- **Fix**: a 32-bit counter wrapping between samples no longer drops the sample.
+
 ### 0.13.17
 - **Fix**: review findings on the lanes and atmosphere. No false flares when stats drop
   out or lanes reorder, a fresh load clock after a reload, a forge that starts over

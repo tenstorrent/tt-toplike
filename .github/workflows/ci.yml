@@ -23,13 +23,30 @@ jobs:
 
       - name: Check formatting
         # Strict gate: the whole tree is fmt-clean, so any drift fails the build.
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Clippy (TUI, zero warnings)
         run: cargo clippy --locked --lib --bin tt-toplike-tui --features tui -- -D warnings
 
       - name: Run library tests
         run: cargo test --locked --lib --features tui
+
+      # An integration test (its own binary) because it sets the process-wide panic
+      # hook; the --lib step above does not run it.
+      - name: Run TUI panic hook test
+        run: cargo test --locked --test tui_panic_hook --features tui
+
+      - name: Clippy (signal bus crate, zero warnings)
+        run: cargo clippy --locked -p tt-toplike-bus -- -D warnings
+
+      - name: Test signal bus crate
+        run: cargo test --locked -p tt-toplike-bus
+
+      - name: Clippy (saga crate, zero warnings)
+        run: cargo clippy --locked -p tt-toplike-saga -- -D warnings
+
+      - name: Test saga crate
+        run: cargo test --locked -p tt-toplike-saga
 
       - name: Build TUI binary (zero warnings)
         run: cargo build --locked --bin tt-toplike-tui --features tui
@@ -59,6 +76,16 @@ jobs:
 
       - name: Run library tests
         run: cargo test --locked --lib --no-default-features --features tui,json-backend
+
+      # The bus crate builds on Windows too (its socket module is cfg(unix)). The
+      # root crate depends on it, so this also happens in the steps around it; the
+      # explicit check names the crate if it breaks.
+      - name: Check signal bus crate
+        run: cargo check --locked -p tt-toplike-bus
+
+      # The saga core is pure Rust with no platform code; it must build here too.
+      - name: Check saga crate
+        run: cargo check --locked -p tt-toplike-saga
 
       - name: Build TUI binary (zero warnings)
         run: cargo build --locked --bin tt-toplike-tui --no-default-features --features tui,json-backend
@@ -111,10 +138,10 @@ jobs:
   # ── macOS smoke (Apple-silicon host path) ───────────────────────────────────
   # Cheap PR insurance for the macOS-only code (the ANE power sampler via the
   # private IOReport framework, core-foundation interop). Runs the safe
-  # tui + json-backend feature set on Apple-silicon macos-14.
+  # tui + json-backend feature set on Apple-silicon macos-15.
   test-macos:
     name: Test (macOS)
-    runs-on: macos-14
+    runs-on: macos-15
 
     steps:
       - uses: actions/checkout@v4

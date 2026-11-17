@@ -26,15 +26,23 @@ fn tag_of(a: &Activity) -> (&'static str, &'static str) {
     }
 }
 
+/// The workload colours as RGB triples, before any theme remap: train
+/// amber, load purple, serve teal. Die 3D's bus overlay paints with the
+/// same ones (`die3d::overlay`), and stalled work uses `colors::error`.
+pub(crate) const TRAIN_RGB: [u8; 3] = [246, 188, 66];
+pub(crate) const LOAD_RGB: [u8; 3] = [180, 140, 230];
+pub(crate) const SERVE_RGB: [u8; 3] = [79, 209, 197];
+
 fn accent(a: &Activity) -> ratatui::style::Color {
     if a.stalled {
         return colors::error();
     }
-    match a.kind {
-        ActivityKind::Train => colors::rgb(246, 188, 66),
-        ActivityKind::Load => colors::rgb(180, 140, 230),
-        ActivityKind::Serve => colors::rgb(79, 209, 197),
-    }
+    let [r, g, b] = match a.kind {
+        ActivityKind::Train => TRAIN_RGB,
+        ActivityKind::Load => LOAD_RGB,
+        ActivityKind::Serve => SERVE_RGB,
+    };
+    colors::rgb(r, g, b)
 }
 
 /// One lane within `width` columns, or `None` when its tag and name do not fit.

@@ -716,6 +716,7 @@ fn run_bounded(mut cmd: Command) -> String {
 /// Run `docker <args>`, returning stdout as a lossy UTF-8 string — see
 /// [`run_bounded`] for the timeout/output-cap contract.
 pub(crate) fn docker(args: &[&str]) -> String {
+    crate::startup_log::phase("docker exec");
     let mut cmd = Command::new("docker");
     cmd.args(args);
     run_bounded(cmd)
@@ -729,6 +730,7 @@ fn run_local(args: &[&str]) -> String {
     let Some((program, rest)) = args.split_first() else {
         return String::new();
     };
+    crate::startup_log::phase("local exec");
     let mut cmd = Command::new(program);
     cmd.args(rest);
     run_bounded(cmd)

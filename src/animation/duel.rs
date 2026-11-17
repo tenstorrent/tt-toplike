@@ -3,9 +3,10 @@
 
 //! The hero ⚔ snake duel — a telemetry-true tug-of-war strip.
 //!
-//! When an inference server is *serving*, the Arcade's roguelike hero `@` (the
-//! silicon) and the serving snake (the model) meet on a single-row strip and
-//! duel. A `⚔` balance marker slides between them, driven by hardware headroom
+//! When an inference server is *serving*, a hero `@` (the silicon) and the
+//! serving snake (the model) meet on Arcade's Row 1 strip and duel. This `@`
+//! lives only in the strip; the roaming hero that once moved over the whole
+//! arcade was removed in 0.16.5. A `⚔` balance marker slides between them, driven by hardware headroom
 //! versus serving demand. Lunges fire on **real events only**:
 //!
 //! - the hero lunges on a real power spike (baseline deviation),
